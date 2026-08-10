@@ -24,13 +24,6 @@ import { Label } from "@/components/ui/label";
 import { RippleButton } from "@/components/ui/ripple";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   type AutoClaudeProfilePlan,
   assessAllClaudeProfiles,
   buildIsolationWayfernConfig,
@@ -47,6 +40,7 @@ import {
 } from "@/lib/claude-workflow";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
+import { resolveWayfernWebRtcMode } from "@/lib/wayfern-defaults";
 import type {
   BrowserProfile,
   BrowserReleaseTypes,
@@ -65,6 +59,19 @@ interface ClaudeWorkflowPanelProps {
   onCreateProfile: () => void;
   /** Optional: parent refresh after auto-create (events usually cover this). */
   onProfileCreated?: (profile: BrowserProfile) => void;
+}
+
+function proxyLabelFromInput(input: string): string | null {
+  try {
+    const fragment = new URL(input).hash.slice(1);
+    const label = decodeURIComponent(fragment)
+      .replace(/[\u0000-\u001f\u007f]/g, "")
+      .trim()
+      .slice(0, 80);
+    return label || null;
+  } catch {
+    return null;
+  }
 }
 
 function severityBadge(score: HealthSeverity) {
@@ -225,7 +232,8 @@ function QuickReportCard({
     typeof fp?.devicePixelRatio === "number" ? fp.devicePixelRatio : null;
   const screenW = typeof fp?.screenWidth === "number" ? fp.screenWidth : null;
   const screenH = typeof fp?.screenHeight === "number" ? fp.screenHeight : null;
-  const blockWebrtc = report.profile.wayfern_config?.block_webrtc === true;
+  const webRtcMode = resolveWayfernWebRtcMode(report.profile.wayfern_config);
+  const webRtcSafe = webRtcMode === "proxy" || webRtcMode === "off";
   const tzMismatch = result?.mismatches.includes("timezone") ?? false;
   const langMismatch = result?.mismatches.includes("language") ?? false;
 
@@ -298,7 +306,7 @@ function QuickReportCard({
           </dd>
           <dt className="text-muted-foreground">WebRTC</dt>
           <dd>
-            {blockWebrtc
+            {webRtcSafe
               ? t("claudeWorkflow.reportWebrtcBlocked")
               : t("claudeWorkflow.reportWebrtcOpen")}
           </dd>
@@ -394,7 +402,6 @@ export function ClaudeWorkflowPanel({
   const [bulkBusy, setBulkBusy] = useState(false);
   const [autoCreating, setAutoCreating] = useState(false);
   const [quickProxyInput, setQuickProxyInput] = useState("");
-  const [quickProxyType, setQuickProxyType] = useState("http");
   const [quickCreating, setQuickCreating] = useState(false);
   const [quickReport, setQuickReport] = useState<QuickReport | null>(null);
   const [reportBusy, setReportBusy] = useState(false);
@@ -667,7 +674,7 @@ export function ClaudeWorkflowPanel({
         const parts = first.line.split(":");
         if (parts.length === 4) {
           parsed = {
-            proxy_type: quickProxyType,
+            proxy_type: "socks5",
             host: parts[0],
             port: Number.parseInt(parts[1], 10),
             username: parts[2],
@@ -681,14 +688,17 @@ export function ClaudeWorkflowPanel({
         return;
       }
 
-      // Colon formats carry no scheme — honor the picked type. An explicit
-      // scheme:// in the paste wins over the picker.
-      const proxyType = text.includes("://")
-        ? parsed.proxy_type
-        : quickProxyType;
+      // Quick-create is deliberately SOCKS5-only. SOCKS5 is the browser's
+      // remote-DNS path; accepting HTTP here would make the safety guarantee
+      // of this one-click flow false.
+      const proxyType = text.includes("://") ? parsed.proxy_type : "socks5";
+      if (proxyType.toLowerCase() !== "socks5") {
+        showErrorToast(t("claudeWorkflow.quickSocksOnly"));
+        return;
+      }
 
       const existingNames = new Set(proxies.map((p) => p.name.toLowerCase()));
-      let proxyName = parsed.host;
+      let proxyName = proxyLabelFromInput(text) ?? parsed.host;
       let suffix = 2;
       while (existingNames.has(proxyName.toLowerCase())) {
         proxyName = `${parsed.host}-${suffix}`;
@@ -741,7 +751,6 @@ export function ClaudeWorkflowPanel({
     profiles,
     proxies,
     quickProxyInput,
-    quickProxyType,
     runConsistencyCheck,
     t,
   ]);
@@ -912,19 +921,7 @@ export function ClaudeWorkflowPanel({
                     autoComplete="off"
                     spellCheck={false}
                   />
-                  <Select
-                    value={quickProxyType}
-                    onValueChange={setQuickProxyType}
-                    disabled={quickCreating}
-                  >
-                    <SelectTrigger className="w-28">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="http">HTTP</SelectItem>
-                      <SelectItem value="socks5">SOCKS5</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Badge variant="outline">SOCKS5</Badge>
                   <RippleButton
                     disabled={quickCreating || !quickProxyInput.trim()}
                     onClick={() => {
@@ -939,6 +936,9 @@ export function ClaudeWorkflowPanel({
                     {t("claudeWorkflow.quickCta")}
                   </RippleButton>
                 </div>
+                <p className="text-xs text-muted-foreground">
+                  {t("claudeWorkflow.quickSocksOnly")}
+                </p>
                 {quickReport && (
                   <QuickReportCard
                     report={quickReport}

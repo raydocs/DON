@@ -362,6 +362,15 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     assert.ok(echo.userAgent.length > 20);
     assert.match(await cdp.evaluate("document.cookie"), /donut_e2e=browser-ok/);
 
+    const audit = await app.invoke("run_fingerprint_audit", {
+      profileId: profile.id,
+    });
+    assert.equal(audit.profile_id, profile.id);
+    assert.ok(audit.summary.total > 0);
+    assert.ok(Array.isArray(audit.items));
+    assert.ok(Array.isArray(audit.observations));
+    assert.equal(typeof audit.oopif.status, "string");
+
     const runningProfile = (await app.invoke("list_browser_profiles")).find(
       (item) => item.id === profile.id,
     );

@@ -45,9 +45,9 @@ interface ProxyFormDialogProps {
 
 const DEFAULT_FORM: ProxyFormData = {
   name: "",
-  proxy_type: "http",
+  proxy_type: "socks5",
   host: "",
-  port: 8080,
+  port: 1080,
   username: "",
   password: "",
   vless_uri: "",

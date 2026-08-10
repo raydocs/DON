@@ -12,6 +12,7 @@ import {
 import { useTranslation } from "react-i18next";
 import { GoPlus } from "react-icons/go";
 import { LuCheck, LuChevronsUpDown, LuLoaderCircle } from "react-icons/lu";
+import { KernelFreshnessBadge } from "@/components/kernel-freshness-badge";
 import { LoadingButton } from "@/components/loading-button";
 import { ProxyFormDialog } from "@/components/proxy-form-dialog";
 import { Badge } from "@/components/ui/badge";
@@ -266,6 +267,9 @@ export function CreateProfileDialog({
         if (loadingBrowserRef.current === browser) {
           const filtered: BrowserReleaseTypes = {};
           if (rawReleaseTypes.stable) filtered.stable = rawReleaseTypes.stable;
+          if (rawReleaseTypes.chrome_stable) {
+            filtered.chrome_stable = rawReleaseTypes.chrome_stable;
+          }
           setReleaseTypes(filtered);
           setReleaseTypesError(null);
         }
@@ -442,6 +446,13 @@ export function CreateProfileDialog({
     const resolvedProxyId = isVpnSelection ? undefined : selectedProxyId;
     const resolvedVpnId =
       isVpnSelection && selectedProxyId ? selectedProxyId.slice(4) : undefined;
+    const selectedProxy = resolvedProxyId
+      ? storedProxies.find((proxy) => proxy.id === resolvedProxyId)
+      : undefined;
+    const isClaudeNonSocksProxy =
+      claudeMode &&
+      Boolean(resolvedProxyId) &&
+      selectedProxy?.proxy_settings?.proxy_type?.toLowerCase() !== "socks5";
 
     const passwordToSet =
       enablePassword && !ephemeral && password.length >= PASSWORD_MIN_LEN
@@ -459,6 +470,11 @@ export function CreateProfileDialog({
         const effectiveCard =
           cardLabel.trim() || nextAutoCardLabel(existingProfiles);
         if (claudeMode) {
+          if (isClaudeNonSocksProxy) {
+            setWorkflowError(t("createProfile.proxy.socks5Required"));
+            setIsCreating(false);
+            return;
+          }
           const blockers = claudeCreateBlockers({
             name: profileName,
             proxyId: resolvedProxyId,
@@ -604,12 +620,31 @@ export function CreateProfileDialog({
 
   const isVpnSelection = selectedProxyId?.startsWith("vpn-") ?? false;
   const resolvedProxyIdForGate = isVpnSelection ? undefined : selectedProxyId;
+  const claudeProxyTypeInvalid = useMemo(() => {
+    if (!claudeMode || !resolvedProxyIdForGate) return false;
+    const proxy = storedProxies.find((candidate) => {
+      return candidate.id === resolvedProxyIdForGate;
+    });
+    return proxy?.proxy_settings?.proxy_type?.toLowerCase() !== "socks5";
+  }, [claudeMode, resolvedProxyIdForGate, storedProxies]);
+
+  const selectableProxies = useMemo(
+    () =>
+      claudeMode
+        ? storedProxies.filter(
+            (proxy) =>
+              proxy.proxy_settings?.proxy_type?.toLowerCase() === "socks5",
+          )
+        : storedProxies,
+    [claudeMode, storedProxies],
+  );
 
   const isCreateDisabled = useMemo(() => {
     if (!profileName.trim()) return true;
     if (!selectedBrowser) return true;
     if (isBrowserCurrentlyDownloading(selectedBrowser)) return true;
     if (!getCreatableVersion(selectedBrowser)) return true;
+    if (claudeProxyTypeInvalid) return true;
     if (claudeMode) {
       if (
         claudeCreateBlockers({
@@ -630,6 +665,7 @@ export function CreateProfileDialog({
     getCreatableVersion,
     claudeMode,
     resolvedProxyIdForGate,
+    claudeProxyTypeInvalid,
     existingProfiles,
     cardLabel,
   ]);
@@ -1063,13 +1099,25 @@ export function CreateProfileDialog({
                               !releaseTypesError &&
                               !isBrowserCurrentlyDownloading("wayfern") &&
                               getCreatableVersion("wayfern") && (
-                                <div className="rounded-md border p-3 text-sm text-muted-foreground">
-                                  ✓{" "}
-                                  {t("createProfile.version.available", {
-                                    browser: "Wayfern",
-                                    version:
-                                      getCreatableVersion("wayfern")?.version,
-                                  })}
+                                <div className="flex flex-wrap items-center gap-2 rounded-md border p-3 text-sm text-muted-foreground">
+                                  <span>
+                                    ✓{" "}
+                                    {t("createProfile.version.available", {
+                                      browser: "Wayfern",
+                                      version:
+                                        getCreatableVersion("wayfern")?.version,
+                                    })}
+                                  </span>
+                                  <KernelFreshnessBadge
+                                    installedVersion={
+                                      downloadedVersionsMap.wayfern?.[0]
+                                    }
+                                    wayfernVersion={releaseTypes?.stable}
+                                    chromeStableVersion={
+                                      releaseTypes?.chrome_stable
+                                    }
+                                    fingerprint={wayfernConfig.fingerprint}
+                                  />
                                 </div>
                               )}
                             {!isLoadingReleaseTypes &&
@@ -1239,7 +1287,14 @@ export function CreateProfileDialog({
                         {/* Proxy / VPN Selection - Always visible */}
                         <div className="space-y-3">
                           <div className="flex items-center justify-between">
-                            <Label>{t("createProfile.proxy.title")}</Label>
+                            <div>
+                              <Label>{t("createProfile.proxy.title")}</Label>
+                              {claudeMode && (
+                                <p className="mt-1 text-xs text-muted-foreground">
+                                  {t("createProfile.proxy.socks5Required")}
+                                </p>
+                              )}
+                            </div>
                             <RippleButton
                               size="sm"
                               variant="outline"
@@ -1252,7 +1307,8 @@ export function CreateProfileDialog({
                               {t("createProfile.proxy.addProxy")}
                             </RippleButton>
                           </div>
-                          {storedProxies.length > 0 || vpnConfigs.length > 0 ? (
+                          {selectableProxies.length > 0 ||
+                          vpnConfigs.length > 0 ? (
                             <Popover
                               open={proxyPopoverOpen}
                               onOpenChange={setProxyPopoverOpen}
@@ -1321,7 +1377,7 @@ export function CreateProfileDialog({
                                         />
                                         {t("common.labels.none")}
                                       </CommandItem>
-                                      {storedProxies.map((proxy) => {
+                                      {selectableProxies.map((proxy) => {
                                         const occ = proxyOccupancyLabel(
                                           proxy.id,
                                           proxyOccupancy,
@@ -1631,7 +1687,8 @@ export function CreateProfileDialog({
                               {t("createProfile.proxy.addProxy")}
                             </RippleButton>
                           </div>
-                          {storedProxies.length > 0 || vpnConfigs.length > 0 ? (
+                          {selectableProxies.length > 0 ||
+                          vpnConfigs.length > 0 ? (
                             <Popover
                               open={proxyPopoverOpen}
                               onOpenChange={setProxyPopoverOpen}
@@ -1700,7 +1757,7 @@ export function CreateProfileDialog({
                                         />
                                         {t("common.labels.none")}
                                       </CommandItem>
-                                      {storedProxies.map((proxy) => {
+                                      {selectableProxies.map((proxy) => {
                                         const occ = proxyOccupancyLabel(
                                           proxy.id,
                                           proxyOccupancy,

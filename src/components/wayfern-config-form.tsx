@@ -9,6 +9,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProBadge } from "@/components/ui/pro-badge";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import {
   Select,
   SelectContent,
@@ -18,6 +19,8 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import devicePresetCatalog from "@/lib/device-presets.json";
+import { resolveWayfernWebRtcMode } from "@/lib/wayfern-defaults";
 import type {
   WayfernConfig,
   WayfernFingerprintConfig,
@@ -77,6 +80,7 @@ export function WayfernConfigForm({
     useState<WayfernFingerprintConfig>({});
   const [currentOS] = useState<WayfernOS>(getCurrentOS);
   const [isGeneratingFingerprint, setIsGeneratingFingerprint] = useState(false);
+  const [hasWayfernToken, setHasWayfernToken] = useState<boolean | null>(null);
 
   const handleGenerateFingerprint = async () => {
     if (!profileVersion) return;
@@ -97,6 +101,23 @@ export function WayfernConfigForm({
   };
 
   const selectedOS = config.os || currentOS;
+  const selectedDevicePreset = devicePresetCatalog.presets.find(
+    (preset) => preset.id === config.device_preset,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+    void invoke<string | null>("cloud_get_wayfern_token")
+      .then((token) => {
+        if (!cancelled) setHasWayfernToken(Boolean(token));
+      })
+      .catch(() => {
+        if (!cancelled) setHasWayfernToken(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (isCreating && typeof window !== "undefined") {
@@ -169,6 +190,7 @@ export function WayfernConfigForm({
   };
 
   const isAutoLocationEnabled = config.geoip !== false;
+  const webRtcMode = resolveWayfernWebRtcMode(config);
 
   const handleAutoLocationToggle = (enabled: boolean) => {
     if (enabled) {
@@ -179,6 +201,120 @@ export function WayfernConfigForm({
   };
 
   const isEditingDisabled = isFingerprintEditingDisabled(config) || readOnly;
+
+  const renderWebRtcMode = (idPrefix: string) => (
+    <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+      <div>
+        <Label>{t("fingerprint.webrtcMode")}</Label>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("fingerprint.webrtcModeDescription")}
+        </p>
+      </div>
+      <RadioGroup
+        value={webRtcMode}
+        onValueChange={(value) => {
+          if (value === "proxy" || value === "off" || value === "real") {
+            onConfigChange("webrtc_mode", value);
+          }
+        }}
+        disabled={readOnly}
+        className="grid gap-3 @md:grid-cols-3"
+      >
+        <div className="flex items-start gap-2">
+          <RadioGroupItem value="proxy" id={`${idPrefix}-webrtc-mode-proxy`} />
+          <Label
+            htmlFor={`${idPrefix}-webrtc-mode-proxy`}
+            className="cursor-pointer"
+          >
+            {t("fingerprint.webrtcProxy")}
+          </Label>
+        </div>
+        <div className="flex items-start gap-2">
+          <RadioGroupItem value="off" id={`${idPrefix}-webrtc-mode-off`} />
+          <Label
+            htmlFor={`${idPrefix}-webrtc-mode-off`}
+            className="cursor-pointer"
+          >
+            {t("fingerprint.webrtcOff")}
+          </Label>
+        </div>
+        <div className="flex items-start gap-2">
+          <RadioGroupItem value="real" id={`${idPrefix}-webrtc-mode-real`} />
+          <Label
+            htmlFor={`${idPrefix}-webrtc-mode-real`}
+            className="cursor-pointer"
+          >
+            {t("fingerprint.webrtcReal")}
+          </Label>
+        </div>
+      </RadioGroup>
+    </div>
+  );
+
+  const renderDevicePresetPicker = (idPrefix: string) => (
+    <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+      <div>
+        <Label htmlFor={`${idPrefix}-device-preset`}>
+          {t("devicePresets.title")}
+        </Label>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {t("devicePresets.description")}
+        </p>
+      </div>
+      <Select
+        value={config.device_preset ?? "none"}
+        onValueChange={(value) => {
+          const preset = devicePresetCatalog.presets.find(
+            (candidate) => candidate.id === value,
+          );
+          onConfigChange("device_preset", value === "none" ? undefined : value);
+          if (preset) {
+            onConfigChange("os", preset.os as WayfernOS);
+            const dpr = preset.fingerprint.devicePixelRatio;
+            if (typeof dpr === "number") {
+              onConfigChange("expected_device_pixel_ratio", dpr);
+            }
+          }
+        }}
+        disabled={readOnly}
+      >
+        <SelectTrigger id={`${idPrefix}-device-preset`}>
+          <SelectValue placeholder={t("devicePresets.placeholder")} />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="none">{t("devicePresets.none")}</SelectItem>
+          {devicePresetCatalog.presets.map((preset) => {
+            const isCrossOs = preset.os !== currentOS;
+            const isDisabled = isCrossOs && !crossOsUnlocked;
+            return (
+              <SelectItem
+                key={preset.id}
+                value={preset.id}
+                disabled={isDisabled}
+              >
+                <span className="flex items-center gap-2">
+                  {t(preset.labelKey)}
+                  {isDisabled && <ProBadge />}
+                </span>
+              </SelectItem>
+            );
+          })}
+        </SelectContent>
+      </Select>
+      {selectedDevicePreset && (
+        <p className="text-sm text-muted-foreground">
+          {t(selectedDevicePreset.descriptionKey)}
+        </p>
+      )}
+      {selectedDevicePreset?.mobile && hasWayfernToken === false && (
+        <Alert className="border-warning/40 bg-warning/10">
+          <AlertDescription>
+            {t("devicePresets.mobileTokenWarning")}
+          </AlertDescription>
+        </Alert>
+      )}
+    </div>
+  );
 
   const renderAdvancedForm = () => (
     <div className="space-y-6">
@@ -235,6 +371,8 @@ export function WayfernConfigForm({
         )}
       </div>
 
+      {renderDevicePresetPicker("advanced")}
+
       {/* Randomize Fingerprint Option */}
       <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
         <div className="flex items-center gap-x-2">
@@ -269,6 +407,8 @@ export function WayfernConfigForm({
           </Label>
         </div>
       </div>
+
+      {renderWebRtcMode("advanced")}
 
       <div
         className={
@@ -564,6 +704,25 @@ export function WayfernConfigForm({
                   })}
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="screen-pixel-depth">
+                  {t("fingerprint.pixelDepth")}
+                </Label>
+                <Input
+                  id="screen-pixel-depth"
+                  type="number"
+                  value={fingerprintConfig.screenPixelDepth ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "screenPixelDepth",
+                      e.target.value ? parseInt(e.target.value, 10) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "24",
+                  })}
+                />
+              </div>
             </div>
           </div>
 
@@ -759,6 +918,314 @@ export function WayfernConfigForm({
             </div>
           </div>
 
+          {/* Browser Features */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.navigatorProperties")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-3">
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="cookie-enabled"
+                  checked={fingerprintConfig.cookieEnabled ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("cookieEnabled", checked === true);
+                  }}
+                />
+                <Label htmlFor="cookie-enabled">
+                  {t("fingerprint.cookieEnabled")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="webdriver"
+                  checked={fingerprintConfig.webdriver ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("webdriver", checked === true);
+                  }}
+                />
+                <Label htmlFor="webdriver">{t("fingerprint.webdriver")}</Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="pdf-viewer-enabled"
+                  checked={fingerprintConfig.pdfViewerEnabled ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig(
+                      "pdfViewerEnabled",
+                      checked === true,
+                    );
+                  }}
+                />
+                <Label htmlFor="pdf-viewer-enabled">
+                  {t("fingerprint.pdfViewerEnabled")}
+                </Label>
+              </div>
+            </div>
+          </div>
+
+          {/* Media Preferences */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.mediaPreferences")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2 @2xl:grid-cols-4">
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="prefers-reduced-motion"
+                  checked={fingerprintConfig.prefersReducedMotion ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig(
+                      "prefersReducedMotion",
+                      checked === true,
+                    );
+                  }}
+                />
+                <Label htmlFor="prefers-reduced-motion">
+                  {t("fingerprint.prefersReducedMotion")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="prefers-dark-mode"
+                  checked={fingerprintConfig.prefersDarkMode ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig(
+                      "prefersDarkMode",
+                      checked === true,
+                    );
+                  }}
+                />
+                <Label htmlFor="prefers-dark-mode">
+                  {t("fingerprint.prefersDarkMode")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="prefers-reduced-data"
+                  checked={fingerprintConfig.prefersReducedData ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig(
+                      "prefersReducedData",
+                      checked === true,
+                    );
+                  }}
+                />
+                <Label htmlFor="prefers-reduced-data">
+                  {t("fingerprint.prefersReducedData")}
+                </Label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="prefers-contrast">
+                  {t("fingerprint.prefersContrast")}
+                </Label>
+                <Input
+                  id="prefers-contrast"
+                  value={fingerprintConfig.prefersContrast ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "prefersContrast",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "more",
+                  })}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Color and HDR */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.colorAndHdr")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2 @2xl:grid-cols-4">
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="color-gamut-srgb"
+                  checked={fingerprintConfig.colorGamutSrgb ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("colorGamutSrgb", checked === true);
+                  }}
+                />
+                <Label htmlFor="color-gamut-srgb">
+                  {t("fingerprint.colorGamutSrgb")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="color-gamut-p3"
+                  checked={fingerprintConfig.colorGamutP3 ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("colorGamutP3", checked === true);
+                  }}
+                />
+                <Label htmlFor="color-gamut-p3">
+                  {t("fingerprint.colorGamutP3")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="color-gamut-rec2020"
+                  checked={fingerprintConfig.colorGamutRec2020 ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig(
+                      "colorGamutRec2020",
+                      checked === true,
+                    );
+                  }}
+                />
+                <Label htmlFor="color-gamut-rec2020">
+                  {t("fingerprint.colorGamutRec2020")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="hdr-support"
+                  checked={fingerprintConfig.hdrSupport ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("hdrSupport", checked === true);
+                  }}
+                />
+                <Label htmlFor="hdr-support">
+                  {t("fingerprint.hdrSupport")}
+                </Label>
+              </div>
+            </div>
+          </div>
+
+          {/* Storage Properties */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.storageProperties")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-3">
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="local-storage"
+                  checked={fingerprintConfig.localStorage ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("localStorage", checked === true);
+                  }}
+                />
+                <Label htmlFor="local-storage">
+                  {t("fingerprint.localStorage")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="session-storage"
+                  checked={fingerprintConfig.sessionStorage ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("sessionStorage", checked === true);
+                  }}
+                />
+                <Label htmlFor="session-storage">
+                  {t("fingerprint.sessionStorage")}
+                </Label>
+              </div>
+              <div className="flex items-center gap-x-2">
+                <Checkbox
+                  id="indexed-db"
+                  checked={fingerprintConfig.indexedDb ?? false}
+                  onCheckedChange={(checked) => {
+                    updateFingerprintConfig("indexedDb", checked === true);
+                  }}
+                />
+                <Label htmlFor="indexed-db">{t("fingerprint.indexedDb")}</Label>
+              </div>
+            </div>
+          </div>
+
+          {/* Network Information */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.networkProperties")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2 @2xl:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="connection-effective-type">
+                  {t("fingerprint.connectionEffectiveType")}
+                </Label>
+                <Input
+                  id="connection-effective-type"
+                  value={fingerprintConfig.connectionEffectiveType ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "connectionEffectiveType",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "4g",
+                  })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="connection-downlink">
+                  {t("fingerprint.connectionDownlink")}
+                </Label>
+                <Input
+                  id="connection-downlink"
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={fingerprintConfig.connectionDownlink ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "connectionDownlink",
+                      e.target.value ? parseFloat(e.target.value) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "10",
+                  })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="connection-rtt">
+                  {t("fingerprint.connectionRtt")}
+                </Label>
+                <Input
+                  id="connection-rtt"
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={fingerprintConfig.connectionRtt ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "connectionRtt",
+                      e.target.value ? parseFloat(e.target.value) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "40",
+                  })}
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Performance */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.performanceProperties")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="performance-memory">
+                  {t("fingerprint.performanceMemory")}
+                </Label>
+                <Input
+                  id="performance-memory"
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={fingerprintConfig.performanceMemory ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "performanceMemory",
+                      e.target.value ? parseFloat(e.target.value) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "1073741824",
+                  })}
+                />
+              </div>
+            </div>
+          </div>
+
           {/* Timezone and Geolocation */}
           <div className="space-y-3">
             <Label>{t("fingerprint.timezoneAndGeolocation")}</Label>
@@ -899,24 +1366,128 @@ export function WayfernConfigForm({
                   )}
                 />
               </div>
+              <div className="space-y-2">
+                <Label htmlFor="webgl-version">
+                  {t("fingerprint.webglVersion")}
+                </Label>
+                <Input
+                  id="webgl-version"
+                  value={fingerprintConfig.webglVersion ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webglVersion",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "WebGL 2.0",
+                  })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="webgl-shading-language-version">
+                  {t("fingerprint.webglShadingLanguageVersion")}
+                </Label>
+                <Input
+                  id="webgl-shading-language-version"
+                  value={fingerprintConfig.webglShadingLanguageVersion ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webglShadingLanguageVersion",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "WebGL GLSL ES 3.00",
+                  })}
+                />
+              </div>
             </div>
           </div>
 
           {/* WebGL Parameters (JSON) */}
           <div className="space-y-3">
             <Label>{t("fingerprint.webglParametersJson")}</Label>
-            <Textarea
-              value={fingerprintConfig.webglParameters ?? ""}
-              onChange={(e) => {
-                updateFingerprintConfig(
-                  "webglParameters",
-                  e.target.value || undefined,
-                );
-              }}
-              placeholder='{"7936": "Intel", "7937": "Intel(R) HD Graphics"}'
-              className="font-mono text-sm"
-              rows={4}
-            />
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="webgl-parameters">
+                  {t("fingerprint.webglParameters")}
+                </Label>
+                <Textarea
+                  id="webgl-parameters"
+                  value={fingerprintConfig.webglParameters ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webglParameters",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder='{"7936": "Intel", "7937": "Intel(R) HD Graphics"}'
+                  className="font-mono text-sm"
+                  rows={4}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="webgl2-parameters">
+                  {t("fingerprint.webgl2Parameters")}
+                </Label>
+                <Textarea
+                  id="webgl2-parameters"
+                  value={fingerprintConfig.webgl2Parameters ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webgl2Parameters",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.webgl2Parameters"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={4}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="webgl-shader-precision-formats">
+                  {t("fingerprint.webglShaderPrecisionFormats")}
+                </Label>
+                <Textarea
+                  id="webgl-shader-precision-formats"
+                  value={fingerprintConfig.webglShaderPrecisionFormats ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webglShaderPrecisionFormats",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.webglShaderPrecisionFormats"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={4}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="webgl2-shader-precision-formats">
+                  {t("fingerprint.webgl2ShaderPrecisionFormats")}
+                </Label>
+                <Textarea
+                  id="webgl2-shader-precision-formats"
+                  value={fingerprintConfig.webgl2ShaderPrecisionFormats ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "webgl2ShaderPrecisionFormats",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.webgl2ShaderPrecisionFormats"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={4}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Canvas Noise Seed */}
@@ -955,6 +1526,69 @@ export function WayfernConfigForm({
               className="font-mono text-sm"
               rows={3}
             />
+          </div>
+
+          {/* Browser Collections (JSON) */}
+          <div className="space-y-3">
+            <Label>{t("fingerprint.browserCollections")}</Label>
+            <div className="grid grid-cols-1 gap-4 @md:grid-cols-2 @2xl:grid-cols-3">
+              <div className="space-y-2">
+                <Label htmlFor="plugins">{t("fingerprint.pluginsJson")}</Label>
+                <Textarea
+                  id="plugins"
+                  value={fingerprintConfig.plugins ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "plugins",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.pluginsJson"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={3}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="mime-types">
+                  {t("fingerprint.mimeTypesJson")}
+                </Label>
+                <Textarea
+                  id="mime-types"
+                  value={fingerprintConfig.mimeTypes ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "mimeTypes",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.mimeTypesJson"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={3}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="voices">{t("fingerprint.voicesJson")}</Label>
+                <Textarea
+                  id="voices"
+                  value={fingerprintConfig.voices ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "voices",
+                      e.target.value || undefined,
+                    );
+                  }}
+                  placeholder={t("fingerprint.enterAsJson", {
+                    title: t("fingerprint.voicesJson"),
+                  })}
+                  className="font-mono text-sm"
+                  rows={3}
+                />
+              </div>
+            </div>
           </div>
 
           {/* Audio */}
@@ -1012,7 +1646,7 @@ export function WayfernConfigForm({
                     onCheckedChange={(checked) => {
                       updateFingerprintConfig(
                         "batteryCharging",
-                        checked || undefined,
+                        checked === true,
                       );
                     }}
                   />
@@ -1040,6 +1674,46 @@ export function WayfernConfigForm({
                   }}
                   placeholder={t("common.placeholders.example", {
                     value: "0.85",
+                  })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="battery-charging-time">
+                  {t("fingerprint.chargingTime")}
+                </Label>
+                <Input
+                  id="battery-charging-time"
+                  type="number"
+                  min="0"
+                  value={fingerprintConfig.batteryChargingTime ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "batteryChargingTime",
+                      e.target.value ? parseInt(e.target.value, 10) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "3600",
+                  })}
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="battery-discharging-time">
+                  {t("fingerprint.dischargingTime")}
+                </Label>
+                <Input
+                  id="battery-discharging-time"
+                  type="number"
+                  min="0"
+                  value={fingerprintConfig.batteryDischargingTime ?? ""}
+                  onChange={(e) => {
+                    updateFingerprintConfig(
+                      "batteryDischargingTime",
+                      e.target.value ? parseInt(e.target.value, 10) : undefined,
+                    );
+                  }}
+                  placeholder={t("common.placeholders.example", {
+                    value: "7200",
                   })}
                 />
               </div>
@@ -1188,6 +1862,8 @@ export function WayfernConfigForm({
               )}
             </div>
 
+            {renderDevicePresetPicker("automatic")}
+
             {/* Randomize Fingerprint Option */}
             <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
               <div className="flex items-center gap-x-2">
@@ -1225,6 +1901,8 @@ export function WayfernConfigForm({
                 </Label>
               </div>
             </div>
+
+            {renderWebRtcMode("automatic")}
 
             {/* Screen Resolution */}
             <div

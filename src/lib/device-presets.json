@@ -1,0 +1,231 @@
+{
+  "version": 1,
+  "presets": [
+    {
+      "id": "windows-11-chrome-nvidia",
+      "labelKey": "devicePresets.windows11ChromeNvidia",
+      "descriptionKey": "devicePresets.windows11ChromeNvidiaDescription",
+      "os": "windows",
+      "mobile": false,
+      "wayfernTokenRequired": false,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "platform": "Win32",
+        "platformVersion": "10.0.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 0,
+        "screenWidth": 1920,
+        "screenHeight": 1080,
+        "devicePixelRatio": 1,
+        "webglRenderer": "ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 Direct3D11 vs_5_0 ps_5_0)",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["Win32"],
+        "userAgentTokens": ["Windows NT 10.0", "Win64", "x64"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 0,
+        "maxTouchPoints": 0,
+        "orientation": "landscape",
+        "minDpr": 1,
+        "maxDpr": 2,
+        "gpuTokens": ["NVIDIA", "ANGLE", "Direct3D"]
+      }
+    },
+    {
+      "id": "macos-sonoma-chrome-apple-m",
+      "labelKey": "devicePresets.macosSonomaChromeAppleM",
+      "descriptionKey": "devicePresets.macosSonomaChromeAppleMDescription",
+      "os": "macos",
+      "mobile": false,
+      "wayfernTokenRequired": false,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        "platform": "MacIntel",
+        "platformVersion": "14.5.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 0,
+        "screenWidth": 1800,
+        "screenHeight": 1169,
+        "devicePixelRatio": 2,
+        "webglRenderer": "ANGLE (Apple, Apple M3 Pro, Metal)",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["MacIntel"],
+        "userAgentTokens": ["Macintosh", "Mac OS X"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 0,
+        "maxTouchPoints": 0,
+        "orientation": "landscape",
+        "minDpr": 1.5,
+        "maxDpr": 2.5,
+        "gpuTokens": ["Apple", "Metal", "M3"]
+      }
+    },
+    {
+      "id": "iphone-15-pro",
+      "labelKey": "devicePresets.iphone15Pro",
+      "descriptionKey": "devicePresets.iphone15ProDescription",
+      "os": "ios",
+      "mobile": true,
+      "wayfernTokenRequired": true,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/128.0.0.0 Mobile/15E148 Safari/604.1",
+        "platform": "iPhone",
+        "platformVersion": "17.5.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 5,
+        "screenWidth": 393,
+        "screenHeight": 852,
+        "devicePixelRatio": 3,
+        "webglRenderer": "Apple A17 Pro GPU, Metal",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["iPhone"],
+        "userAgentTokens": ["iPhone", "iPhone OS", "CriOS", "Mobile"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 1,
+        "orientation": "portrait",
+        "minDpr": 2,
+        "maxDpr": 3,
+        "gpuTokens": ["Apple", "A17", "Metal"]
+      }
+    },
+    {
+      "id": "iphone-16-pro",
+      "labelKey": "devicePresets.iphone16Pro",
+      "descriptionKey": "devicePresets.iphone16ProDescription",
+      "os": "ios",
+      "mobile": true,
+      "wayfernTokenRequired": true,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/128.0.0.0 Mobile/15E148 Safari/604.1",
+        "platform": "iPhone",
+        "platformVersion": "18.0.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 5,
+        "screenWidth": 402,
+        "screenHeight": 874,
+        "devicePixelRatio": 3,
+        "webglRenderer": "Apple A18 Pro GPU, Metal",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["iPhone"],
+        "userAgentTokens": ["iPhone", "iPhone OS", "CriOS", "Mobile"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 1,
+        "orientation": "portrait",
+        "minDpr": 2,
+        "maxDpr": 3,
+        "gpuTokens": ["Apple", "A18", "Metal"]
+      }
+    },
+    {
+      "id": "pixel-9",
+      "labelKey": "devicePresets.pixel9",
+      "descriptionKey": "devicePresets.pixel9Description",
+      "os": "android",
+      "mobile": true,
+      "wayfernTokenRequired": true,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (Linux; Android 14; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+        "platform": "Linux armv81",
+        "platformVersion": "14.0.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 5,
+        "screenWidth": 412,
+        "screenHeight": 915,
+        "devicePixelRatio": 2.625,
+        "webglRenderer": "ANGLE (Google, Vulkan 1.3.0, Mali-G715)",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["Linux armv81", "Linux armv8l"],
+        "userAgentTokens": ["Linux", "Android", "Pixel 9", "Mobile"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 1,
+        "orientation": "portrait",
+        "minDpr": 2,
+        "maxDpr": 3,
+        "gpuTokens": ["Mali", "ANGLE", "Vulkan"]
+      }
+    },
+    {
+      "id": "galaxy-s24",
+      "labelKey": "devicePresets.galaxyS24",
+      "descriptionKey": "devicePresets.galaxyS24Description",
+      "os": "android",
+      "mobile": true,
+      "wayfernTokenRequired": true,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+        "platform": "Linux armv81",
+        "platformVersion": "14.0.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 5,
+        "screenWidth": 360,
+        "screenHeight": 780,
+        "devicePixelRatio": 3,
+        "webglRenderer": "ANGLE (Qualcomm, Adreno (TM) 750, Vulkan 1.3)",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["Linux armv81", "Linux armv8l"],
+        "userAgentTokens": ["Linux", "Android", "SM-S921", "Mobile"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 1,
+        "orientation": "portrait",
+        "minDpr": 2,
+        "maxDpr": 3,
+        "gpuTokens": ["Adreno", "ANGLE", "Vulkan"]
+      }
+    },
+    {
+      "id": "galaxy-s25",
+      "labelKey": "devicePresets.galaxyS25",
+      "descriptionKey": "devicePresets.galaxyS25Description",
+      "os": "android",
+      "mobile": true,
+      "wayfernTokenRequired": true,
+      "fingerprint": {
+        "userAgent": "Mozilla/5.0 (Linux; Android 15; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+        "platform": "Linux armv81",
+        "platformVersion": "15.0.0",
+        "brand": "Google Chrome",
+        "brandVersion": "128",
+        "maxTouchPoints": 5,
+        "screenWidth": 360,
+        "screenHeight": 780,
+        "devicePixelRatio": 3,
+        "webglRenderer": "ANGLE (Qualcomm, Adreno (TM) 830, Vulkan 1.3)",
+        "language": "en-US",
+        "languages": ["en-US", "en"]
+      },
+      "constraints": {
+        "platformValues": ["Linux armv81", "Linux armv8l"],
+        "userAgentTokens": ["Linux", "Android", "SM-S931", "Mobile"],
+        "brandTokens": ["Google Chrome"],
+        "minTouchPoints": 1,
+        "orientation": "portrait",
+        "minDpr": 2,
+        "maxDpr": 3,
+        "gpuTokens": ["Adreno", "ANGLE", "Vulkan"]
+      }
+    }
+  ]
+}

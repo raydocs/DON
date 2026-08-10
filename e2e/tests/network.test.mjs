@@ -347,6 +347,38 @@ async function runProfile(_app, base, token, profileId, url) {
   return { launched: launched.value, cdp };
 }
 
+async function collectWebRtcCandidates(cdp) {
+  return cdp.evaluate(`(async () => {
+    const peer = new RTCPeerConnection();
+    const candidates = [];
+    let finish;
+    const complete = new Promise((resolve) => {
+      finish = resolve;
+    });
+    const timeout = setTimeout(finish, 5_000);
+    peer.onicecandidate = (event) => {
+      if (event.candidate) {
+        candidates.push(event.candidate.candidate);
+      } else {
+        finish();
+      }
+    };
+    peer.createDataChannel("donut-e2e");
+    await peer.setLocalDescription(await peer.createOffer());
+    await complete;
+    clearTimeout(timeout);
+    peer.close();
+    return candidates;
+  })()`);
+}
+
+function literalHostCandidates(candidates) {
+  return candidates.filter((candidate) => {
+    const fields = candidate.trim().split(/\s+/);
+    return fields[6] === "typ" && fields[7] === "host" && isIP(fields[4]);
+  });
+}
+
 async function stopProfile(app, base, token, profileId, cdp) {
   cdp.close();
   const stopped = await request(`${base}/v1/profiles/${profileId}/kill`, {
@@ -805,6 +837,7 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
     assert.ok(profile);
     assert.equal(profile.version, prepared.version);
     assert.equal(profile.group_id, group.id);
+    assert.equal(profile.wayfern_config?.webrtc_mode, "proxy");
     await assignExtensionGroupThroughUi(
       app,
       profile.name,
@@ -881,6 +914,12 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
       { timeoutMs: 30_000, description: "Wayfern residential proxy exit IP" },
     );
     assert.ok(isIP(browserExitIp));
+    const iceCandidates = await collectWebRtcCandidates(activeCdp);
+    assert.deepEqual(
+      literalHostCandidates(iceCandidates),
+      [],
+      `Proxy WebRTC emitted a literal host IP: ${JSON.stringify(iceCandidates)}`,
+    );
     await stopProfile(app, base, saved.api_token, profile.id, activeCdp);
     activeCdp = null;
     await assertProxyWorkerLogsRedacted(app, [httpSettings, socksSettings]);

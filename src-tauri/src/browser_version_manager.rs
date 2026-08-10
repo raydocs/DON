@@ -18,6 +18,8 @@ pub struct BrowserVersionsResult {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BrowserReleaseTypes {
   pub stable: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub chrome_stable: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -118,6 +120,11 @@ impl BrowserVersionManager {
       return Err(format!("Unsupported browser: {browser}").into());
     }
 
+    let chrome_stable = self
+      .api_client
+      .fetch_chrome_stable_version_with_caching(false)
+      .await;
+
     // Only trust an unexpired cache. A stale entry can point at a version that
     // is no longer published — the downloader rejects such requests, so serving
     // it here would make every download started from this list fail.
@@ -125,6 +132,7 @@ impl BrowserVersionManager {
       if let Some(cached_versions) = self.get_cached_browser_versions_detailed(browser) {
         return Ok(BrowserReleaseTypes {
           stable: cached_versions.first().map(|v| v.version.clone()),
+          chrome_stable: chrome_stable.clone(),
         });
       }
     }
@@ -134,10 +142,12 @@ impl BrowserVersionManager {
     match self.fetch_browser_versions_detailed(browser, false).await {
       Ok(detailed_versions) => Ok(BrowserReleaseTypes {
         stable: detailed_versions.first().map(|v| v.version.clone()),
+        chrome_stable: chrome_stable.clone(),
       }),
       Err(e) => match self.get_cached_browser_versions_detailed(browser) {
         Some(cached_versions) => Ok(BrowserReleaseTypes {
           stable: cached_versions.first().map(|v| v.version.clone()),
+          chrome_stable,
         }),
         None => Err(e),
       },

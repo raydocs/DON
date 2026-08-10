@@ -1190,6 +1190,7 @@ impl ProxyManager {
       proxy_settings.clone()
     };
     let upstream_url = Self::build_proxy_url(&effective_proxy_settings);
+    let probe_url = Self::build_probe_proxy_url(&effective_proxy_settings);
 
     // Try process-based check first (identical to browser launch path).
     // If the proxy worker fails to start (e.g. Gatekeeper, antivirus, signing
@@ -1235,7 +1236,7 @@ impl ProxyManager {
             "Proxy worker failed to start ({}), falling back to direct check",
             err_msg
           );
-          ip_utils::fetch_public_ip(Some(&upstream_url)).await
+          ip_utils::fetch_public_ip(Some(&probe_url)).await
         }
       }
     };
@@ -1470,7 +1471,7 @@ impl ProxyManager {
     // Check if there's auth (contains @)
     if let Some(at_pos) = rest.rfind('@') {
       let auth = &rest[..at_pos];
-      let host_port = &rest[at_pos + 1..];
+      let host_port = rest[at_pos + 1..].split('#').next().unwrap_or_default();
 
       // Parse auth (user:pass)
       let (username, password) = if let Some(colon_pos) = auth.find(':') {
@@ -1501,9 +1502,10 @@ impl ProxyManager {
       }
     } else {
       // No auth, just host:port
-      if let Some(colon_pos) = rest.rfind(':') {
-        let host = &rest[..colon_pos];
-        if let Ok(port) = rest[colon_pos + 1..].parse::<u16>() {
+      let rest_without_fragment = rest.split('#').next().unwrap_or_default();
+      if let Some(colon_pos) = rest_without_fragment.rfind(':') {
+        let host = &rest_without_fragment[..colon_pos];
+        if let Ok(port) = rest_without_fragment[colon_pos + 1..].parse::<u16>() {
           return Some(ProxyParseResult::Parsed(ParsedProxyLine {
             proxy_type: protocol.to_string(),
             host: host.to_string(),
@@ -3504,6 +3506,15 @@ mod tests {
       vless_uri: None,
     });
     assert_eq!(url, "socks5://user:p%40ss@proxy.example.com:1080");
+    let probe_url = ProxyManager::build_probe_proxy_url(&ProxySettings {
+      proxy_type: "socks5".to_string(),
+      host: "proxy.example.com".to_string(),
+      port: 1080,
+      username: Some("user".to_string()),
+      password: Some("p@ss".to_string()),
+      vless_uri: None,
+    });
+    assert_eq!(probe_url, "socks5h://user:p%40ss@proxy.example.com:1080");
 
     // Username-only (no password)
     let url = ProxyManager::build_proxy_url(&ProxySettings {
@@ -3874,6 +3885,23 @@ mod tests {
         assert_eq!(p.port, 1080);
       }
       _ => panic!("Expected Parsed"),
+    }
+
+    // Bare socks:// links with a human-readable fragment are accepted. The
+    // fragment names the proxy/profile and must never be treated as part of the
+    // upstream port.
+    let results = ProxyManager::parse_txt_proxies(
+      "socks://u:p@198.51.100.10:7069#%E7%BE%8E%E5%9B%BD-%E6%B4%9B%E6%9D%89%E7%9F%B6\n",
+    );
+    match &results[0] {
+      ProxyParseResult::Parsed(p) => {
+        assert_eq!(p.proxy_type, "socks5");
+        assert_eq!(p.host, "198.51.100.10");
+        assert_eq!(p.port, 7069);
+        assert_eq!(p.username.as_deref(), Some("u"));
+        assert_eq!(p.password.as_deref(), Some("p"));
+      }
+      _ => panic!("Expected parsed SOCKS URL with fragment"),
     }
 
     // Ambiguous: both positions could be ports

@@ -31,11 +31,11 @@ The user is dirtycslothg. Address them as dirtycslothg.
 donutbrowser/
 ├── src/                              # Next.js frontend
 │   ├── app/                          # App router (page.tsx, layout.tsx)
-│   ├── components/                   # 50+ React components (dialogs, tables, UI)
+│   ├── components/                   # 50+ React components (dialogs, tables, UI; includes live fingerprint audit)
 │   ├── hooks/                        # Event-driven React hooks
 │   ├── i18n/locales/                 # Translations (en, es, fr, ja, ko, pt, ru, tr, vi, zh)
 │   ├── generated/                    # Build-generated third-party license inventory
-│   ├── lib/                          # Utilities (themes, toast, browser-utils)
+│   ├── lib/                          # Utilities (themes, toast, browser-utils, shared device preset catalog)
 │   └── types.ts                      # Shared TypeScript interfaces
 ├── src-tauri/                        # Rust backend (Tauri)
 │   ├── src/
@@ -57,6 +57,7 @@ donutbrowser/
 │   │   ├── wayfern_manager.rs       # Wayfern (Chromium) browser management
 │   │   ├── downloader.rs           # Browser binary downloader
 │   │   ├── extraction.rs           # Archive extraction (zip, tar, dmg, msi)
+│   │   ├── fingerprint_audit.rs     # Live CDP fingerprint probe and comparison
 │   │   ├── settings_manager.rs     # App settings persistence
 │   │   ├── cookie_manager.rs       # Cookie import/export
 │   │   ├── profile_importer.rs     # Bulk profile import (Chromium-family detection, ZIP, batch)
@@ -77,6 +78,7 @@ donutbrowser/
 │   ├── lib/                        # WebDriver, CDP, fixtures, app-session helpers
 │   └── tests/                      # Smoke, UI, entity, integration, sync, browser suites
 ├── patches/                        # pnpm compatibility patches for secured dependencies
+├── UPSTREAM_REQUESTS.md            # Wayfern fingerprint and TLS/JA3 decision record
 ├── flake.nix                       # Nix development environment
 └── .github/workflows/              # CI/CD pipelines
 ```

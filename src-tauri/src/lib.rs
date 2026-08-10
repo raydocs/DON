@@ -69,6 +69,7 @@ mod downloader;
 mod ephemeral_dirs;
 mod extension_manager;
 mod extraction;
+mod fingerprint_audit;
 mod fingerprint_consistency;
 mod geoip_downloader;
 mod geolocation;
@@ -1291,6 +1292,83 @@ async fn generate_sample_fingerprint(
       "Unsupported browser for fingerprint generation: {browser}"
     ))
   }
+}
+
+fn fingerprint_audit_error(detail: impl std::fmt::Display) -> String {
+  serde_json::json!({
+    "code": "FINGERPRINT_AUDIT_FAILED",
+    "params": { "detail": detail.to_string() }
+  })
+  .to_string()
+}
+
+#[tauri::command]
+async fn run_fingerprint_audit(
+  app_handle: tauri::AppHandle,
+  profile_id: String,
+) -> Result<crate::fingerprint_audit::FingerprintAuditReport, String> {
+  let profiles = crate::profile::ProfileManager::instance()
+    .list_profiles()
+    .map_err(|error| fingerprint_audit_error(format!("failed to list profiles: {error}")))?;
+  let mut profile = profiles
+    .into_iter()
+    .find(|candidate| candidate.id.to_string() == profile_id)
+    .ok_or_else(|| backend_error("PROFILE_NOT_FOUND"))?;
+
+  if profile.browser != "wayfern" {
+    return Err(fingerprint_audit_error(
+      "fingerprint auditing only supports Wayfern profiles",
+    ));
+  }
+
+  let mut launched_for_audit = None;
+  let target = match crate::cdp_target::resolve(&profile).await {
+    Ok(target) => target,
+    Err(crate::cdp_target::ResolveError::NotRunning(_)) => {
+      let launched = crate::browser_runner::launch_browser_profile_impl(
+        app_handle.clone(),
+        profile.clone(),
+        None,
+        crate::browser_runner::LaunchOptions::automation(None, true),
+      )
+      .await
+      .map_err(|error| {
+        fingerprint_audit_error(format!("failed to launch audit browser: {error}"))
+      })?;
+      profile = launched.clone();
+      launched_for_audit = Some(launched);
+      match crate::cdp_target::resolve(&profile).await {
+        Ok(target) => target,
+        Err(error) => {
+          if let Some(launched) = launched_for_audit.take() {
+            if let Err(cleanup_error) =
+              crate::browser_runner::kill_browser_profile(app_handle.clone(), launched).await
+            {
+              log::warn!(
+                "Fingerprint audit browser cleanup failed after CDP connection error: {cleanup_error}"
+              );
+            }
+          }
+          return Err(fingerprint_audit_error(format!(
+            "failed to connect to audit browser: {error}"
+          )));
+        }
+      }
+    }
+    Err(error) => {
+      return Err(fingerprint_audit_error(format!(
+        "failed to connect to running browser: {error}"
+      )))
+    }
+  };
+
+  let report = crate::fingerprint_audit::run(&profile, &target).await;
+  if let Some(launched) = launched_for_audit {
+    if let Err(error) = crate::browser_runner::kill_browser_profile(app_handle, launched).await {
+      log::warn!("Fingerprint audit browser cleanup failed: {error}");
+    }
+  }
+  report.map_err(fingerprint_audit_error)
 }
 
 // --- Remote sessions --------------------------------------------------------
@@ -2710,6 +2788,7 @@ pub fn run_with_builder(
       import_proxies_from_parsed,
       update_wayfern_config,
       generate_sample_fingerprint,
+      run_fingerprint_audit,
       get_profile_groups,
       get_groups_with_profile_counts,
       create_profile_group,

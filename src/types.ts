@@ -312,6 +312,7 @@ export interface ProfileImportProgress {
 
 export interface BrowserReleaseTypes {
   stable?: string;
+  chrome_stable?: string;
 }
 
 export interface AppUpdateInfo {
@@ -339,6 +340,7 @@ export interface AppUpdateProgress {
 }
 
 export type WayfernOS = "windows" | "macos" | "linux" | "android" | "ios";
+export type WayfernWebRtcMode = "proxy" | "off" | "real";
 
 export interface WayfernConfig {
   proxy?: string;
@@ -350,10 +352,14 @@ export interface WayfernConfig {
   expected_device_pixel_ratio?: number;
   geoip?: string | boolean; // For compatibility with shared config form
   block_images?: boolean; // For compatibility with shared config form
+  /** Legacy field; use webrtc_mode for new profiles. */
   block_webrtc?: boolean;
+  webrtc_mode?: WayfernWebRtcMode;
   block_webgl?: boolean;
   executable_path?: string;
   fingerprint?: string; // JSON string of the complete fingerprint config
+  /** Shared device preset id; backend reads its constraints from device-presets.json. */
+  device_preset?: string;
   randomize_fingerprint_on_launch?: boolean; // Generate new fingerprint on every launch
   os?: WayfernOS; // Operating system for fingerprint generation
   geo_proxy_signature?: string; // Internal: routing the fingerprint's location was computed for
@@ -467,6 +473,49 @@ export interface WayfernFingerprintConfig {
 
   // Performance
   performanceMemory?: number;
+}
+
+export interface FingerprintAuditItem {
+  category: string;
+  key: string;
+  expected: unknown | null;
+  actual: unknown | null;
+  status: string;
+  detail?: string;
+}
+
+export interface FingerprintAuditSummary {
+  total: number;
+  matches: number;
+  mismatches: number;
+  unknown: number;
+}
+
+export interface FingerprintAuditFrame {
+  origin: string;
+  status: string;
+  device_pixel_ratio: number | null;
+  screen_width: number | null;
+}
+
+export interface FingerprintAuditOopif {
+  status: string;
+  frame_count: number;
+  child_device_pixel_ratio: number | null;
+  child_screen_width: number | null;
+  children: FingerprintAuditFrame[];
+  detail?: string;
+}
+
+export interface FingerprintAuditReport {
+  profile_id: string;
+  profile_name: string;
+  generated_at: number;
+  target: string;
+  summary: FingerprintAuditSummary;
+  items: FingerprintAuditItem[];
+  observations: FingerprintAuditItem[];
+  oopif: FingerprintAuditOopif;
 }
 
 export interface WayfernLaunchResult {

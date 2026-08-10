@@ -53,6 +53,7 @@ import {
   sessionTone,
 } from "@/components/cookie-bot-shared";
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
+import { FingerprintAuditDialog } from "@/components/fingerprint-audit-dialog";
 import {
   ProfileBypassRulesDialog,
   ProfileDnsBlocklistDialog,
@@ -1599,6 +1600,8 @@ export function ProfilesDataTable({
   const [dnsBlocklistProfile, setDnsBlocklistProfile] =
     React.useState<BrowserProfile | null>(null);
   const [launchHookProfile, setLaunchHookProfile] =
+    React.useState<BrowserProfile | null>(null);
+  const [fingerprintAuditProfile, setFingerprintAuditProfile] =
     React.useState<BrowserProfile | null>(null);
   const [launchingProfiles, setLaunchingProfiles] = React.useState<Set<string>>(
     new Set(),
@@ -3948,6 +3951,9 @@ export function ProfilesDataTable({
               onOpenProfileSyncDialog={onOpenProfileSyncDialog}
               onAssignProfilesToGroup={onAssignProfilesToGroup}
               onConfigureWayfern={onConfigureWayfern}
+              onOpenFingerprintAudit={(profile) => {
+                setFingerprintAuditProfile(profile);
+              }}
               onCopyCookiesToProfile={onCopyCookiesToProfile}
               onOpenCookieManagement={onOpenCookieManagement}
               onAssignExtensionGroup={onAssignExtensionGroup}
@@ -3977,6 +3983,11 @@ export function ProfilesDataTable({
             />
           );
         })()}
+      <FingerprintAuditDialog
+        isOpen={fingerprintAuditProfile !== null}
+        onClose={() => setFingerprintAuditProfile(null)}
+        profile={fingerprintAuditProfile}
+      />
       <DataTableActionBar table={table}>
         <DataTableActionBarSelection table={table} />
         {onBulkRun && (

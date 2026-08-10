@@ -97,6 +97,7 @@ interface ProfileInfoDialogProps {
   onOpenProfileSyncDialog?: (profile: BrowserProfile) => void;
   onAssignProfilesToGroup?: (profileIds: string[]) => void;
   onConfigureWayfern?: (profile: BrowserProfile) => void;
+  onOpenFingerprintAudit?: (profile: BrowserProfile) => void;
   onCopyCookiesToProfile?: (profile: BrowserProfile) => void;
   onOpenCookieManagement?: (profile: BrowserProfile) => void;
   onAssignExtensionGroup?: (profileIds: string[]) => void;
@@ -323,6 +324,7 @@ export function ProfileInfoDialog({
   onOpenProfileSyncDialog,
   onAssignProfilesToGroup,
   onConfigureWayfern,
+  onOpenFingerprintAudit,
   onCopyCookiesToProfile,
   onOpenCookieManagement,
   onAssignExtensionGroup,
@@ -492,6 +494,17 @@ export function ProfileInfoDialog({
       proBadge: !crossOsUnlocked,
       runningBadge: isRunning,
       hidden: !isWayfern || !onConfigureWayfern,
+    },
+    {
+      id: "fingerprintAudit",
+      icon: <LuFingerprint className="size-4" />,
+      label: t("fingerprintAudit.open"),
+      onClick: () => {
+        handleAction(() => onOpenFingerprintAudit?.(profile));
+      },
+      disabled: isCrossOs || !crossOsUnlocked,
+      proBadge: !crossOsUnlocked,
+      hidden: !isWayfern || !onOpenFingerprintAudit,
     },
     {
       icon: <LuUsers className="size-4" />,
@@ -737,6 +750,7 @@ function ProfileInfoLayout({
 
   const deleteAction = findAction("delete");
   const fingerprintAction = findAction("fingerprint");
+  const fingerprintAuditAction = findAction("fingerprintAudit");
   const cookiesManageAction = findAction("cookiesManage");
   const cookiesCopyAction = findAction("cookiesCopy");
   const cookiesAction = cookiesManageAction ?? cookiesCopyAction;
@@ -1058,6 +1072,7 @@ function ProfileInfoLayout({
                 // proBadge state. Default to false if action missing.
                 fingerprintAction && !fingerprintAction.proBadge,
               )}
+              onOpenAudit={fingerprintAuditAction?.onClick}
               onSaved={onClose}
               t={t}
             />
@@ -1830,12 +1845,14 @@ function FingerprintSectionInline({
   profile,
   isDisabled,
   crossOsUnlocked,
+  onOpenAudit,
   onSaved,
   t,
 }: {
   profile: BrowserProfile;
   isDisabled: boolean;
   crossOsUnlocked: boolean;
+  onOpenAudit?: () => void;
   onSaved: () => void;
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
@@ -1911,9 +1928,22 @@ function FingerprintSectionInline({
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2 text-sm font-semibold">
-        <LuFingerprint className="size-4" />
-        {t("profileInfo.sections.fingerprint")}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-sm font-semibold">
+          <LuFingerprint className="size-4" />
+          {t("profileInfo.sections.fingerprint")}
+        </div>
+        {onOpenAudit && (
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 gap-1.5 text-xs"
+            onClick={onOpenAudit}
+          >
+            <LuFingerprint className="size-3.5" />
+            {t("fingerprintAudit.open")}
+          </Button>
+        )}
       </div>
       <p className="text-xs text-muted-foreground">
         {t("profileInfo.sectionDesc.fingerprint")}

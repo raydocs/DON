@@ -59,6 +59,8 @@ pnpm tauri dev
 
 This prevents the Stripe/Claude payment iframe double-scale bug caused by JS `devicePixelRatio=1` on a 1.5×/2× compositor.
 
+See **[UPSTREAM_REQUESTS.md](./UPSTREAM_REQUESTS.md)** for the fork's TLS/JA3 decision and the English request list for Wayfern upstream.
+
 ## Claude isolation workflow
 
 See **[CLAUDE_WORKFLOW.md](./CLAUDE_WORKFLOW.md)**.
@@ -71,7 +73,7 @@ In short: **1 profile · 1 家宽 IP · matching timezone · 1 card**.
 
 ## Roadmap
 
-- Device templates (common Win/Mac profiles)
+- [x] Device templates (shared Win/Mac/mobile presets with generation-time consistency constraints)
 - WebRTC Replace mode (not only block)
 - OOPIF fingerprint propagation (Stripe frames)
 - Create-time external checker deep-links

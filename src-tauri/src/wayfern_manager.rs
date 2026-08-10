@@ -17,6 +17,11 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 pub struct WayfernConfig {
   #[serde(default)]
   pub fingerprint: Option<String>,
+  /// Shared device preset id. The validation rules live in the frontend asset
+  /// consumed by both sides, so adding a preset does not require a new Rust
+  /// branch with hard-coded device values.
+  #[serde(default)]
+  pub device_preset: Option<String>,
   #[serde(default)]
   pub randomize_fingerprint_on_launch: Option<bool>,
   #[serde(default)]
@@ -38,8 +43,13 @@ pub struct WayfernConfig {
   pub geoip: Option<serde_json::Value>, // For compatibility with shared config form
   #[serde(default)]
   pub block_images: Option<bool>, // For compatibility with shared config form
+  /// Legacy WebRTC switch. When `webrtc_mode` is absent, `true` maps to the
+  /// proxy-safe mode and `false` preserves the old open behavior.
   #[serde(default)]
   pub block_webrtc: Option<bool>,
+  /// WebRTC handling: `proxy`, `off`, or `real`.
+  #[serde(default)]
+  pub webrtc_mode: Option<String>,
   #[serde(default)]
   pub block_webgl: Option<bool>,
   #[serde(default, skip_serializing)]
@@ -54,8 +64,92 @@ pub struct WayfernConfig {
 
 /// Max full-fingerprint regenerations when a candidate violates host constraints.
 const FINGERPRINT_GENERATION_ATTEMPTS: usize = 30;
+const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
+const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
+
+#[derive(Debug, Deserialize)]
+struct DevicePresetCatalog {
+  presets: Vec<DevicePreset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DevicePreset {
+  id: String,
+  constraints: DevicePresetConstraints,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DevicePresetConstraints {
+  #[serde(default)]
+  platform_values: Vec<String>,
+  #[serde(default)]
+  user_agent_tokens: Vec<String>,
+  #[serde(default)]
+  brand_tokens: Vec<String>,
+  min_touch_points: Option<u32>,
+  max_touch_points: Option<u32>,
+  orientation: Option<String>,
+  min_dpr: Option<f64>,
+  max_dpr: Option<f64>,
+  #[serde(default)]
+  gpu_tokens: Vec<String>,
+}
+
+fn device_preset(id: &str) -> Result<DevicePreset, String> {
+  let catalog = serde_json::from_str::<DevicePresetCatalog>(DEVICE_PRESETS_JSON)
+    .map_err(|error| format!("invalid device preset catalog: {error}"))?;
+  catalog
+    .presets
+    .into_iter()
+    .find(|preset| preset.id == id)
+    .ok_or_else(|| format!("unknown device preset {id}"))
+}
+
+fn contains_all_tokens(value: &str, tokens: &[String]) -> bool {
+  let value = value.to_ascii_lowercase();
+  tokens
+    .iter()
+    .all(|token| value.contains(&token.to_ascii_lowercase()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebRtcMode {
+  Proxy,
+  Off,
+  Real,
+}
 
 impl WayfernConfig {
+  fn effective_webrtc_mode(&self) -> WebRtcMode {
+    match self.webrtc_mode.as_deref() {
+      Some("proxy") => WebRtcMode::Proxy,
+      Some("off") => WebRtcMode::Off,
+      Some("real") => WebRtcMode::Real,
+      // An invalid explicit value fails closed. Legacy values remain
+      // compatible when no new mode has been stored yet.
+      Some(_) => WebRtcMode::Proxy,
+      None => match self.block_webrtc {
+        Some(true) => WebRtcMode::Proxy,
+        Some(false) => WebRtcMode::Real,
+        None => WebRtcMode::Proxy,
+      },
+    }
+  }
+
+  fn webrtc_launch_arg(&self) -> Option<&'static str> {
+    match self.effective_webrtc_mode() {
+      WebRtcMode::Proxy | WebRtcMode::Off => Some(WEBRTC_PROXY_POLICY_FLAG),
+      WebRtcMode::Real => None,
+    }
+  }
+
+  fn append_webrtc_launch_args(args: &mut Vec<String>, config: &WayfernConfig) {
+    if let Some(flag) = config.webrtc_launch_arg() {
+      args.push(flag.to_string());
+    }
+  }
+
   /// Whether a Wayfern fingerprint candidate is safe for the host display and
   /// generation bounds. Bad candidates are discarded whole — never partially
   /// patched — because setFingerprint re-normalizes inconsistent local edits.
@@ -140,6 +234,103 @@ impl WayfernConfig {
       return Err(format!(
         "windowOuterHeight {outer_h} exceeds avail/screen {avail_h}/{screen_h}"
       ));
+    }
+
+    if let Some(preset_id) = config.and_then(|config| config.device_preset.as_deref()) {
+      let preset = device_preset(preset_id)?;
+      let constraints = preset.constraints;
+      let platform = fingerprint
+        .get("platform")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("device preset {preset_id} requires platform"))?;
+      if !constraints.platform_values.is_empty()
+        && !constraints
+          .platform_values
+          .iter()
+          .any(|value| value.eq_ignore_ascii_case(platform))
+      {
+        return Err(format!(
+          "platform {platform} is inconsistent with device preset {preset_id}"
+        ));
+      }
+
+      let user_agent = fingerprint
+        .get("userAgent")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("device preset {preset_id} requires userAgent"))?;
+      if !contains_all_tokens(user_agent, &constraints.user_agent_tokens) {
+        return Err(format!(
+          "userAgent is inconsistent with device preset {preset_id}"
+        ));
+      }
+
+      let brand = fingerprint
+        .get("brand")
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| format!("device preset {preset_id} requires brand"))?;
+      if !contains_all_tokens(brand, &constraints.brand_tokens) {
+        return Err(format!(
+          "brand is inconsistent with device preset {preset_id}"
+        ));
+      }
+
+      let touch_points = fingerprint
+        .get("maxTouchPoints")
+        .and_then(|value| value.as_u64())
+        .ok_or_else(|| format!("device preset {preset_id} requires maxTouchPoints"))?
+        as u32;
+      if constraints
+        .min_touch_points
+        .is_some_and(|minimum| touch_points < minimum)
+        || constraints
+          .max_touch_points
+          .is_some_and(|maximum| touch_points > maximum)
+      {
+        return Err(format!(
+          "maxTouchPoints {touch_points} is inconsistent with device preset {preset_id}"
+        ));
+      }
+
+      if let Some(orientation) = constraints.orientation.as_deref() {
+        let is_portrait = screen_h > screen_w;
+        let matches = match orientation {
+          "portrait" => is_portrait,
+          "landscape" => !is_portrait,
+          _ => true,
+        };
+        if !matches {
+          return Err(format!(
+            "screen orientation is inconsistent with device preset {preset_id}"
+          ));
+        }
+      }
+
+      if constraints
+        .min_dpr
+        .is_some_and(|minimum| dpr < minimum || dpr > constraints.max_dpr.unwrap_or(f64::MAX))
+        || constraints.max_dpr.is_some_and(|maximum| dpr > maximum)
+      {
+        return Err(format!(
+          "devicePixelRatio {dpr} is inconsistent with device preset {preset_id}"
+        ));
+      }
+
+      let gpu = [
+        fingerprint
+          .get("webglVendor")
+          .and_then(|value| value.as_str())
+          .unwrap_or_default(),
+        fingerprint
+          .get("webglRenderer")
+          .and_then(|value| value.as_str())
+          .unwrap_or_default(),
+      ]
+      .join(" ");
+      if !constraints.gpu_tokens.is_empty() && !contains_all_tokens(&gpu, &constraints.gpu_tokens) {
+        return Err(format!(
+          "GPU renderer is inconsistent with device preset {preset_id}"
+        ));
+      }
     }
 
     Ok(())
@@ -949,6 +1140,7 @@ impl WayfernManager {
       "--use-mock-keychain".to_string(),
       "--password-store=basic".to_string(),
     ];
+    WayfernConfig::append_webrtc_launch_args(&mut args, config);
 
     if headless {
       args.push("--headless=new".to_string());
@@ -1625,6 +1817,90 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn webrtc_launch_args_follow_explicit_modes() {
+    for (mode, expected) in [
+      ("proxy", Some(WEBRTC_PROXY_POLICY_FLAG)),
+      ("off", Some(WEBRTC_PROXY_POLICY_FLAG)),
+      ("real", None),
+    ] {
+      let config = WayfernConfig {
+        webrtc_mode: Some(mode.to_string()),
+        ..Default::default()
+      };
+      let mut args = Vec::new();
+      WayfernConfig::append_webrtc_launch_args(&mut args, &config);
+      assert_eq!(args.first().map(String::as_str), expected);
+    }
+  }
+
+  #[test]
+  fn webrtc_mode_keeps_legacy_block_switch_compatible() {
+    let blocked = WayfernConfig {
+      block_webrtc: Some(true),
+      ..Default::default()
+    };
+    let open = WayfernConfig {
+      block_webrtc: Some(false),
+      ..Default::default()
+    };
+    let fresh = WayfernConfig::default();
+
+    assert_eq!(blocked.effective_webrtc_mode(), WebRtcMode::Proxy);
+    assert_eq!(open.effective_webrtc_mode(), WebRtcMode::Real);
+    assert_eq!(fresh.effective_webrtc_mode(), WebRtcMode::Proxy);
+    assert_eq!(blocked.webrtc_launch_arg(), Some(WEBRTC_PROXY_POLICY_FLAG));
+    assert_eq!(open.webrtc_launch_arg(), None);
+    assert_eq!(fresh.webrtc_launch_arg(), Some(WEBRTC_PROXY_POLICY_FLAG));
+  }
+
+  #[test]
+  fn device_preset_catalog_contains_desktop_and_mobile_profiles() {
+    let catalog = serde_json::from_str::<DevicePresetCatalog>(DEVICE_PRESETS_JSON)
+      .expect("device preset catalog must remain valid JSON");
+    assert!(catalog
+      .presets
+      .iter()
+      .any(|preset| preset.id == "windows-11-chrome-nvidia"));
+    assert!(catalog
+      .presets
+      .iter()
+      .any(|preset| preset.id == "macos-sonoma-chrome-apple-m"));
+    assert!(catalog
+      .presets
+      .iter()
+      .any(|preset| preset.id == "iphone-15-pro"));
+    assert!(catalog.presets.iter().any(|preset| preset.id == "pixel-9"));
+    assert!(catalog
+      .presets
+      .iter()
+      .any(|preset| preset.id == "galaxy-s25"));
+  }
+
+  #[test]
+  fn device_preset_constraints_require_a_consistent_fingerprint() {
+    let catalog: serde_json::Value = serde_json::from_str(DEVICE_PRESETS_JSON).unwrap();
+    let mut fingerprint = catalog["presets"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .find(|preset| preset["id"] == "iphone-15-pro")
+      .unwrap()["fingerprint"]
+      .clone();
+    let config = WayfernConfig {
+      device_preset: Some("iphone-15-pro".to_string()),
+      ..Default::default()
+    };
+    assert!(
+      WayfernConfig::fingerprint_satisfies_constraints_with(&fingerprint, Some(&config)).is_ok()
+    );
+
+    fingerprint["platform"] = serde_json::json!("Win32");
+    assert!(
+      WayfernConfig::fingerprint_satisfies_constraints_with(&fingerprint, Some(&config)).is_err()
+    );
+  }
 
   #[test]
   fn remote_socks_url_detection() {

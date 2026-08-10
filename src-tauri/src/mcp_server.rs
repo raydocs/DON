@@ -530,6 +530,7 @@ impl McpServer {
         | "get_interactive_elements"
         | "click_by_index"
         | "type_by_index"
+        | "run_fingerprint_audit"
         // Starting a bot run leases a remote host for up to two hours and
         // spends the account's pooled remote-hour budget, which makes it the
         // most expensive tool here. Cancelling one reaches the same fleet, and
@@ -1225,6 +1226,20 @@ impl McpServer {
             "randomize_fingerprint_on_launch": {
               "type": "boolean",
               "description": "Whether to generate a new fingerprint on every launch"
+            }
+          },
+          "required": ["profile_id"]
+        }),
+      },
+      McpTool {
+        name: "run_fingerprint_audit".to_string(),
+        description: "Run a live fingerprint audit and compare a Wayfern profile's stored values with browser observations. Requires an active Pro subscription.".to_string(),
+        input_schema: serde_json::json!({
+          "type": "object",
+          "properties": {
+            "profile_id": {
+              "type": "string",
+              "description": "The UUID of the Wayfern profile to audit"
             }
           },
           "required": ["profile_id"]
@@ -2195,6 +2210,14 @@ impl McpServer {
         )
         .await?;
         self.handle_update_profile_fingerprint(arguments).await
+      }
+      "run_fingerprint_audit" => {
+        Self::require_capability(
+          "Fingerprint auditing",
+          CLOUD_AUTH.can_use_browser_automation().await,
+        )
+        .await?;
+        self.handle_run_fingerprint_audit(arguments).await
       }
       "update_profile_proxy_bypass_rules" => {
         self
@@ -4261,6 +4284,34 @@ impl McpServer {
     }))
   }
 
+  async fn handle_run_fingerprint_audit(
+    &self,
+    arguments: &serde_json::Value,
+  ) -> Result<serde_json::Value, McpError> {
+    let profile_id = arguments
+      .get("profile_id")
+      .and_then(|value| value.as_str())
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Missing profile_id".to_string(),
+      })?;
+    let profile = self.get_wayfern_profile(profile_id)?;
+    let target = self.resolve_cdp_target(profile_id).await?;
+    let report = crate::fingerprint_audit::run(&profile, &target)
+      .await
+      .map_err(|error| McpError {
+        code: -32000,
+        message: error,
+      })?;
+
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&report).unwrap_or_default()
+      }]
+    }))
+  }
+
   async fn handle_update_profile_proxy_bypass_rules(
     &self,
     arguments: &serde_json::Value,
@@ -6080,6 +6131,7 @@ mod tests {
     // Fingerprint tools
     assert!(tool_names.contains(&"get_profile_fingerprint"));
     assert!(tool_names.contains(&"update_profile_fingerprint"));
+    assert!(tool_names.contains(&"run_fingerprint_audit"));
     assert!(tool_names.contains(&"update_profile_proxy_bypass_rules"));
     // Extension tools
     assert!(tool_names.contains(&"list_extensions"));

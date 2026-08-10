@@ -1,4 +1,7 @@
-import { getDefaultWayfernConfig } from "@/lib/wayfern-defaults";
+import {
+  getDefaultWayfernConfig,
+  resolveWayfernWebRtcMode,
+} from "@/lib/wayfern-defaults";
 import type { BrowserProfile, StoredProxy, WayfernConfig } from "@/types";
 
 /** Hard isolation model for Claude accounts on DON. */
@@ -70,14 +73,14 @@ export interface AutoClaudeProfilePlan {
   wayfernConfig: WayfernConfig;
 }
 
-/** Wayfern config for Claude: geo follows proxy, WebRTC blocked, stable FP. */
+/** Wayfern config for Claude: geo follows proxy, WebRTC is proxy-safe, stable FP. */
 export function getClaudeWayfernConfig(): WayfernConfig {
   return {
     ...getDefaultWayfernConfig(),
     // Align timezone/language/geo with the proxy exit (Based-on-proxy style).
     geoip: true,
     // Prefer not leaking real local IP through WebRTC.
-    block_webrtc: true,
+    webrtc_mode: "proxy",
     randomize_fingerprint_on_launch: false,
   };
 }
@@ -170,13 +173,16 @@ export function isProxyReusable(
   );
 }
 
-/** First free residential proxy (no active 7-day hold). */
+/** First free SOCKS5 residential proxy (no active 7-day hold). */
 export function pickAvailableProxy(
   proxies: StoredProxy[],
   profiles: BrowserProfile[],
   nowSecs: number = Math.floor(Date.now() / 1000),
 ): StoredProxy | null {
   for (const proxy of proxies) {
+    if (proxy.proxy_settings?.proxy_type?.toLowerCase() !== "socks5") {
+      continue;
+    }
     if (isProxyReusable(proxy.id, profiles, undefined, nowSecs)) {
       return proxy;
     }
@@ -389,7 +395,8 @@ export function assessClaudeProfile(
     });
   }
 
-  if (cfg?.block_webrtc !== true) {
+  const webRtcMode = resolveWayfernWebRtcMode(cfg);
+  if (webRtcMode !== "proxy" && webRtcMode !== "off") {
     issues.push({
       code: "WEBRTC_OPEN",
       severity: "warn",

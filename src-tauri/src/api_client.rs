@@ -109,6 +109,22 @@ struct CachedWayfernData {
   timestamp: u64,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedChromeStableData {
+  version: String,
+  timestamp: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeVersionHistoryResponse {
+  versions: Vec<ChromeVersionHistoryEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChromeVersionHistoryEntry {
+  version: String,
+}
+
 pub struct ApiClient {
   client: Client,
 }
@@ -248,6 +264,85 @@ impl ApiClient {
     fs::write(&cache_file, content)?;
     log::info!("Cached Wayfern version: {}", version_info.version);
     Ok(())
+  }
+
+  fn load_cached_chrome_stable_data(&self) -> Option<CachedChromeStableData> {
+    let cache_dir = Self::get_cache_dir().ok()?;
+    let cache_file = cache_dir.join("chrome_stable_win.json");
+    let content = fs::read_to_string(cache_file).ok()?;
+    serde_json::from_str(&content).ok()
+  }
+
+  fn save_cached_chrome_stable_version(
+    &self,
+    version: &str,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let cache_dir = Self::get_cache_dir()?;
+    let cache_file = cache_dir.join("chrome_stable_win.json");
+    let cached = CachedChromeStableData {
+      version: version.to_string(),
+      timestamp: Self::get_current_timestamp(),
+    };
+    fs::write(cache_file, serde_json::to_string_pretty(&cached)?)?;
+    Ok(())
+  }
+
+  fn newest_chrome_version(versions: Vec<String>) -> Option<String> {
+    versions
+      .into_iter()
+      .max_by(|left, right| compare_versions(left, right))
+  }
+
+  /// Fetch the latest Chrome stable major used for kernel-freshness display.
+  /// This is deliberately best-effort: an unavailable Google endpoint must
+  /// never prevent profile creation or browser downloads.
+  pub async fn fetch_chrome_stable_version_with_caching(&self, no_caching: bool) -> Option<String> {
+    let cached = self.load_cached_chrome_stable_data();
+    if !no_caching {
+      if let Some(data) = cached
+        .as_ref()
+        .filter(|data| Self::is_cache_valid(data.timestamp))
+      {
+        return Some(data.version.clone());
+      }
+    }
+
+    let response = match self
+      .client
+      .get("https://versionhistory.googleapis.com/v1/chrome/platforms/win/channels/stable/versions")
+      .timeout(std::time::Duration::from_secs(8))
+      .header(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/136.0.0.0 Safari/537.36",
+      )
+      .send()
+      .await
+    {
+      Ok(response) => response,
+      Err(_) => return cached.map(|data| data.version),
+    };
+    if !response.status().is_success() {
+      return cached.map(|data| data.version);
+    }
+
+    let payload = match response.json::<ChromeVersionHistoryResponse>().await {
+      Ok(payload) => payload,
+      Err(_) => return cached.map(|data| data.version),
+    };
+    let version = match Self::newest_chrome_version(
+      payload
+        .versions
+        .into_iter()
+        .map(|entry| entry.version)
+        .collect(),
+    ) {
+      Some(version) => version,
+      None => return cached.map(|data| data.version),
+    };
+    if let Err(error) = self.save_cached_chrome_stable_version(&version) {
+      log::debug!("Failed to cache Chrome stable version: {error}");
+    }
+    Some(version)
   }
 
   /// Fetch Wayfern version info from https://donutbrowser.com/wayfern.json
@@ -423,5 +518,15 @@ mod tests {
     assert_eq!(versions[1], "138.0.7204.50");
     assert_eq!(versions[2], "138.0.7204.49");
     assert_eq!(versions[3], "137.0.7204.99");
+  }
+
+  #[test]
+  fn test_newest_chrome_version_selection() {
+    let newest = ApiClient::newest_chrome_version(vec![
+      "151.0.7922.34".to_string(),
+      "150.0.7871.189".to_string(),
+      "151.0.7922.109".to_string(),
+    ]);
+    assert_eq!(newest.as_deref(), Some("151.0.7922.109"));
   }
 }

@@ -75,6 +75,16 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
     assert.equal(parsed.length, 3);
     assert.ok(parsed.some((result) => result.status === "parsed"));
     assert.ok(parsed.some((result) => result.status === "invalid"));
+    const socksLink = await app.invoke("parse_txt_proxies", {
+      content:
+        "socks://e2e-user:e2e-pass@198.51.100.10:7069#%E7%BE%8E%E5%9B%BD-%E6%B4%9B%E6%9D%89%E7%9F%B6",
+    });
+    assert.equal(socksLink[0].status, "parsed");
+    assert.equal(socksLink[0].proxy_type, "socks5");
+    assert.equal(socksLink[0].host, "198.51.100.10");
+    assert.equal(socksLink[0].port, 7069);
+    assert.equal(socksLink[0].username, "e2e-user");
+    assert.equal(socksLink[0].password, "e2e-pass");
     const parsedProxy = parsed.find((result) => result.status === "parsed");
     const { status: _status, ...parsedProxyFields } = parsedProxy;
     const parsedImport = await app.invoke("import_proxies_from_parsed", {
