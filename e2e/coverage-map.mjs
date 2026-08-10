@@ -177,6 +177,7 @@ export const commandCoverage = {
       "is_geoip_database_available",
       "download_geoip_database",
       "fingerprint_consistency::match_profile_fingerprint_to_exit",
+      "fingerprint_consistency::check_profile_consistency_now",
       "launch_gate::get_profile_pre_launch_checks",
       "launch_gate::ack_launch_gate",
       "check_wayfern_terms_accepted",
@@ -235,9 +236,6 @@ export const commandCoverage = {
     suite: "integrations",
     level: "contract",
     commands: [
-      "get_commercial_trial_status",
-      "acknowledge_trial_expiration",
-      "has_acknowledged_trial_expiration",
       "cloud_auth::cloud_exchange_device_code",
       "cloud_auth::cloud_get_user",
       "cloud_auth::cloud_refresh_profile",

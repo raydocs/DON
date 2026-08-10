@@ -41,10 +41,6 @@ pub struct AppSettings {
   #[serde(default)]
   pub sync_server_url: Option<String>, // URL of the sync server
   #[serde(default)]
-  pub first_launch_timestamp: Option<u64>, // Unix epoch seconds when app was first launched
-  #[serde(default)]
-  pub commercial_trial_acknowledged: bool, // Has user dismissed the trial expiration modal
-  #[serde(default)]
   pub mcp_enabled: bool, // Enable MCP (Model Context Protocol) server
   #[serde(default)]
   pub mcp_port: Option<u16>, // Port for MCP server (default 51080)
@@ -97,8 +93,6 @@ impl Default for AppSettings {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
-      first_launch_timestamp: None,
-      commercial_trial_acknowledged: false,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
@@ -107,7 +101,8 @@ impl Default for AppSettings {
       fingerprint_gate_disabled: false,
       vpn_extension_warning_disabled: false,
       onboarding_completed: false,
-      disable_auto_updates: false,
+      // DON fork: never auto-pull official Donut releases.
+      disable_auto_updates: true,
       keep_decrypted_profiles_in_ram: false,
     }
   }
@@ -1193,8 +1188,6 @@ mod tests {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
-      first_launch_timestamp: None,
-      commercial_trial_acknowledged: false,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,

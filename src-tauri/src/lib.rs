@@ -99,7 +99,6 @@ mod window_decorations;
 // mod theme_detector; // removed: theme detection handled in webview via CSS prefers-color-scheme
 pub mod cloud_auth;
 mod cloud_errors;
-mod commercial_license;
 mod cookie_bot;
 mod cookie_manager;
 pub mod events;
@@ -522,27 +521,6 @@ async fn accept_wayfern_terms() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_commercial_trial_status(
-  app_handle: tauri::AppHandle,
-) -> Result<commercial_license::TrialStatus, String> {
-  commercial_license::CommercialLicenseManager::instance()
-    .get_trial_status(&app_handle)
-    .await
-}
-
-#[tauri::command]
-async fn acknowledge_trial_expiration(app_handle: tauri::AppHandle) -> Result<(), String> {
-  commercial_license::CommercialLicenseManager::instance()
-    .acknowledge_expiration(&app_handle)
-    .await
-}
-
-#[tauri::command]
-fn has_acknowledged_trial_expiration(app_handle: tauri::AppHandle) -> Result<bool, String> {
-  commercial_license::CommercialLicenseManager::instance().has_acknowledged(&app_handle)
-}
-
-#[tauri::command]
 async fn start_mcp_server(app_handle: tauri::AppHandle) -> Result<u16, String> {
   mcp_server::McpServer::instance().start(app_handle).await
 }
@@ -642,10 +620,10 @@ async fn add_mcp_to_claude_desktop_internal(app_handle: &tauri::AppHandle) -> Re
   let manifest = serde_json::json!({
     "manifest_version": "0.3",
     "name": "donut-browser",
-    "display_name": "Donut Browser",
+    "display_name": "DON",
     "version": env!("CARGO_PKG_VERSION"),
-    "description": "Control Donut Browser profiles, proxies, and automation via MCP",
-    "author": { "name": "Donut Browser" },
+    "description": "Control DON profiles, proxies, and automation via MCP",
+    "author": { "name": "DON" },
     "tools_generated": true,
     "server": {
       "type": "node",
@@ -1638,7 +1616,7 @@ fn setup_system_tray(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::E
   // Bootstrap labels only — the frontend pushes localized labels via
   // `update_tray_menu` on mount and on language change, and the menu is only
   // opened after a minimize-to-tray (post-mount), so these are never shown.
-  let show_item = MenuItemBuilder::with_id("tray_show", "Show Donut Browser").build(app)?;
+  let show_item = MenuItemBuilder::with_id("tray_show", "Show DON").build(app)?;
   let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit").build(app)?;
   let tray_menu = MenuBuilder::new(app)
     .item(&show_item)
@@ -1811,6 +1789,14 @@ pub fn run_with_builder(
         let mgr = extension_manager::ExtensionManager::new();
         mgr.ensure_icons_extracted();
       }
+
+      // Download/register built-in extensions (Session Key for Claude) in the
+      // background; failures are logged and retried on next launch.
+      tauri::async_runtime::spawn(async move {
+        extension_manager::ExtensionManager::new()
+          .ensure_builtin_extensions()
+          .await;
+      });
 
       // Create the main window programmatically
       #[allow(unused_variables)]
@@ -2755,6 +2741,7 @@ pub fn run_with_builder(
       clear_profile_traffic_stats,
       get_traffic_stats_for_period,
       fingerprint_consistency::match_profile_fingerprint_to_exit,
+      fingerprint_consistency::check_profile_consistency_now,
       launch_gate::get_profile_pre_launch_checks,
       launch_gate::ack_launch_gate,
       window_decorations::get_window_decoration_layout,
@@ -2787,9 +2774,6 @@ pub fn run_with_builder(
       check_wayfern_terms_accepted,
       check_wayfern_downloaded,
       accept_wayfern_terms,
-      get_commercial_trial_status,
-      acknowledge_trial_expiration,
-      has_acknowledged_trial_expiration,
       start_mcp_server,
       stop_mcp_server,
       get_mcp_server_status,

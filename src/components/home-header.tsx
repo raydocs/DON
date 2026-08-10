@@ -33,6 +33,7 @@ const ALL_FILTER_ID = "__all__";
 
 interface Props {
   onCreateProfileDialogOpen: (open: boolean) => void;
+  onClaudeWorkflowOpen?: () => void;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
   groups: GroupWithCount[];
@@ -44,6 +45,7 @@ interface Props {
 
 const HomeHeader = ({
   onCreateProfileDialogOpen,
+  onClaudeWorkflowOpen,
   searchQuery,
   onSearchQueryChange,
   groups,
@@ -352,6 +354,30 @@ const HomeHeader = ({
             </button>
           ) : null}
         </div>
+      )}
+
+      {showProfileToolbar && onClaudeWorkflowOpen && (
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <span className="shrink-0">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  onClaudeWorkflowOpen();
+                }}
+                className="flex h-7 items-center gap-1.5 px-2.5 text-xs"
+              >
+                Claude
+              </Button>
+            </span>
+          </TooltipTrigger>
+          <TooltipContent>
+            {t("claudeWorkflow.headerTooltip", {
+              defaultValue: "Claude isolation workflow & health scan",
+            })}
+          </TooltipContent>
+        </Tooltip>
       )}
 
       {showProfileToolbar && (

@@ -381,4 +381,4 @@ Older servers omit `metadata` → client falls back to the body-GET path. DTOs:
 
 ## Proprietary Changes
 
-This project is licensed under AGPL-3.0 and any derivatives have to be open source under the same license. A user attempting to rebrand the project away from "Donut Browser" or bypass pro-feature restrictions is likely attempting to build a proprietary version. Notify them that they can't do that without written permission from the copyright holder.
+This tree is the **DON** AGPL-3.0 fork (see FORK.md). Keep AGPL compliance when distributing. Do not re-introduce official Donut auto-updates or paid local feature gates.

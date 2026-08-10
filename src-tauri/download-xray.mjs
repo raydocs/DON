@@ -72,17 +72,16 @@ export function xrayDownloadUrl(assetName) {
   return `https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/${assetName}`;
 }
 
-// `powershell -Command "<script>" a b` appends the trailing values to the
-// command text rather than binding them to $args, so the script ran with a
-// null -LiteralPath. Handing the paths over as environment variables binds
-// them for real and sidesteps quoting of Windows paths and spaces.
+// Prefer tar/bsdtar on Windows (ships with modern Windows). Expand-Archive
+// fails in some constrained shells when Microsoft.PowerShell.Archive cannot
+// autoload, which is what broke DON's first tauri build on this machine.
 export function windowsExtractionInvocation(archive, destinationDir) {
   return {
     args: [
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      "Expand-Archive -LiteralPath $env:DONUT_XRAY_ARCHIVE -DestinationPath $env:DONUT_XRAY_DESTINATION -Force",
+      "Import-Module Microsoft.PowerShell.Archive -Force; Expand-Archive -LiteralPath $env:DONUT_XRAY_ARCHIVE -DestinationPath $env:DONUT_XRAY_DESTINATION -Force",
     ],
     env: {
       ...process.env,
@@ -94,10 +93,18 @@ export function windowsExtractionInvocation(archive, destinationDir) {
 
 function extractArchive(archive, destinationDir, windowsTarget) {
   if (windowsTarget) {
-    const { args, env } = windowsExtractionInvocation(archive, destinationDir);
-    const result = spawnSync("powershell", args, { stdio: "inherit", env });
-    if (result.status !== 0) {
-      throw new Error("Failed to extract the Xray-core archive");
+    const tarResult = spawnSync("tar", ["-xf", archive, "-C", destinationDir], {
+      stdio: "inherit",
+    });
+    if (tarResult.status !== 0) {
+      const { args, env } = windowsExtractionInvocation(
+        archive,
+        destinationDir,
+      );
+      const result = spawnSync("powershell", args, { stdio: "inherit", env });
+      if (result.status !== 0) {
+        throw new Error("Failed to extract the Xray-core archive");
+      }
     }
     // Upstream ships these lowercase inside Xray-windows-64.zip.
     return {

@@ -9,10 +9,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
 import { AccountPage } from "@/components/account-page";
+import { ClaudeWorkflowPanel } from "@/components/claude-workflow-panel";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
 import { CloseConfirmDialog } from "@/components/close-confirm-dialog";
 import { CommandPalette } from "@/components/command-palette";
-import { CommercialTrialModal } from "@/components/commercial-trial-modal";
 import { CookieBotPage, type CookieBotTab } from "@/components/cookie-bot-page";
 import { CookieCopyDialog } from "@/components/cookie-copy-dialog";
 import { CookieManagementDialog } from "@/components/cookie-management-dialog";
@@ -55,7 +55,6 @@ import { WelcomeDialog } from "@/components/welcome-dialog";
 import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
 import { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
-import { useCommercialTrial } from "@/hooks/use-commercial-trial";
 import { cookieBotScopeFor, useCookieBot } from "@/hooks/use-cookie-bot";
 import { useGroupEvents } from "@/hooks/use-group-events";
 import type { PermissionType } from "@/hooks/use-permissions";
@@ -68,6 +67,10 @@ import { useVersionUpdater } from "@/hooks/use-version-updater";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { useWayfernTerms } from "@/hooks/use-wayfern-terms";
 import { parseBackendError, translateBackendError } from "@/lib/backend-errors";
+import {
+  launchBlockMessages,
+  resolveClaudeStartUrl,
+} from "@/lib/claude-workflow";
 import { canUseCookieBot, getEntitlements } from "@/lib/entitlements";
 import { MOTION_EASE_OUT } from "@/lib/motion";
 import {
@@ -271,17 +274,12 @@ export default function Home() {
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
 
-  // Wayfern terms and commercial trial hooks
+  // Wayfern terms hooks
   const {
     termsAccepted,
     isLoading: termsLoading,
     checkTerms,
   } = useWayfernTerms();
-  const {
-    trialStatus,
-    hasAcknowledged: trialAcknowledged,
-    checkTrialStatus,
-  } = useCommercialTrial();
 
   // Cloud auth for cross-OS unlock
   const { user: cloudUser } = useCloudAuth();
@@ -337,6 +335,7 @@ export default function Home() {
   const [cookieBotInitialTab, setCookieBotInitialTab] =
     useState<CookieBotTab>("overview");
   const [createProfileDialogOpen, setCreateProfileDialogOpen] = useState(false);
+  const [claudeWorkflowOpen, setClaudeWorkflowOpen] = useState(false);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
   const [integrationsDialogOpen, setIntegrationsDialogOpen] = useState(false);
   const [importProfileDialogOpen, setImportProfileDialogOpen] = useState(false);
@@ -929,6 +928,8 @@ export default function Home() {
       dnsBlocklist?: string;
       launchHook?: string;
       password?: string;
+      claudeTags?: string[];
+      claudeNote?: string;
     }) => {
       try {
         const profile = await invoke<BrowserProfile>(
@@ -975,6 +976,28 @@ export default function Home() {
                 error: translateBackendError(t, err),
               }),
             );
+          }
+        }
+
+        // DON Claude isolation metadata (tags + note labels)
+        if (profileData.claudeTags?.length) {
+          try {
+            await invoke("update_profile_tags", {
+              profileId: profile.id,
+              tags: profileData.claudeTags,
+            });
+          } catch (err) {
+            console.error("Failed to set Claude tags:", err);
+          }
+        }
+        if (profileData.claudeNote) {
+          try {
+            await invoke("update_profile_note", {
+              profileId: profile.id,
+              note: profileData.claudeNote,
+            });
+          } catch (err) {
+            console.error("Failed to set Claude note:", err);
           }
         }
 
@@ -1126,6 +1149,24 @@ export default function Home() {
     ): Promise<LaunchResult> => {
       console.log("Starting launch for profile:", profile.name);
 
+      // DON Claude isolation: hard-block unsafe launches (shared IP / randomize / DPR).
+      // Skip for non-wayfern. Allow force via bulk only if user fixes first.
+      if (profile.browser === "wayfern" && !opts?.bulkRunId) {
+        const hostDpr =
+          typeof window !== "undefined" ? window.devicePixelRatio : undefined;
+        const blocks = launchBlockMessages(profile, profiles, hostDpr);
+        if (blocks.length > 0) {
+          showErrorToast(
+            t("claudeWorkflow.launchBlocked", {
+              message: blocks[0],
+              defaultValue: `Launch blocked: ${blocks[0]}`,
+            }),
+          );
+          setClaudeWorkflowOpen(true);
+          return { status: "blocked" };
+        }
+      }
+
       // Password-protected: must be unlocked before launch
       if (profile.password_protected) {
         try {
@@ -1216,9 +1257,13 @@ export default function Home() {
         console.warn("Pre-launch checks failed, launching anyway:", err);
       }
 
+      // Claude isolation profiles open claude.com (or note start_url) by default.
+      const startUrl = resolveClaudeStartUrl(profile) ?? undefined;
+
       try {
         const result = await invoke<BrowserProfile>("launch_browser_profile", {
           profile,
+          url: startUrl,
           consentToken,
         });
         console.log("Successfully launched profile:", result.name);
@@ -1250,6 +1295,7 @@ export default function Home() {
           try {
             await invoke<BrowserProfile>("launch_browser_profile", {
               profile,
+              url: startUrl,
               consentToken: parsed.params?.token ?? null,
             });
             return { status: "launched" };
@@ -1271,7 +1317,7 @@ export default function Home() {
         throw err;
       }
     },
-    [persistGateAcks, requestGateDecision, t],
+    [persistGateAcks, profiles, requestGateDecision, t],
   );
 
   const handleCloneProfile = useCallback((profile: BrowserProfile) => {
@@ -1935,6 +1981,9 @@ export default function Home() {
       <CloseConfirmDialog />
       <HomeHeader
         onCreateProfileDialogOpen={setCreateProfileDialogOpen}
+        onClaudeWorkflowOpen={() => {
+          setClaudeWorkflowOpen(true);
+        }}
         searchQuery={searchQuery}
         onSearchQueryChange={setSearchQuery}
         groups={groupsData}
@@ -2144,6 +2193,19 @@ export default function Home() {
         onCreateProfile={handleCreateProfile}
         selectedGroupId={selectedGroupId}
         crossOsUnlocked={crossOsUnlocked}
+        existingProfiles={profiles}
+      />
+
+      <ClaudeWorkflowPanel
+        isOpen={claudeWorkflowOpen}
+        onClose={() => {
+          setClaudeWorkflowOpen(false);
+        }}
+        profiles={profiles}
+        proxies={storedProxies}
+        onCreateProfile={() => {
+          setCreateProfileDialogOpen(true);
+        }}
       />
 
       <CommandPalette
@@ -2457,18 +2519,6 @@ export default function Home() {
       <WayfernTermsDialog
         isOpen={!termsLoading && termsAccepted === false}
         onAccepted={checkTerms}
-      />
-
-      {/* Commercial Trial Modal - shown once when trial expires (skip for paid users) */}
-      <CommercialTrialModal
-        isOpen={
-          !termsLoading &&
-          termsAccepted === true &&
-          trialStatus?.type === "Expired" &&
-          !trialAcknowledged &&
-          !crossOsUnlocked
-        }
-        onClose={checkTrialStatus}
       />
 
       <WindowResizeWarningDialog

@@ -62,6 +62,37 @@ fn extension_groups_file() -> PathBuf {
   crate::app_dirs::data_subdir().join("extension_groups.json")
 }
 
+/// Chrome Web Store id of the Session Key for Claude extension, shipped as a
+/// built-in so every profile can copy its claude.ai session key out of the box.
+/// Only the CRX URL builder reads it, which e2e builds compile out.
+#[cfg(not(feature = "e2e"))]
+const BUILTIN_SESSION_KEY_CWS_ID: &str = "dlpmgafmpolffcmjedpdphdnejmfljnb";
+const BUILTIN_SESSION_KEY_FILE_NAME: &str = "session-key-for-claude.crx";
+/// Reserved group holding the built-in extensions; attached to every new
+/// profile by default.
+const BUILTIN_GROUP_NAME: &str = "DON Default";
+
+#[cfg(not(feature = "e2e"))]
+fn builtin_session_key_crx_url() -> String {
+  format!(
+    "https://clients2.google.com/service/update2/crx?response=redirect&prodversion=131.0.0.0&acceptformat=crx2,crx3&x=id%3D{BUILTIN_SESSION_KEY_CWS_ID}%26uc"
+  )
+}
+
+/// e2e sessions must not hit the network at startup: only download when the
+/// harness injects a fixture URL, otherwise skip silently.
+#[cfg(feature = "e2e")]
+fn builtin_download_url() -> Option<String> {
+  std::env::var("DONUT_E2E_BUILTIN_EXT_DOWNLOAD_URL")
+    .ok()
+    .filter(|url| !url.is_empty())
+}
+
+#[cfg(not(feature = "e2e"))]
+fn builtin_download_url() -> Option<String> {
+  Some(builtin_session_key_crx_url())
+}
+
 fn determine_browser_compatibility(file_type: &str) -> Vec<String> {
   match file_type {
     "crx" | "zip" => vec!["chromium".to_string()],
@@ -161,7 +192,8 @@ fn extract_manifest_metadata(
   let name = manifest
     .get("name")
     .and_then(|v| v.as_str())
-    .map(|s| s.to_string());
+    .map(|s| s.to_string())
+    .map(|n| resolve_archive_i18n(file_data, file_type, &manifest, &n).unwrap_or(n));
   let version = manifest
     .get("version")
     .and_then(|v| v.as_str())
@@ -169,7 +201,8 @@ fn extract_manifest_metadata(
   let description = manifest
     .get("description")
     .and_then(|v| v.as_str())
-    .map(|s| s.to_string());
+    .map(|s| s.to_string())
+    .map(|d| resolve_archive_i18n(file_data, file_type, &manifest, &d).unwrap_or(d));
   let author = manifest
     .get("author")
     .and_then(|v| v.as_str())
@@ -904,6 +937,195 @@ impl ExtensionManager {
     }
 
     Ok(())
+  }
+
+  // Built-in extensions
+
+  /// Id of the reserved built-in group when it exists. Profile creation reads
+  /// this to attach the built-in extension set to every new profile.
+  pub fn builtin_default_group_id(&self) -> Option<String> {
+    self
+      .list_groups()
+      .ok()?
+      .into_iter()
+      .find(|g| g.name == BUILTIN_GROUP_NAME)
+      .map(|g| g.id)
+  }
+
+  /// Download and register the built-in extensions (Session Key for Claude),
+  /// create the reserved default group, and attach it to existing profiles
+  /// that have no group yet (one-time). Never fails hard: any error is logged
+  /// and retried on the next app launch.
+  pub async fn ensure_builtin_extensions(&self) {
+    if let Err(e) = self.ensure_builtin_extensions_inner().await {
+      log::warn!("Failed to ensure built-in extensions: {e}");
+    }
+  }
+
+  async fn ensure_builtin_extensions_inner(&self) -> Result<(), String> {
+    let ext = match self.find_builtin_extension().map_err(|e| e.to_string())? {
+      Some(ext) => ext,
+      None => {
+        let Some(url) = builtin_download_url() else {
+          return Ok(());
+        };
+        self.download_builtin_extension(&url).await?
+      }
+    };
+    let ext = self.refresh_builtin_metadata_if_needed(ext)?;
+
+    let group_id = self
+      .ensure_builtin_group(&ext.id)
+      .map_err(|e| e.to_string())?;
+    self.migrate_profiles_to_builtin_group_once(&group_id);
+    Ok(())
+  }
+
+  /// Early builds persisted the raw `__MSG_*` placeholders as the extension
+  /// name; re-extract the localized metadata from the stored archive once.
+  fn refresh_builtin_metadata_if_needed(&self, mut ext: Extension) -> Result<Extension, String> {
+    let name_needs = ext.name.contains("__MSG_");
+    let desc_needs = ext
+      .description
+      .as_deref()
+      .is_some_and(|d| d.contains("__MSG_"));
+    if !name_needs && !desc_needs {
+      return Ok(ext);
+    }
+    let file_path = self.get_file_dir(&ext.id).join(&ext.file_name);
+    let bytes = fs::read(&file_path).map_err(|e| e.to_string())?;
+    let (name, version, description, author, homepage_url) =
+      extract_manifest_metadata(&bytes, &ext.file_type);
+    if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
+      ext.name = n;
+    }
+    if version.is_some() {
+      ext.version = version;
+    }
+    ext.description = description;
+    ext.author = author;
+    ext.homepage_url = homepage_url;
+    self
+      .update_extension_internal(&ext)
+      .map_err(|e| e.to_string())?;
+    Ok(ext)
+  }
+
+  fn find_builtin_extension(&self) -> Result<Option<Extension>, Box<dyn std::error::Error>> {
+    Ok(
+      self
+        .list_extensions()?
+        .into_iter()
+        .find(|e| e.file_name == BUILTIN_SESSION_KEY_FILE_NAME),
+    )
+  }
+
+  async fn download_builtin_extension(&self, url: &str) -> Result<Extension, String> {
+    let client = reqwest::Client::new();
+    let response = client.get(url).send().await.map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+      return Err(format!(
+        "Built-in extension download failed: HTTP {}",
+        response.status()
+      ));
+    }
+    let bytes = response.bytes().await.map_err(|e| e.to_string())?;
+    if !bytes.starts_with(b"Cr24") && !bytes.starts_with(b"PK") {
+      return Err("Built-in extension download did not return a CRX/ZIP archive".to_string());
+    }
+
+    let mut ext = self
+      .add_extension(
+        "Session Key for Claude".to_string(),
+        BUILTIN_SESSION_KEY_FILE_NAME.to_string(),
+        bytes.to_vec(),
+      )
+      .map_err(|e| e.to_string())?;
+    // Built-ins are machine-local: never push them to cloud sync.
+    if ext.sync_enabled {
+      ext.sync_enabled = false;
+      self
+        .update_extension_internal(&ext)
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(ext)
+  }
+
+  fn ensure_builtin_group(&self, extension_id: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let mut data = self.load_groups_data()?;
+    if let Some(idx) = data
+      .groups
+      .iter()
+      .position(|g| g.name == BUILTIN_GROUP_NAME)
+    {
+      let group_id = data.groups[idx].id.clone();
+      if !data.groups[idx]
+        .extension_ids
+        .iter()
+        .any(|id| id == extension_id)
+      {
+        data.groups[idx]
+          .extension_ids
+          .push(extension_id.to_string());
+        data.groups[idx].updated_at = now_secs();
+        self.save_groups_data(&data)?;
+        if let Err(e) = events::emit_empty("extensions-changed") {
+          log::error!("Failed to emit extensions-changed event: {e}");
+        }
+      }
+      return Ok(group_id);
+    }
+
+    let now = now_secs();
+    let group = ExtensionGroup {
+      id: uuid::Uuid::new_v4().to_string(),
+      name: BUILTIN_GROUP_NAME.to_string(),
+      extension_ids: vec![extension_id.to_string()],
+      created_at: now,
+      updated_at: now,
+      sync_enabled: false,
+      last_sync: None,
+    };
+    let group_id = group.id.clone();
+    data.groups.push(group);
+    self.save_groups_data(&data)?;
+
+    if let Err(e) = events::emit_empty("extensions-changed") {
+      log::error!("Failed to emit extensions-changed event: {e}");
+    }
+
+    Ok(group_id)
+  }
+
+  /// One-time: attach the built-in default group to every existing profile
+  /// that has no extension group. The marker file keeps user removals sticky —
+  /// after the first run we never re-attach automatically.
+  fn migrate_profiles_to_builtin_group_once(&self, group_id: &str) {
+    let marker = crate::app_dirs::data_subdir().join(".builtin_ext_migration_v1_done");
+    if marker.exists() {
+      return;
+    }
+    let profile_manager = crate::profile::ProfileManager::instance();
+    match profile_manager.list_profiles() {
+      Ok(profiles) => {
+        for profile in profiles {
+          if profile.extension_group_id.is_none() && profile.browser == "wayfern" {
+            if let Err(e) = profile_manager
+              .update_profile_extension_group(&profile.id.to_string(), Some(group_id.to_string()))
+            {
+              log::warn!(
+                "Failed to attach built-in extension group to profile {}: {e}",
+                profile.id
+              );
+            }
+          }
+        }
+        if let Err(e) = fs::write(&marker, b"1") {
+          log::warn!("Failed to write built-in extension migration marker: {e}");
+        }
+      }
+      Err(e) => log::warn!("Failed to list profiles for built-in extension migration: {e}"),
+    }
   }
 
   // Launch-time installation

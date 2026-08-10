@@ -1,6 +1,40 @@
 # Changelog
 
 
+## v0.0.1 (2026-08-10)
+
+First public push of **DON**, the AGPL fork of donutbrowser (upstream v0.28.2). See FORK.md for the standing fork policy.
+
+### Fork baseline (vs upstream)
+
+- Rebranded as DON (`com.donbrowser`), separate `DON` data directory, version reset to 0.0.1
+- All local paid gates unlocked; commercial trial fully removed (module, commands, modal, settings section, locale keys)
+- Official auto-update permanently disabled
+- Fingerprint policy: reject bad DPR / oversized screens and regenerate the whole fingerprint
+- Claude isolation workflow: 1 profile · 1 residential IP · matching timezone · 1 card, 7-day node lease, panel health scan
+
+### Features
+
+- Session Key for Claude extension built in: downloaded from the Chrome Web Store at first launch into a reserved "DON Default" group, attached to every new profile (UI, REST, MCP, importer), and migrated onto existing group-less profiles once
+- Proxy form: paste `host:port:user:pass` or `scheme://…` into the host field to auto-fill all fields
+- Claude panel quick create: paste a proxy string → auto-store the proxy → create a Claude-isolated profile → post-create exit check (exit IP / country / timezone vs fingerprint timezone / language, WebRTC, UA, DPR, screen) with a "Match to proxy" fix
+- New Tauri command `check_profile_consistency_now` for on-demand exit-vs-fingerprint checks
+
+### Bug Fixes
+
+- follow the DON app-dir rename in profile-manager directory assertions
+- drop the stale trial-duration test left over from deleting the constant
+- keep `profilesHoldingProxy`'s type predicate intact after biome's unsafe optional-chain rewrite
+- run `remote_handoff` and `remote_session` tests under one lock for the shared handoff store (parallel flakiness)
+
+### Windows / E2E
+
+- e2e runner works on Windows (shell handling for the pnpm shim only)
+- regenerate `e2e/app/Cargo.lock` after the fork rename; embed the comctl32 v6 manifest in the e2e app
+- never crash on failed OS directory lookups (Wayfern terms, profile importer); fall back to environment variables
+- resolve localized `__MSG_*` placeholders in extension metadata names/descriptions
+
+
 ## v0.28.2 (2026-07-12)
 
 ### Features
@@ -176,7 +210,7 @@
 
 ### Bug Fixes
 
-- launch wayfern with proper dimentions for mobile devices
+- launch wayfern with proper dimensions for mobile devices
 
 ### Maintenance
 

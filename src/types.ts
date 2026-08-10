@@ -346,6 +346,8 @@ export interface WayfernConfig {
   screen_max_height?: number;
   screen_min_width?: number;
   screen_min_height?: number;
+  /** Host display scale the generated fingerprint must match (DON). */
+  expected_device_pixel_ratio?: number;
   geoip?: string | boolean; // For compatibility with shared config form
   block_images?: boolean; // For compatibility with shared config form
   block_webrtc?: boolean;

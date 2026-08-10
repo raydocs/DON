@@ -1,11 +1,11 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Donut
-Name[en]=Donut
+Name=DON
+Name[en]=DON
 GenericName=Web Browser
-X-GNOME-FullName=Donut
-Comment=Simple Yet Powerful Anti-Detect Browser
+X-GNOME-FullName=DON
+Comment=DON — local AGPL anti-detect browser fork
 Exec=donutbrowser %u
 Icon=donutbrowser
 StartupNotify=true

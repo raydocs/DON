@@ -176,15 +176,6 @@
         "mismatchToast": "Пароль не совпадает"
       }
     },
-    "commercial": {
-      "title": "Коммерческая лицензия",
-      "trialActive": "Пробный период: осталось {{days}} дней, {{hours}} часов",
-      "trialActiveDescription": "Коммерческое использование бесплатно в течение пробного периода. После его окончания все функции продолжают работать — личное использование остаётся бесплатным, и только для коммерческого использования потребуется лицензия.",
-      "trialExpired": "Пробный период истёк",
-      "trialExpiredDescription": "Личное использование остаётся бесплатным. Для коммерческого использования требуется лицензия.",
-      "subscriptionActive": "Подписка активна — план {{plan}}",
-      "subscriptionActiveDescription": "Ваша подписка на Donut Browser активна. Коммерческое использование лицензировано на срок действия плана."
-    },
     "advanced": {
       "title": "Дополнительно",
       "clearCache": "Очистить весь кэш версий",
@@ -475,7 +466,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "Требуются XTLS Vision и REALITY.",
       "vlessUriRequired": "Введите URI VLESS.",
-      "vlessUriInvalid": "Введите корректный URI VLESS с адресом и портом."
+      "vlessUriInvalid": "Введите корректный URI VLESS с адресом и портом.",
+      "pasteFilled": "Поля заполнены из вставленной строки прокси"
     },
     "types": {
       "http": "HTTP",
@@ -1580,14 +1572,6 @@
     "acceptFailed": "Не удалось принять условия",
     "tryAgain": "Пожалуйста, попробуйте снова"
   },
-  "commercialTrial": {
-    "title": "Срок коммерческой пробной версии истёк",
-    "description": "Ваш 2-недельный коммерческий пробный период закончился.",
-    "body": "Если вы используете Donut Browser в коммерческих целях, для продолжения вам нужно приобрести коммерческую лицензию. Вы можете продолжать использовать его бесплатно для личных целей.",
-    "understandButton": "Понятно",
-    "failed": "Не удалось сохранить подтверждение",
-    "tryAgain": "Пожалуйста, попробуйте снова"
-  },
   "permissionDialog": {
     "titleMicrophone": "Требуется доступ к микрофону",
     "titleCamera": "Требуется доступ к камере",
@@ -2138,8 +2122,7 @@
       "personalTitle": "Личное использование",
       "personalDesc": "Бесплатно навсегда.",
       "commercialTitle": "Коммерческое использование",
-      "trialBadge": "2 недели бесплатно",
-      "commercialDesc": "Бесплатно в течение 2-недельного ознакомительного периода. После этого требуется платный план, что помогает поддерживать и развивать проект."
+      "commercialDesc": "DON — AGPL-форк: все локальные функции разблокированы, платный план не нужен."
     }
   },
   "wayfernBlocked": {
@@ -2567,5 +2550,45 @@
     "cancelled": "Запуск отменён",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Профиль ещё ни разу не запускался, поэтому удалось проверить только расширения, управляемые Donut."
+  },
+  "claudeWorkflow": {
+    "quickTitle": "Быстрое создание из строки прокси",
+    "quickPlaceholder": "host:port:user:pass или scheme://user:pass@host:port",
+    "quickCta": "Создать и проверить",
+    "quickOk": "{{name}} создан",
+    "quickFailed": "Ошибка быстрого создания: {{message}}",
+    "quickInvalid": "Не удалось разобрать строку прокси",
+    "reportTitle": "Проверка после создания",
+    "reportChecking": "Проверяем выход прокси…",
+    "reportProbeFailed": "Ошибка проверки выхода: {{message}}",
+    "reportExitIp": "IP выхода",
+    "reportCountry": "Страна",
+    "reportExitTimezone": "Часовой пояс выхода",
+    "reportFpTimezone": "Часовой пояс отпечатка",
+    "reportFpLanguage": "Язык отпечатка",
+    "reportWebrtcBlocked": "заблокирован (весь трафик через прокси)",
+    "reportWebrtcOpen": "открыт",
+    "reportScreen": "Экран",
+    "reportConsistent": "Часовой пояс и язык совпадают с выходом прокси",
+    "reportTzMismatch": "Часовой пояс не совпадает: выход {{exit}}, отпечаток {{fp}}",
+    "reportLangMismatch": "Язык не совпадает: страна выхода {{country}}, отпечаток {{lang}}",
+    "reportMatchCta": "Подогнать под прокси",
+    "reportMatchedOk": "Отпечаток подогнан под выход прокси",
+    "reportNotChecked": "Нечего сравнивать — выход прокси не измерялся",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

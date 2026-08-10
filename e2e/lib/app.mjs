@@ -30,6 +30,11 @@ function isolatedEnvironment(root, extra = {}) {
   const home = path.join(root, "home");
   const temp = path.join(root, "tmp");
   return {
+    // Inherit the parent environment first: on Windows a fully stripped
+    // environment breaks SHGetKnownFolderPath (directories::BaseDirs), which
+    // aborts the app the moment the frontend asks for the Wayfern terms.
+    // Everything isolation-relevant below still overrides the inherited value.
+    ...process.env,
     DONUTBROWSER_DATA_ROOT: path.join(root, "donut"),
     HOME: home,
     USERPROFILE: home,
@@ -109,7 +114,6 @@ export class AppSession {
           {
             language: "en",
             onboarding_completed: true,
-            commercial_trial_acknowledged: true,
             window_resize_warning_dismissed: true,
             disable_auto_updates: true,
           },

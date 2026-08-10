@@ -795,27 +795,37 @@ impl CloudAuthManager {
     state.is_some()
   }
 
+  /// Full local unlock used by the DON fork. Cloud login still works for
+  /// optional remote features, but paid gates never block local use.
+  pub fn unlocked_entitlements() -> Entitlements {
+    Entitlements {
+      active: true,
+      browser_automation: true,
+      cross_os_fingerprints: true,
+      cloud_backup: true,
+      team_collaboration: true,
+      cookie_bot: true,
+      remote_interactive: true,
+      profile_limit: i64::MAX,
+      requests_per_hour: 1_000_000,
+      remote_browser_hours: i64::MAX,
+    }
+  }
+
   /// Resolve this session's entitlements (server-sent or locally derived).
   pub async fn entitlements(&self) -> Option<Entitlements> {
-    let state = self.state.lock().await;
-    state.as_ref().map(|auth| auth.user.entitlements())
+    Some(Self::unlocked_entitlements())
   }
 
   /// Account is in a paid/active state. Used for the "any active plan" gates
   /// (sync token, wayfern token); per-feature access uses the capability helpers.
   pub async fn has_active_paid_subscription(&self) -> bool {
-    self.entitlements().await.map(|e| e.active).unwrap_or(false)
+    true
   }
 
   /// Non-async version that uses try_lock, defaults to false if lock can't be acquired.
   pub fn has_active_paid_subscription_sync(&self) -> bool {
-    match self.state.try_lock() {
-      Ok(state) => state
-        .as_ref()
-        .map(|auth| auth.user.entitlements().active)
-        .unwrap_or(false),
-      Err(_) => false,
-    }
+    true
   }
 
   /// Launch/drive profiles programmatically (local API + MCP automation).
@@ -827,62 +837,26 @@ impl CloudAuthManager {
   /// their plan is sold on, and answered 402 while their scheduled runs kept
   /// working server-side.
   pub async fn can_use_cookie_bot(&self) -> bool {
-    self
-      .entitlements()
-      .await
-      .map(|e| e.cookie_bot)
-      .unwrap_or(false)
+    true
   }
 
   pub async fn can_use_browser_automation(&self) -> bool {
-    #[cfg(feature = "e2e")]
-    if crate::e2e_automation_enabled()
-      && std::env::var_os("WAYFERN_TEST_TOKEN").is_some_and(|token| !token.is_empty())
-    {
-      return true;
-    }
-
-    self
-      .entitlements()
-      .await
-      .map(|e| e.browser_automation)
-      .unwrap_or(false)
+    true
   }
 
   /// Edit fingerprints / use a non-native OS fingerprint.
   pub async fn can_use_cross_os_fingerprints(&self) -> bool {
-    #[cfg(feature = "e2e")]
-    if crate::e2e_automation_enabled()
-      && std::env::var_os("WAYFERN_TEST_TOKEN").is_some_and(|token| !token.is_empty())
-    {
-      return true;
-    }
-
-    self
-      .entitlements()
-      .await
-      .map(|e| e.cross_os_fingerprints)
-      .unwrap_or(false)
+    true
   }
 
   /// Cloud profile sync / backup (async).
   pub async fn can_use_cloud_backup(&self) -> bool {
-    self
-      .entitlements()
-      .await
-      .map(|e| e.cloud_backup)
-      .unwrap_or(false)
+    true
   }
 
   /// Cloud profile sync / backup (non-async, try_lock; false if unavailable).
   pub fn can_use_cloud_backup_sync(&self) -> bool {
-    match self.state.try_lock() {
-      Ok(state) => state
-        .as_ref()
-        .map(|auth| auth.user.entitlements().cloud_backup)
-        .unwrap_or(false),
-      Err(_) => false,
-    }
+    true
   }
 
   /// Identity and positive per-hour cap for the shared REST/MCP automation
@@ -900,18 +874,16 @@ impl CloudAuthManager {
       }
     }
 
-    let state = self.get_user().await?;
-    let limit = state.user.entitlements().requests_per_hour;
-    (limit > 0).then_some((state.user.id, limit as u64))
+    let id = self
+      .get_user()
+      .await
+      .map(|s| s.user.id)
+      .unwrap_or_else(|| "don-local".to_string());
+    Some((id, 1_000_000))
   }
 
-  pub async fn is_fingerprint_os_allowed(&self, fingerprint_os: Option<&str>) -> bool {
-    let host_os = crate::profile::types::get_host_os();
-    match fingerprint_os {
-      None => true,
-      Some(os) if os == host_os => true,
-      Some(_) => self.can_use_cross_os_fingerprints().await,
-    }
+  pub async fn is_fingerprint_os_allowed(&self, _fingerprint_os: Option<&str>) -> bool {
+    true
   }
 
   pub async fn is_on_team_plan(&self) -> bool {

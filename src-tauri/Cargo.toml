@@ -1,8 +1,8 @@
 [package]
 name = "donutbrowser"
-version = "0.28.2"
-description = "Simple Yet Powerful Anti-Detect Browser"
-authors = ["zhom@github"]
+version = "0.0.1"
+description = "DON — local AGPL fork of Donut Browser with unlocked features and safer fingerprints"
+authors = ["DON fork"]
 edition = "2021"
 default-run = "donutbrowser"
 

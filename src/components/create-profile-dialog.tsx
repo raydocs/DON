@@ -53,17 +53,28 @@ import { useBrowserDownload } from "@/hooks/use-browser-download";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { getBrowserIcon } from "@/lib/browser-utils";
+import {
+  buildAutoProfileName,
+  buildClaudeNote,
+  buildClaudeTags,
+  buildProxyOccupancy,
+  buildResidentialLabel,
+  CLAUDE_DEFAULT_START_URL,
+  claudeCreateBlockers,
+  getClaudeWayfernConfig,
+  nextAutoCardLabel,
+  PROXY_REUSE_COOLDOWN_DAYS,
+  pickAvailableProxy,
+  profilesHoldingProxy,
+  proxyOccupancyLabel,
+} from "@/lib/claude-workflow";
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
 import { cn } from "@/lib/utils";
-import type { BrowserReleaseTypes, WayfernConfig, WayfernOS } from "@/types";
-
-const getCurrentOS = (): WayfernOS => {
-  if (typeof navigator === "undefined") return "linux";
-  const platform = navigator.platform.toLowerCase();
-  if (platform.includes("win")) return "windows";
-  if (platform.includes("mac")) return "macos";
-  return "linux";
-};
+import type {
+  BrowserProfile,
+  BrowserReleaseTypes,
+  WayfernConfig,
+} from "@/types";
 
 import { RippleButton } from "./ui/ripple";
 
@@ -86,9 +97,14 @@ interface CreateProfileDialogProps {
     dnsBlocklist?: string;
     launchHook?: string;
     password?: string;
+    /** DON Claude isolation: applied after create via tags/note commands. */
+    claudeTags?: string[];
+    claudeNote?: string;
   }) => Promise<void>;
   selectedGroupId?: string;
   crossOsUnlocked?: boolean;
+  /** Existing profiles — used to block shared residential proxies. */
+  existingProfiles?: BrowserProfile[];
 }
 
 interface BrowserOption {
@@ -109,6 +125,7 @@ export function CreateProfileDialog({
   onCreateProfile,
   selectedGroupId,
   crossOsUnlocked = false,
+  existingProfiles = [],
 }: CreateProfileDialogProps) {
   const { t } = useTranslation();
   const proxyListboxIdAntiDetect = useId();
@@ -128,11 +145,16 @@ export function CreateProfileDialog({
   const [proxyPopoverOpen, setProxyPopoverOpen] = useState(false);
   const [dnsBlocklist, setDnsBlocklist] = useState<string>("");
   const [launchHook, setLaunchHook] = useState("");
+  /** Claude isolation workflow (default ON for DON). */
+  const [claudeMode, setClaudeMode] = useState(true);
+  const [cardLabel, setCardLabel] = useState("");
+  const [residentialLabel, setResidentialLabel] = useState("");
+  const [workflowError, setWorkflowError] = useState<string | null>(null);
 
-  // Wayfern anti-detect states
-  const [wayfernConfig, setWayfernConfig] = useState<WayfernConfig>(() => ({
-    os: getCurrentOS(), // Default to current OS
-  }));
+  // Wayfern anti-detect states (DON Claude defaults)
+  const [wayfernConfig, setWayfernConfig] = useState<WayfernConfig>(() =>
+    getClaudeWayfernConfig(),
+  );
 
   // Handle browser selection from the initial screen
   const handleBrowserSelect = (browser: BrowserTypeString) => {
@@ -146,6 +168,11 @@ export function CreateProfileDialog({
     setProfileName("");
     setSelectedProxyId(undefined);
     setLaunchHook("");
+    setCardLabel("");
+    setResidentialLabel("");
+    setClaudeMode(true);
+    setWayfernConfig(getClaudeWayfernConfig());
+    setWorkflowError(null);
   };
 
   const handleTabChange = (value: string) => {
@@ -306,6 +333,34 @@ export function CreateProfileDialog({
     selectedBrowser,
   ]);
 
+  // Claude mode: once dialog opens, auto-pick free proxy + card label.
+  // Start page (claude.com) is stamped into the note — not launch_hook
+  // (launch_hook is an HTTP webhook, not a browser URL).
+  useEffect(() => {
+    if (!isOpen || !claudeMode) return;
+    const free = pickAvailableProxy(storedProxies, existingProfiles);
+    setSelectedProxyId((prev) => prev ?? free?.id);
+    setCardLabel((prev) => prev.trim() || nextAutoCardLabel(existingProfiles));
+    // Only re-seed when dialog opens or proxy list changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentional open seed
+  }, [isOpen, claudeMode, storedProxies, existingProfiles]);
+
+  // When proxy changes under Claude mode, stamp name + 家宽 label from the node.
+  useEffect(() => {
+    if (!claudeMode || !selectedProxyId || selectedProxyId.startsWith("vpn-")) {
+      return;
+    }
+    const proxy = storedProxies.find((p) => p.id === selectedProxyId);
+    if (!proxy) return;
+    setResidentialLabel(buildResidentialLabel(proxy));
+    setProfileName((prev) => {
+      if (!prev.trim() || prev.startsWith("Claude-")) {
+        return buildAutoProfileName(proxy, existingProfiles);
+      }
+      return prev;
+    });
+  }, [claudeMode, selectedProxyId, storedProxies, existingProfiles]);
+
   // Load release types when browser selection changes
   useEffect(() => {
     if (selectedBrowser) {
@@ -401,8 +456,32 @@ export function CreateProfileDialog({
           return;
         }
 
-        // The fingerprint will be generated at launch time by the Rust backend
-        const finalWayfernConfig = { ...wayfernConfig };
+        const effectiveCard =
+          cardLabel.trim() || nextAutoCardLabel(existingProfiles);
+        if (claudeMode) {
+          const blockers = claudeCreateBlockers({
+            name: profileName,
+            proxyId: resolvedProxyId,
+            profiles: existingProfiles,
+            cardLabel: effectiveCard,
+          });
+          if (blockers.length > 0) {
+            setWorkflowError(blockers.join(" · "));
+            setIsCreating(false);
+            return;
+          }
+        }
+        setWorkflowError(null);
+
+        // Claude mode locks isolation-critical fields even if the form was tweaked.
+        const finalWayfernConfig = claudeMode
+          ? {
+              ...wayfernConfig,
+              ...getClaudeWayfernConfig(),
+              // Keep user OS choice if they unlocked cross-OS and changed it.
+              os: wayfernConfig.os ?? getClaudeWayfernConfig().os,
+            }
+          : { ...wayfernConfig };
 
         await onCreateProfile({
           name: profileName.trim(),
@@ -419,8 +498,23 @@ export function CreateProfileDialog({
           extensionGroupId: selectedExtensionGroupId,
           ephemeral,
           dnsBlocklist: dnsBlocklist || undefined,
+          // launch_hook is an optional HTTP webhook — not the start page.
           launchHook: launchHook.trim() || undefined,
           password: passwordToSet,
+          claudeTags: claudeMode ? buildClaudeTags() : undefined,
+          claudeNote: claudeMode
+            ? buildClaudeNote({
+                cardLabel: effectiveCard,
+                residentialLabel: (() => {
+                  if (residentialLabel.trim()) return residentialLabel.trim();
+                  const p = resolvedProxyId
+                    ? storedProxies.find((x) => x.id === resolvedProxyId)
+                    : undefined;
+                  return p ? buildResidentialLabel(p) : undefined;
+                })(),
+                startUrl: CLAUDE_DEFAULT_START_URL,
+              })
+            : undefined,
         });
       } else {
         // Regular browser
@@ -474,9 +568,11 @@ export function CreateProfileDialog({
     setReleaseTypes({});
     setIsLoadingReleaseTypes(false);
     setReleaseTypesError(null);
-    setWayfernConfig({
-      os: getCurrentOS(), // Reset to current OS
-    });
+    setWayfernConfig(getClaudeWayfernConfig());
+    setClaudeMode(true);
+    setCardLabel("");
+    setResidentialLabel("");
+    setWorkflowError(null);
     setEphemeral(false);
     setEnablePassword(false);
     setPassword("");
@@ -506,19 +602,54 @@ export function CreateProfileDialog({
     [isBrowserDownloading],
   );
 
+  const isVpnSelection = selectedProxyId?.startsWith("vpn-") ?? false;
+  const resolvedProxyIdForGate = isVpnSelection ? undefined : selectedProxyId;
+
   const isCreateDisabled = useMemo(() => {
     if (!profileName.trim()) return true;
     if (!selectedBrowser) return true;
     if (isBrowserCurrentlyDownloading(selectedBrowser)) return true;
     if (!getCreatableVersion(selectedBrowser)) return true;
-
+    if (claudeMode) {
+      if (
+        claudeCreateBlockers({
+          name: profileName,
+          proxyId: resolvedProxyIdForGate,
+          profiles: existingProfiles,
+          cardLabel,
+        }).length > 0
+      ) {
+        return true;
+      }
+    }
     return false;
   }, [
     profileName,
     selectedBrowser,
     isBrowserCurrentlyDownloading,
     getCreatableVersion,
+    claudeMode,
+    resolvedProxyIdForGate,
+    existingProfiles,
+    cardLabel,
   ]);
+
+  const proxyOccupancy = useMemo(
+    () => buildProxyOccupancy(existingProfiles),
+    [existingProfiles],
+  );
+
+  const proxyShareWarning = useMemo(() => {
+    if (!resolvedProxyIdForGate) return null;
+    const holds = profilesHoldingProxy(
+      resolvedProxyIdForGate,
+      existingProfiles,
+    );
+    if (holds.length === 0) return null;
+    return holds
+      .map((h) => `${h.profile.name} (${h.daysRemaining}d left)`)
+      .join(", ");
+  }, [resolvedProxyIdForGate, existingProfiles]);
 
   // Filter supported browsers for regular browsers
   const regularBrowsers = browserOptions.filter((browser) =>
@@ -669,12 +800,113 @@ export function CreateProfileDialog({
                           />
                         </div>
 
+                        {/* DON Claude isolation workflow */}
+                        <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+                          <div className="flex items-center gap-x-2">
+                            <Checkbox
+                              id="claude-mode"
+                              checked={claudeMode}
+                              onCheckedChange={(checked) => {
+                                const on = checked === true;
+                                setClaudeMode(on);
+                                setWorkflowError(null);
+                                if (on) {
+                                  setWayfernConfig(getClaudeWayfernConfig());
+                                  setEphemeral(false);
+                                }
+                              }}
+                            />
+                            <Label
+                              htmlFor="claude-mode"
+                              className="font-medium"
+                            >
+                              {t("claudeWorkflow.createToggle", {
+                                defaultValue:
+                                  "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+                              })}
+                            </Label>
+                          </div>
+                          <p className="ml-6 text-sm text-muted-foreground">
+                            {t("claudeWorkflow.createHint", {
+                              defaultValue: `Auto-fills free 家宽 node, card label, name. Node lease ${PROXY_REUSE_COOLDOWN_DAYS} days then reusable. Start page ${CLAUDE_DEFAULT_START_URL}. Geoip + WebRTC off + fixed FP + host DPR.`,
+                            })}
+                          </p>
+                          {claudeMode && (
+                            <div className="ml-6 space-y-3">
+                              <div className="space-y-1.5">
+                                <Label htmlFor="residential-label">
+                                  {t("claudeWorkflow.residentialLabel", {
+                                    defaultValue: "家宽 / residential label",
+                                  })}
+                                </Label>
+                                <Input
+                                  id="residential-label"
+                                  value={residentialLabel}
+                                  onChange={(e) => {
+                                    setResidentialLabel(e.target.value);
+                                  }}
+                                  placeholder="e.g. 家宽-上海-线路A"
+                                />
+                              </div>
+                              <div className="space-y-1.5">
+                                <Label htmlFor="card-label">
+                                  {t("claudeWorkflow.cardLabel", {
+                                    defaultValue: "Card label (unique)",
+                                  })}
+                                </Label>
+                                <Input
+                                  id="card-label"
+                                  value={cardLabel}
+                                  onChange={(e) => {
+                                    setCardLabel(e.target.value);
+                                    setWorkflowError(null);
+                                  }}
+                                  placeholder="e.g. card-A (never paste full card number)"
+                                />
+                              </div>
+                              <ul className="list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+                                <li>
+                                  Free node auto-selected (no active{" "}
+                                  {PROXY_REUSE_COOLDOWN_DAYS}-day lease)
+                                </li>
+                                <li>
+                                  Same node reusable only after{" "}
+                                  {PROXY_REUSE_COOLDOWN_DAYS} days
+                                </li>
+                                <li>
+                                  Start page defaults to{" "}
+                                  {CLAUDE_DEFAULT_START_URL}
+                                </li>
+                                <li>
+                                  Timezone/language stamped from proxy exit
+                                  (geoip on)
+                                </li>
+                                <li>
+                                  Host DPR locked — safer Claude/Stripe payment
+                                  UI
+                                </li>
+                              </ul>
+                              {proxyShareWarning && (
+                                <p className="text-sm text-destructive-text">
+                                  Node still leased by: {proxyShareWarning}
+                                </p>
+                              )}
+                              {workflowError && (
+                                <p className="text-sm text-destructive-text">
+                                  {workflowError}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
                         {/* Ephemeral Option */}
                         <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
                           <div className="flex items-center gap-x-2">
                             <Checkbox
                               id="ephemeral"
                               checked={ephemeral}
+                              disabled={claudeMode}
                               onCheckedChange={(checked) => {
                                 setEphemeral(checked === true);
                               }}
@@ -684,7 +916,12 @@ export function CreateProfileDialog({
                             </Label>
                           </div>
                           <p className="ml-6 text-sm text-muted-foreground">
-                            {t("profiles.ephemeralDescription")}
+                            {claudeMode
+                              ? t("claudeWorkflow.ephemeralDisabled", {
+                                  defaultValue:
+                                    "Disabled in Claude isolation — profiles must persist cookies/login.",
+                                })
+                              : t("profiles.ephemeralDescription")}
                           </p>
                         </div>
 
@@ -1084,26 +1321,45 @@ export function CreateProfileDialog({
                                         />
                                         {t("common.labels.none")}
                                       </CommandItem>
-                                      {storedProxies.map((proxy) => (
-                                        <CommandItem
-                                          key={proxy.id}
-                                          value={proxy.name}
-                                          onSelect={() => {
-                                            setSelectedProxyId(proxy.id);
-                                            setProxyPopoverOpen(false);
-                                          }}
-                                        >
-                                          <LuCheck
-                                            className={cn(
-                                              "mr-2 size-4",
-                                              selectedProxyId === proxy.id
-                                                ? "opacity-100"
-                                                : "opacity-0",
-                                            )}
-                                          />
-                                          {proxy.name}
-                                        </CommandItem>
-                                      ))}
+                                      {storedProxies.map((proxy) => {
+                                        const occ = proxyOccupancyLabel(
+                                          proxy.id,
+                                          proxyOccupancy,
+                                        );
+                                        const taken = Boolean(occ);
+                                        return (
+                                          <CommandItem
+                                            key={proxy.id}
+                                            value={proxy.name}
+                                            disabled={claudeMode && taken}
+                                            onSelect={() => {
+                                              if (claudeMode && taken) return;
+                                              setSelectedProxyId(proxy.id);
+                                              setProxyPopoverOpen(false);
+                                              setWorkflowError(null);
+                                            }}
+                                          >
+                                            <LuCheck
+                                              className={cn(
+                                                "mr-2 size-4",
+                                                selectedProxyId === proxy.id
+                                                  ? "opacity-100"
+                                                  : "opacity-0",
+                                              )}
+                                            />
+                                            <span className="flex min-w-0 flex-1 flex-col">
+                                              <span className="truncate">
+                                                {proxy.name}
+                                              </span>
+                                              {occ ? (
+                                                <span className="truncate text-xs text-destructive-text">
+                                                  {occ}
+                                                </span>
+                                              ) : null}
+                                            </span>
+                                          </CommandItem>
+                                        );
+                                      })}
                                     </CommandGroup>
                                     {vpnConfigs.length > 0 && (
                                       <CommandGroup heading="VPNs">
@@ -1444,26 +1700,45 @@ export function CreateProfileDialog({
                                         />
                                         {t("common.labels.none")}
                                       </CommandItem>
-                                      {storedProxies.map((proxy) => (
-                                        <CommandItem
-                                          key={proxy.id}
-                                          value={proxy.name}
-                                          onSelect={() => {
-                                            setSelectedProxyId(proxy.id);
-                                            setProxyPopoverOpen(false);
-                                          }}
-                                        >
-                                          <LuCheck
-                                            className={cn(
-                                              "mr-2 size-4",
-                                              selectedProxyId === proxy.id
-                                                ? "opacity-100"
-                                                : "opacity-0",
-                                            )}
-                                          />
-                                          {proxy.name}
-                                        </CommandItem>
-                                      ))}
+                                      {storedProxies.map((proxy) => {
+                                        const occ = proxyOccupancyLabel(
+                                          proxy.id,
+                                          proxyOccupancy,
+                                        );
+                                        const taken = Boolean(occ);
+                                        return (
+                                          <CommandItem
+                                            key={proxy.id}
+                                            value={proxy.name}
+                                            disabled={claudeMode && taken}
+                                            onSelect={() => {
+                                              if (claudeMode && taken) return;
+                                              setSelectedProxyId(proxy.id);
+                                              setProxyPopoverOpen(false);
+                                              setWorkflowError(null);
+                                            }}
+                                          >
+                                            <LuCheck
+                                              className={cn(
+                                                "mr-2 size-4",
+                                                selectedProxyId === proxy.id
+                                                  ? "opacity-100"
+                                                  : "opacity-0",
+                                              )}
+                                            />
+                                            <span className="flex min-w-0 flex-1 flex-col">
+                                              <span className="truncate">
+                                                {proxy.name}
+                                              </span>
+                                              {occ ? (
+                                                <span className="truncate text-xs text-destructive-text">
+                                                  {occ}
+                                                </span>
+                                              ) : null}
+                                            </span>
+                                          </CommandItem>
+                                        );
+                                      })}
                                     </CommandGroup>
                                     {vpnConfigs.length > 0 && (
                                       <CommandGroup heading="VPNs">

@@ -2037,33 +2037,9 @@ rm "{}"
 
 #[tauri::command]
 pub async fn check_for_app_updates() -> Result<Option<AppUpdateInfo>, String> {
-  #[cfg(feature = "e2e")]
-  if crate::e2e_automation_enabled()
-    && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some()
-  {
-    log::info!("E2E: skipping automatic app update check");
-    return Ok(None);
-  }
-
-  if crate::app_dirs::is_portable() {
-    log::info!("App auto-updates disabled in portable mode");
-    return Ok(None);
-  }
-  // The disable_auto_updates setting controls app self-updates only
-  let disabled = crate::settings_manager::SettingsManager::instance()
-    .load_settings()
-    .map(|s| s.disable_auto_updates)
-    .unwrap_or(false);
-  if disabled {
-    log::info!("App auto-updates disabled by user setting");
-    return Ok(None);
-  }
-
-  let updater = AppAutoUpdater::instance();
-  updater
-    .check_for_updates()
-    .await
-    .map_err(|e| format!("Failed to check for app updates: {e}"))
+  // DON fork: never fetch or install upstream Donut Browser releases.
+  log::info!("DON: app auto-updates permanently disabled");
+  Ok(None)
 }
 
 #[tauri::command]

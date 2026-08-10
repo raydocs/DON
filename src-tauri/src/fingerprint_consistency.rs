@@ -390,6 +390,39 @@ pub async fn match_profile_fingerprint_to_exit(
   Ok(())
 }
 
+/// On-demand consistency check for the post-create report: resolves the
+/// profile's stored route, measures the exit through it (served from the
+/// 30-minute cache when warm), and compares it against the fingerprint.
+/// Unlike the launch gate this never blocks and never mints consent tokens —
+/// it only reports.
+#[tauri::command]
+pub async fn check_profile_consistency_now(
+  profile_id: String,
+) -> Result<ConsistencyResult, String> {
+  let manager = crate::profile::ProfileManager::instance();
+  let profile = manager
+    .list_profiles()
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .find(|p| p.id.to_string() == profile_id)
+    .ok_or_else(|| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
+
+  let Some(key) = exit_cache_key(&profile) else {
+    return Ok(ConsistencyResult::skip());
+  };
+
+  // Resolve the same upstream the launcher would hand the browser. VPN
+  // profiles have no persistent upstream (the worker is per-launch), so there
+  // is nothing to probe for them here.
+  let upstream = profile.proxy_id.as_ref().and_then(|proxy_id| {
+    PROXY_MANAGER
+      .resolve_proxy_for_profile(proxy_id, &profile.id.to_string())
+      .or_else(|| PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+  });
+
+  probe_and_check_consistency(&profile, upstream.as_ref(), &key).await
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

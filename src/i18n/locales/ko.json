@@ -176,15 +176,6 @@
         "mismatchToast": "비밀번호가 일치하지 않습니다"
       }
     },
-    "commercial": {
-      "title": "상업용 라이선스",
-      "trialActive": "체험판: {{days}}일 {{hours}}시간 남음",
-      "trialActiveDescription": "체험 기간 동안 상업적 사용은 무료입니다. 체험이 종료되면 모든 기능은 계속 작동합니다 — 개인 사용은 무료로 유지되며 상업적 사용만 라이선스가 필요합니다.",
-      "trialExpired": "체험판이 만료되었습니다",
-      "trialExpiredDescription": "개인 사용은 무료로 유지됩니다. 상업적 사용에는 라이선스가 필요합니다.",
-      "subscriptionActive": "구독 중 — {{plan}} 플랜",
-      "subscriptionActiveDescription": "Donut Browser 구독이 활성 상태입니다. 플랜 기간 동안 상업적 사용이 라이선스됩니다."
-    },
     "advanced": {
       "title": "고급",
       "clearCache": "모든 버전 캐시 지우기",
@@ -473,7 +464,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "XTLS Vision 및 REALITY가 필요합니다.",
       "vlessUriRequired": "VLESS URI를 입력하세요.",
-      "vlessUriInvalid": "호스트와 포트가 포함된 올바른 VLESS URI를 입력하세요."
+      "vlessUriInvalid": "호스트와 포트가 포함된 올바른 VLESS URI를 입력하세요.",
+      "pasteFilled": "붙여넣은 프록시 문자열로 필드를 채웠습니다"
     },
     "types": {
       "http": "HTTP",
@@ -1566,14 +1558,6 @@
     "acceptFailed": "약관 동의 실패",
     "tryAgain": "다시 시도하세요"
   },
-  "commercialTrial": {
-    "title": "상업용 체험판 만료됨",
-    "description": "2주 상업용 체험판 기간이 종료되었습니다.",
-    "body": "Donut Browser를 비즈니스 용도로 사용하는 경우 계속 사용하려면 상업용 라이선스를 구매해야 합니다. 개인 용도로는 계속 무료로 사용할 수 있습니다.",
-    "understandButton": "이해했습니다",
-    "failed": "확인 저장 실패",
-    "tryAgain": "다시 시도하세요"
-  },
   "permissionDialog": {
     "titleMicrophone": "마이크 액세스가 필요합니다",
     "titleCamera": "카메라 액세스가 필요합니다",
@@ -2124,8 +2108,7 @@
       "personalTitle": "개인 사용",
       "personalDesc": "영구적으로 무료입니다.",
       "commercialTitle": "상업적 사용",
-      "trialBadge": "2주 무료",
-      "commercialDesc": "2주간의 평가 기간 동안 무료입니다. 이후에는 유료 요금제가 필요하며, 이를 통해 프로젝트가 유지되고 발전할 수 있습니다."
+      "commercialDesc": "DON은 AGPL 포크입니다. 로컬 기능은 모두 잠금 해제되어 있으며 유료 플랜이 필요하지 않습니다."
     }
   },
   "wayfernBlocked": {
@@ -2509,5 +2492,45 @@
     "cancelled": "실행이 취소됨",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "이 프로필은 아직 실행된 적이 없어 Donut이 관리하는 확장 프로그램만 확인할 수 있었습니다."
+  },
+  "claudeWorkflow": {
+    "quickTitle": "프록시 문자열로 빠른 생성",
+    "quickPlaceholder": "host:port:user:pass 또는 scheme://user:pass@host:port",
+    "quickCta": "생성 후 검사",
+    "quickOk": "{{name}} 생성됨",
+    "quickFailed": "빠른 생성 실패: {{message}}",
+    "quickInvalid": "프록시 문자열을 파싱할 수 없습니다",
+    "reportTitle": "생성 후 검사",
+    "reportChecking": "프록시 출구 확인 중…",
+    "reportProbeFailed": "출구 프로브 실패: {{message}}",
+    "reportExitIp": "출구 IP",
+    "reportCountry": "국가",
+    "reportExitTimezone": "출구 시간대",
+    "reportFpTimezone": "지문 시간대",
+    "reportFpLanguage": "지문 언어",
+    "reportWebrtcBlocked": "차단됨(모든 트래픽이 프록시 경유)",
+    "reportWebrtcOpen": "열림",
+    "reportScreen": "화면",
+    "reportConsistent": "시간대와 언어가 프록시 출구와 일치합니다",
+    "reportTzMismatch": "시간대 불일치: 출구 {{exit}} vs 지문 {{fp}}",
+    "reportLangMismatch": "언어 불일치: 출구 국가 {{country}} vs 지문 {{lang}}",
+    "reportMatchCta": "프록시에 맞추기",
+    "reportMatchedOk": "지문을 프록시 출구에 맞췄습니다",
+    "reportNotChecked": "비교할 항목 없음 — 프록시 출구가 측정되지 않았습니다",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

@@ -172,6 +172,8 @@ interface TableMeta {
   stoppingProfiles: Set<string>;
   isUpdating: (browser: string) => boolean;
   browserState: ReturnType<typeof useBrowserState>;
+  /** All profiles — used for proxy occupancy / shared-IP badges (DON). */
+  profiles: BrowserProfile[];
 
   // Tags editor state
   tagsOverrides: Record<string, string[]>;
@@ -960,7 +962,9 @@ const ProxyCellTrigger = React.memo<{
   hasAssignment: boolean;
   vpnBadge: string | null;
   isDisabled: boolean;
-}>(({ displayName, hasAssignment, vpnBadge, isDisabled }) => {
+  /** e.g. "shared×2" when multiple profiles use this proxy */
+  occupancyBadge?: string | null;
+}>(({ displayName, hasAssignment, vpnBadge, isDisabled, occupancyBadge }) => {
   const textRef = React.useRef<HTMLSpanElement | null>(null);
   const [isOverflowing, setIsOverflowing] = React.useState(false);
 
@@ -990,11 +994,20 @@ const ProxyCellTrigger = React.memo<{
                 {vpnBadge}
               </Badge>
             )}
+            {occupancyBadge && (
+              <Badge
+                variant="outline"
+                className="shrink-0 border-destructive/40 px-1 py-0 text-[10px] leading-tight text-destructive-text"
+              >
+                {occupancyBadge}
+              </Badge>
+            )}
             <span
               ref={textRef}
               className={cn(
                 "min-w-0 truncate text-sm",
                 !hasAssignment && "text-muted-foreground",
+                occupancyBadge && "text-destructive-text",
               )}
             >
               {displayName}
@@ -1002,9 +1015,11 @@ const ProxyCellTrigger = React.memo<{
           </span>
         </PopoverTrigger>
       </TooltipTrigger>
-      {hasAssignment && isOverflowing && (
-        <TooltipContent>{displayName}</TooltipContent>
-      )}
+      {(hasAssignment && isOverflowing) || occupancyBadge ? (
+        <TooltipContent>
+          {occupancyBadge ? `${displayName} · ${occupancyBadge}` : displayName}
+        </TooltipContent>
+      ) : null}
     </Tooltip>
   );
 });
@@ -2368,6 +2383,7 @@ export function ProfilesDataTable({
       stoppingProfiles,
       isUpdating,
       browserState,
+      profiles,
 
       // Tags editor state
       tagsOverrides,
@@ -2499,6 +2515,7 @@ export function ProfilesDataTable({
       stoppingProfiles,
       isUpdating,
       browserState,
+      profiles,
       tagsOverrides,
       allTags,
       openTagsEditorFor,
@@ -2523,7 +2540,6 @@ export function ProfilesDataTable({
       newProfileName,
       isRenamingSaving,
       trafficSnapshots,
-      profiles,
       renameError,
       onKillProfile,
       onLaunchProfile,
@@ -3246,6 +3262,16 @@ export function ProfilesDataTable({
           const vpnBadge = effectiveVpn ? "WG" : null;
           const isSelectorOpen = meta.openProxySelectorFor === profile.id;
           const selectedId = effectiveVpnId ?? effectiveProxyId ?? null;
+          // DON: show when this residential proxy is shared across profiles
+          let occupancyBadge: string | null = null;
+          if (effectiveProxyId && !effectiveVpn) {
+            const shareCount = meta.profiles.filter(
+              (p) => p.proxy_id === effectiveProxyId,
+            ).length;
+            if (shareCount > 1) {
+              occupancyBadge = `shared×${shareCount}`;
+            }
+          }
 
           // When profile is running, show bandwidth chart instead of proxy selector
           if (isRunning && meta.trafficSnapshots) {
@@ -3282,6 +3308,7 @@ export function ProfilesDataTable({
                   hasAssignment={hasAssignment}
                   vpnBadge={vpnBadge}
                   isDisabled={isDisabled}
+                  occupancyBadge={occupancyBadge}
                 />
 
                 {!isDisabled && (

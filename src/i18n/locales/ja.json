@@ -176,15 +176,6 @@
         "mismatchToast": "パスワードが一致しません"
       }
     },
-    "commercial": {
-      "title": "商用ライセンス",
-      "trialActive": "トライアル: 残り {{days}} 日 {{hours}} 時間",
-      "trialActiveDescription": "トライアル期間中は商用利用が無料です。期間が終了してもすべての機能はそのまま使用できます — 個人利用は引き続き無料で、商用利用のみライセンスが必要になります。",
-      "trialExpired": "トライアル期限切れ",
-      "trialExpiredDescription": "個人利用は引き続き無料です。商用利用にはライセンスが必要です。",
-      "subscriptionActive": "サブスクリプション中 — {{plan}} プラン",
-      "subscriptionActiveDescription": "Donut Browser のサブスクリプションが有効です。プランの期間中、商用利用がライセンスされます。"
-    },
     "advanced": {
       "title": "詳細設定",
       "clearCache": "すべてのバージョンキャッシュをクリア",
@@ -473,7 +464,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "XTLS Vision と REALITY が必要です。",
       "vlessUriRequired": "VLESS URI を入力してください。",
-      "vlessUriInvalid": "ホストとポートを含む有効な VLESS URI を入力してください。"
+      "vlessUriInvalid": "ホストとポートを含む有効な VLESS URI を入力してください。",
+      "pasteFilled": "貼り付けたプロキシ文字列から入力しました"
     },
     "types": {
       "http": "HTTP",
@@ -1566,14 +1558,6 @@
     "acceptFailed": "規約への同意に失敗しました",
     "tryAgain": "もう一度お試しください"
   },
-  "commercialTrial": {
-    "title": "商用試用期間が終了しました",
-    "description": "2 週間の商用試用期間が終了しました。",
-    "body": "商用目的で Donut Browser を使用する場合は、続行するために商用ライセンスを購入する必要があります。個人利用は引き続き無料でお使いいただけます。",
-    "understandButton": "了解しました",
-    "failed": "確認の保存に失敗しました",
-    "tryAgain": "もう一度お試しください"
-  },
   "permissionDialog": {
     "titleMicrophone": "マイクへのアクセスが必要です",
     "titleCamera": "カメラへのアクセスが必要です",
@@ -2124,8 +2108,7 @@
       "personalTitle": "個人利用",
       "personalDesc": "永久に無料です。",
       "commercialTitle": "商用利用",
-      "trialBadge": "2週間無料",
-      "commercialDesc": "2週間の評価期間は無料です。その後は有料プランが必要で、これによりプロジェクトの維持と発展が支えられます。"
+      "commercialDesc": "DON は AGPL フォークです。ローカル機能はすべてアンロック済みで、有料プランは不要です。"
     }
   },
   "wayfernBlocked": {
@@ -2509,5 +2492,45 @@
     "cancelled": "起動をキャンセルしました",
     "vpnExtensionEntry": " {{version}}（{{capability}}、{{source}}）",
     "scanIncompleteMissing": "このプロファイルはまだ起動されていないため、Donutが管理する拡張機能のみ確認できました。"
+  },
+  "claudeWorkflow": {
+    "quickTitle": "プロキシ文字列からクイック作成",
+    "quickPlaceholder": "host:port:user:pass または scheme://user:pass@host:port",
+    "quickCta": "作成してチェック",
+    "quickOk": "{{name}} を作成しました",
+    "quickFailed": "クイック作成に失敗: {{message}}",
+    "quickInvalid": "プロキシ文字列を解析できませんでした",
+    "reportTitle": "作成後チェック",
+    "reportChecking": "プロキシ出口を確認中…",
+    "reportProbeFailed": "出口プローブに失敗: {{message}}",
+    "reportExitIp": "出口 IP",
+    "reportCountry": "国",
+    "reportExitTimezone": "出口タイムゾーン",
+    "reportFpTimezone": "フィンガープリントのタイムゾーン",
+    "reportFpLanguage": "フィンガープリントの言語",
+    "reportWebrtcBlocked": "ブロック中(全トラフィックはプロキシ経由)",
+    "reportWebrtcOpen": "オープン",
+    "reportScreen": "画面",
+    "reportConsistent": "タイムゾーンと言語はプロキシ出口と一致しています",
+    "reportTzMismatch": "タイムゾーン不一致: 出口 {{exit}} vs フィンガープリント {{fp}}",
+    "reportLangMismatch": "言語不一致: 出口国 {{country}} vs フィンガープリント {{lang}}",
+    "reportMatchCta": "プロキシに合わせる",
+    "reportMatchedOk": "フィンガープリントをプロキシ出口に合わせました",
+    "reportNotChecked": "比較対象なし — プロキシ出口は測定されていません",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

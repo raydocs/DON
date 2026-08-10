@@ -44,10 +44,11 @@ pub fn log_dir_override() -> Option<PathBuf> {
 }
 
 pub fn app_name() -> &'static str {
+  // DON fork: separate data roots so official DonutBrowser profiles are never mixed in.
   if cfg!(debug_assertions) {
-    "DonutBrowserDev"
+    "DONDev"
   } else {
-    "DonutBrowser"
+    "DON"
   }
 }
 
@@ -241,8 +242,8 @@ mod tests {
   fn test_app_name() {
     let name = app_name();
     assert!(
-      name == "DonutBrowser" || name == "DonutBrowserDev",
-      "app_name should be DonutBrowser or DonutBrowserDev, got: {name}"
+      name == "DON" || name == "DONDev",
+      "app_name should be DON or DONDev, got: {name}"
     );
   }
 

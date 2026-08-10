@@ -11,13 +11,16 @@ const ACCEPT_TERMS_FLAG: &str = "--accept-terms-and-conditions";
 const MIN_VALID_TIMESTAMP: i64 = 1577836800; // 2020-01-01 00:00:00 UTC
 
 pub struct WayfernTermsManager {
-  base_dirs: BaseDirs,
+  /// `None` in stripped/odd environments where the OS directory APIs fail
+  /// (observed in Windows e2e driver sessions). Path resolution then falls
+  /// back to environment variables — never crash the whole app over this.
+  base_dirs: Option<BaseDirs>,
 }
 
 impl WayfernTermsManager {
   fn new() -> Self {
     Self {
-      base_dirs: BaseDirs::new().expect("Failed to get base directories"),
+      base_dirs: BaseDirs::new(),
     }
   }
 
@@ -35,25 +38,43 @@ impl WayfernTermsManager {
           .join("license-accepted");
       }
       // Fallback to home directory
-      self
-        .base_dirs
-        .home_dir()
-        .join("AppData")
-        .join("Roaming")
-        .join("Wayfern")
-        .join("license-accepted")
+      if let Some(base_dirs) = &self.base_dirs {
+        return base_dirs
+          .home_dir()
+          .join("AppData")
+          .join("Roaming")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(user_profile)
+          .join("AppData")
+          .join("Roaming")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      PathBuf::from("Wayfern").join("license-accepted")
     }
 
     #[cfg(target_os = "macos")]
     {
       // macOS: ~/Library/Application Support/Wayfern/license-accepted
-      self
-        .base_dirs
-        .home_dir()
-        .join("Library")
-        .join("Application Support")
-        .join("Wayfern")
-        .join("license-accepted")
+      if let Some(base_dirs) = &self.base_dirs {
+        return base_dirs
+          .home_dir()
+          .join("Library")
+          .join("Application Support")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+          .join("Library")
+          .join("Application Support")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      PathBuf::from("Wayfern").join("license-accepted")
     }
 
     #[cfg(target_os = "linux")]
@@ -65,12 +86,20 @@ impl WayfernTermsManager {
           return xdg_path.join("Wayfern").join("license-accepted");
         }
       }
-      self
-        .base_dirs
-        .home_dir()
-        .join(".config")
-        .join("Wayfern")
-        .join("license-accepted")
+      if let Some(base_dirs) = &self.base_dirs {
+        return base_dirs
+          .home_dir()
+          .join(".config")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+          .join(".config")
+          .join("Wayfern")
+          .join("license-accepted");
+      }
+      PathBuf::from("Wayfern").join("license-accepted")
     }
   }
 

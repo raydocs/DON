@@ -176,15 +176,6 @@
         "mismatchToast": "Mật khẩu không khớp"
       }
     },
-    "commercial": {
-      "title": "Giấy phép thương mại",
-      "trialActive": "Dùng thử: còn {{days}} ngày, {{hours}} giờ",
-      "trialActiveDescription": "Sử dụng thương mại miễn phí trong thời gian dùng thử. Khi hết hạn, tất cả tính năng vẫn hoạt động — sử dụng cá nhân miễn phí, chỉ sử dụng thương mại mới cần giấy phép.",
-      "trialExpired": "Đã hết hạn dùng thử",
-      "trialExpiredDescription": "Sử dụng cá nhân vẫn miễn phí. Sử dụng thương mại cần giấy phép.",
-      "subscriptionActive": "Đã đăng ký — gói {{plan}}",
-      "subscriptionActiveDescription": "Đăng ký Donut Browser của bạn đang hoạt động. Sử dụng thương mại được cấp phép trong thời hạn gói."
-    },
     "advanced": {
       "title": "Nâng cao",
       "clearCache": "Xóa toàn bộ bộ nhớ đệm phiên bản",
@@ -473,7 +464,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "Yêu cầu XTLS Vision và REALITY.",
       "vlessUriRequired": "Nhập URI VLESS.",
-      "vlessUriInvalid": "Nhập URI VLESS hợp lệ có máy chủ và cổng."
+      "vlessUriInvalid": "Nhập URI VLESS hợp lệ có máy chủ và cổng.",
+      "pasteFilled": "Đã điền các trường từ proxy đã dán"
     },
     "types": {
       "http": "HTTP",
@@ -1566,14 +1558,6 @@
     "acceptFailed": "Chấp nhận điều khoản thất bại",
     "tryAgain": "Vui lòng thử lại"
   },
-  "commercialTrial": {
-    "title": "Thời gian dùng thử thương mại đã hết",
-    "description": "Thời gian dùng thử thương mại 2 tuần của bạn đã kết thúc.",
-    "body": "Nếu bạn sử dụng Donut Browser cho mục đích thương mại, bạn cần mua giấy phép thương mại để tiếp tục. Bạn vẫn có thể sử dụng miễn phí cho mục đích cá nhân.",
-    "understandButton": "Tôi hiểu",
-    "failed": "Lưu xác nhận thất bại",
-    "tryAgain": "Vui lòng thử lại"
-  },
   "permissionDialog": {
     "titleMicrophone": "Yêu cầu quyền truy cập micro",
     "titleCamera": "Yêu cầu quyền truy cập camera",
@@ -2124,8 +2108,7 @@
       "personalTitle": "Sử dụng cá nhân",
       "personalDesc": "Miễn phí vĩnh viễn.",
       "commercialTitle": "Sử dụng thương mại",
-      "trialBadge": "2 tuần miễn phí",
-      "commercialDesc": "Miễn phí dùng thử 2 tuần. Sau đó, gói trả phí giúp dự án được duy trì và phát triển."
+      "commercialDesc": "DON là một nhánh AGPL — mọi tính năng cục bộ đều đã mở khóa, không cần gói trả phí."
     }
   },
   "wayfernBlocked": {
@@ -2509,5 +2492,45 @@
     "cancelled": "Đã hủy khởi chạy",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Hồ sơ này chưa từng được khởi chạy nên chỉ có thể kiểm tra các tiện ích do Donut quản lý."
+  },
+  "claudeWorkflow": {
+    "quickTitle": "Tạo nhanh từ chuỗi proxy",
+    "quickPlaceholder": "host:port:user:pass hoặc scheme://user:pass@host:port",
+    "quickCta": "Tạo và kiểm tra",
+    "quickOk": "Đã tạo {{name}}",
+    "quickFailed": "Tạo nhanh thất bại: {{message}}",
+    "quickInvalid": "Không phân tích được chuỗi proxy",
+    "reportTitle": "Kiểm tra sau khi tạo",
+    "reportChecking": "Đang kiểm tra đầu ra proxy…",
+    "reportProbeFailed": "Dò đầu ra thất bại: {{message}}",
+    "reportExitIp": "IP đầu ra",
+    "reportCountry": "Quốc gia",
+    "reportExitTimezone": "Múi giờ đầu ra",
+    "reportFpTimezone": "Múi giờ dấu vân tay",
+    "reportFpLanguage": "Ngôn ngữ dấu vân tay",
+    "reportWebrtcBlocked": "đã chặn (mọi lưu lượng qua proxy)",
+    "reportWebrtcOpen": "mở",
+    "reportScreen": "Màn hình",
+    "reportConsistent": "Múi giờ và ngôn ngữ khớp với đầu ra proxy",
+    "reportTzMismatch": "Múi giờ không khớp: đầu ra {{exit}} vs dấu vân tay {{fp}}",
+    "reportLangMismatch": "Ngôn ngữ không khớp: quốc gia đầu ra {{country}} vs dấu vân tay {{lang}}",
+    "reportMatchCta": "Khớp theo proxy",
+    "reportMatchedOk": "Đã khớp dấu vân tay theo đầu ra proxy",
+    "reportNotChecked": "Không có gì để so sánh — chưa đo đầu ra proxy",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

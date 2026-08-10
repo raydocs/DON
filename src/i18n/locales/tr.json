@@ -176,15 +176,6 @@
         "mismatchToast": "Parola eşleşmiyor"
       }
     },
-    "commercial": {
-      "title": "Ticari Lisans",
-      "trialActive": "Deneme: {{days}} gün, {{hours}} saat kaldı",
-      "trialActiveDescription": "Deneme süresince ticari kullanım ücretsizdir. Süre sona erdiğinde tüm özellikler çalışmaya devam eder — kişisel kullanım ücretsiz kalır, yalnızca ticari kullanım lisans gerektirir.",
-      "trialExpired": "Deneme süresi doldu",
-      "trialExpiredDescription": "Kişisel kullanım ücretsiz kalır. Ticari kullanım lisans gerektirir.",
-      "subscriptionActive": "Abone — {{plan}} planı",
-      "subscriptionActiveDescription": "Donut Browser aboneliğiniz etkin. Ticari kullanım, planınızın süresi boyunca lisanslıdır."
-    },
     "advanced": {
       "title": "Gelişmiş",
       "clearCache": "Tüm Sürüm Önbelleğini Temizle",
@@ -473,7 +464,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "XTLS Vision ve REALITY gerektirir.",
       "vlessUriRequired": "Bir VLESS URI'si girin.",
-      "vlessUriInvalid": "Sunucu ve bağlantı noktası içeren geçerli bir VLESS URI'si girin."
+      "vlessUriInvalid": "Sunucu ve bağlantı noktası içeren geçerli bir VLESS URI'si girin.",
+      "pasteFilled": "Alanlar yapıştırılan proxy'den dolduruldu"
     },
     "types": {
       "http": "HTTP",
@@ -1566,14 +1558,6 @@
     "acceptFailed": "Şartlar kabul edilemedi",
     "tryAgain": "Lütfen yeniden deneyin"
   },
-  "commercialTrial": {
-    "title": "Ticari Deneme Süresi Doldu",
-    "description": "2 haftalık ticari deneme süreniz sona erdi.",
-    "body": "Donut Browser'ı iş amaçlı kullanıyorsanız devam etmek için ticari lisans satın almanız gerekir. Kişisel kullanım için ücretsiz olarak kullanmaya devam edebilirsiniz.",
-    "understandButton": "Anladım",
-    "failed": "Onay kaydedilemedi",
-    "tryAgain": "Lütfen yeniden deneyin"
-  },
   "permissionDialog": {
     "titleMicrophone": "Mikrofon Erişimi Gerekli",
     "titleCamera": "Kamera Erişimi Gerekli",
@@ -2124,8 +2108,7 @@
       "personalTitle": "Kişisel kullanım",
       "personalDesc": "Sonsuza dek ücretsiz.",
       "commercialTitle": "Ticari kullanım",
-      "trialBadge": "2 hafta ücretsiz",
-      "commercialDesc": "2 haftalık değerlendirme için ücretsiz. Sonrasında ücretli bir plan, projenin bakımını ve gelişimini sürdürmesini sağlar."
+      "commercialDesc": "DON bir AGPL çatalıdır — tüm yerel özellikler açık, ücretli plan gerekmez."
     }
   },
   "wayfernBlocked": {
@@ -2509,5 +2492,45 @@
     "cancelled": "Başlatma iptal edildi",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Bu profil henüz başlatılmadığından yalnızca Donut tarafından yönetilen uzantılar denetlenebildi."
+  },
+  "claudeWorkflow": {
+    "quickTitle": "Proxy dizesinden hızlı oluşturma",
+    "quickPlaceholder": "host:port:user:pass veya scheme://user:pass@host:port",
+    "quickCta": "Oluştur ve denetle",
+    "quickOk": "{{name}} oluşturuldu",
+    "quickFailed": "Hızlı oluşturma başarısız: {{message}}",
+    "quickInvalid": "Proxy dizesi ayrıştırılamadı",
+    "reportTitle": "Oluşturma sonrası denetim",
+    "reportChecking": "Proxy çıkışı denetleniyor…",
+    "reportProbeFailed": "Çıkış yoklaması başarısız: {{message}}",
+    "reportExitIp": "Çıkış IP'si",
+    "reportCountry": "Ülke",
+    "reportExitTimezone": "Çıkış saat dilimi",
+    "reportFpTimezone": "Parmak izi saat dilimi",
+    "reportFpLanguage": "Parmak izi dili",
+    "reportWebrtcBlocked": "engellendi (tüm trafik proxy üzerinden)",
+    "reportWebrtcOpen": "açık",
+    "reportScreen": "Ekran",
+    "reportConsistent": "Saat dilimi ve dil proxy çıkışıyla eşleşiyor",
+    "reportTzMismatch": "Saat dilimi uyuşmuyor: çıkış {{exit}} vs parmak izi {{fp}}",
+    "reportLangMismatch": "Dil uyuşmuyor: çıkış ülkesi {{country}} vs parmak izi {{lang}}",
+    "reportMatchCta": "Proxy'ye uydur",
+    "reportMatchedOk": "Parmak izi proxy çıkışına uyduruldu",
+    "reportNotChecked": "Karşılaştırılacak bir şey yok — proxy çıkışı ölçülmedi",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

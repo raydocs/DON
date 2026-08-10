@@ -29,6 +29,11 @@ pub struct WayfernConfig {
   pub screen_min_width: Option<u32>,
   #[serde(default)]
   pub screen_min_height: Option<u32>,
+  /// Host display scale the generated fingerprint must match (e.g. 1.5 on
+  /// Windows 150%, 2.0 on macOS Retina). Mismatched DPR is the Stripe/Claude
+  /// payment-iframe double-scale bug.
+  #[serde(default)]
+  pub expected_device_pixel_ratio: Option<f64>,
   #[serde(default)]
   pub geoip: Option<serde_json::Value>, // For compatibility with shared config form
   #[serde(default)]
@@ -45,6 +50,100 @@ pub struct WayfernConfig {
   /// location can be refreshed instead of showing stale data.
   #[serde(default)]
   pub geo_proxy_signature: Option<String>,
+}
+
+/// Max full-fingerprint regenerations when a candidate violates host constraints.
+const FINGERPRINT_GENERATION_ATTEMPTS: usize = 30;
+
+impl WayfernConfig {
+  /// Whether a Wayfern fingerprint candidate is safe for the host display and
+  /// generation bounds. Bad candidates are discarded whole — never partially
+  /// patched — because setFingerprint re-normalizes inconsistent local edits.
+  pub fn fingerprint_satisfies_constraints(fingerprint: &serde_json::Value) -> Result<(), String> {
+    Self::fingerprint_satisfies_constraints_with(fingerprint, None)
+  }
+
+  pub fn fingerprint_satisfies_constraints_with(
+    fingerprint: &serde_json::Value,
+    config: Option<&WayfernConfig>,
+  ) -> Result<(), String> {
+    let dpr = fingerprint
+      .get("devicePixelRatio")
+      .and_then(|v| v.as_f64())
+      .ok_or_else(|| "missing devicePixelRatio".to_string())?;
+
+    if let Some(expected) = config.and_then(|c| c.expected_device_pixel_ratio) {
+      if (dpr - expected).abs() > 0.05 {
+        return Err(format!(
+          "devicePixelRatio {dpr} does not match expected {expected}"
+        ));
+      }
+    }
+
+    let screen_w = fingerprint
+      .get("screenWidth")
+      .and_then(|v| v.as_u64())
+      .ok_or_else(|| "missing screenWidth".to_string())? as u32;
+    let screen_h = fingerprint
+      .get("screenHeight")
+      .and_then(|v| v.as_u64())
+      .ok_or_else(|| "missing screenHeight".to_string())? as u32;
+
+    if screen_w == 0 || screen_h == 0 {
+      return Err(format!("invalid screen {screen_w}x{screen_h}"));
+    }
+
+    if let Some(max_w) = config.and_then(|c| c.screen_max_width) {
+      if screen_w > max_w {
+        return Err(format!("screenWidth {screen_w} exceeds max {max_w}"));
+      }
+    }
+    if let Some(max_h) = config.and_then(|c| c.screen_max_height) {
+      if screen_h > max_h {
+        return Err(format!("screenHeight {screen_h} exceeds max {max_h}"));
+      }
+    }
+    if let Some(min_w) = config.and_then(|c| c.screen_min_width) {
+      if screen_w < min_w {
+        return Err(format!("screenWidth {screen_w} below min {min_w}"));
+      }
+    }
+    if let Some(min_h) = config.and_then(|c| c.screen_min_height) {
+      if screen_h < min_h {
+        return Err(format!("screenHeight {screen_h} below min {min_h}"));
+      }
+    }
+
+    let avail_w = fingerprint
+      .get("screenAvailWidth")
+      .and_then(|v| v.as_u64())
+      .unwrap_or(screen_w as u64) as u32;
+    let avail_h = fingerprint
+      .get("screenAvailHeight")
+      .and_then(|v| v.as_u64())
+      .unwrap_or(screen_h as u64) as u32;
+    let outer_w = fingerprint
+      .get("windowOuterWidth")
+      .and_then(|v| v.as_u64())
+      .unwrap_or(0) as u32;
+    let outer_h = fingerprint
+      .get("windowOuterHeight")
+      .and_then(|v| v.as_u64())
+      .unwrap_or(0) as u32;
+
+    if outer_w > 0 && outer_w > avail_w.max(screen_w) {
+      return Err(format!(
+        "windowOuterWidth {outer_w} exceeds avail/screen {avail_w}/{screen_w}"
+      ));
+    }
+    if outer_h > 0 && outer_h > avail_h.max(screen_h) {
+      return Err(format!(
+        "windowOuterHeight {outer_h} exceeds avail/screen {avail_h}/{screen_h}"
+      ));
+    }
+
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -456,6 +555,7 @@ impl WayfernManager {
       .arg("--headless=new")
       .arg(format!("--remote-debugging-port={port}"))
       .arg("--remote-debugging-address=127.0.0.1")
+      .arg("--remote-allow-origins=*")
       .arg(format!("--user-data-dir={}", temp_profile_dir.display()))
       .arg("--no-first-run")
       .arg("--no-default-browser-check")
@@ -573,84 +673,118 @@ impl WayfernManager {
         .insert("wayfernToken".to_string(), json!(token));
     }
 
-    let refresh_result = self
-      .send_cdp_command(&ws_url, "Wayfern.refreshFingerprint", refresh_params)
-      .await;
+    // DON: regenerate full fingerprints until host display constraints pass.
+    // Never patch individual fields — Wayfern re-normalizes inconsistent edits.
+    let mut last_reject = String::from("no fingerprint candidate");
+    let mut normalized = None;
+    for attempt in 1..=FINGERPRINT_GENERATION_ATTEMPTS {
+      let refresh_result = self
+        .send_cdp_command(
+          &ws_url,
+          "Wayfern.refreshFingerprint",
+          refresh_params.clone(),
+        )
+        .await;
+      if let Err(e) = refresh_result {
+        cleanup().await;
+        return Err(format!("Failed to refresh fingerprint: {e}").into());
+      }
 
-    if let Err(e) = refresh_result {
-      cleanup().await;
-      return Err(format!("Failed to refresh fingerprint: {e}").into());
+      let get_result = self
+        .send_cdp_command(&ws_url, "Wayfern.getFingerprint", json!({}))
+        .await;
+      let result = match get_result {
+        Ok(r) => r,
+        Err(e) => {
+          cleanup().await;
+          return Err(format!("Failed to get fingerprint: {e}").into());
+        }
+      };
+
+      let fp = result.get("fingerprint").cloned().unwrap_or(result);
+      let candidate = Self::normalize_fingerprint(fp);
+      match WayfernConfig::fingerprint_satisfies_constraints_with(&candidate, Some(config)) {
+        Ok(()) => {
+          log::info!(
+            "DON: accepted fingerprint candidate on attempt {attempt} (dpr={:?} screen={:?}x{:?})",
+            candidate.get("devicePixelRatio"),
+            candidate.get("screenWidth"),
+            candidate.get("screenHeight")
+          );
+          normalized = Some(candidate);
+          break;
+        }
+        Err(reason) => {
+          last_reject = reason.clone();
+          log::info!("DON: rejecting fingerprint attempt {attempt}: {reason}");
+        }
+      }
     }
 
-    let get_result = self
-      .send_cdp_command(&ws_url, "Wayfern.getFingerprint", json!({}))
-      .await;
-
-    let (fingerprint, geolocation_applied) = match get_result {
-      Ok(result) => {
-        // Wayfern.getFingerprint returns { fingerprint: {...} }
-        // We need to extract just the fingerprint object
-        let fp = result.get("fingerprint").cloned().unwrap_or(result);
-        // Normalize the fingerprint: convert JSON string fields to proper types
-        let mut normalized = Self::normalize_fingerprint(fp);
-
-        // reqwest's SOCKS connector (hyper-util) corrupts its parse buffer
-        // when a proxy splits a handshake reply across TCP segments, so a
-        // socks upstream here can fail even though the proxy is healthy.
-        // Route the geolocation lookup through a temporary local donut-proxy
-        // worker — the same path the browser itself uses — and fall back to
-        // the upstream URL only if the worker can't start. Two exclusions:
-        // no worker when geolocation won't fetch through the proxy at all
-        // (disabled, or a fixed geoip IP), and none for loopback socks URLs —
-        // launch-time callers pass the already-running local worker's
-        // socks5://127.0.0.1 URL, whose single-segment replies don't trigger
-        // the bug, so chaining a second worker would only add latency.
-        let needs_proxied_geo_fetch = !matches!(
-          config.geoip.as_ref(),
-          Some(serde_json::Value::Bool(false)) | Some(serde_json::Value::String(_))
-        );
-        let remote_socks_upstream = config
-          .proxy
-          .as_deref()
-          .filter(|url| Self::is_remote_socks_url(url));
-        let (geo_proxy, temp_worker_id) = match remote_socks_upstream {
-          Some(url) if needs_proxied_geo_fetch => {
-            match crate::proxy_runner::start_proxy_process(Some(url.to_string()), None)
-              .await
-              .map_err(|e| e.to_string())
-            {
-              Ok(worker) => {
-                let local_url = format!("http://127.0.0.1:{}", worker.local_port.unwrap_or(0));
-                (Some(local_url), Some(worker.id))
-              }
-              Err(e) => {
-                log::warn!(
-                  "Could not start local proxy worker for geolocation ({e}); using the socks upstream directly"
-                );
-                (config.proxy.clone(), None)
-              }
-            }
-          }
-          _ => (config.proxy.clone(), None),
-        };
-
-        // Apply timezone/geolocation for the proxy this fingerprint is being
-        // generated against. Shared with the launch-time location refresh.
-        let geolocation_applied =
-          Self::apply_geolocation(&mut normalized, geo_proxy.as_deref(), config.geoip.as_ref())
-            .await;
-
-        if let Some(worker_id) = temp_worker_id {
-          let _ = crate::proxy_runner::stop_proxy_process(&worker_id).await;
-        }
-
-        (normalized, geolocation_applied)
-      }
-      Err(e) => {
+    let mut normalized = match normalized {
+      Some(fp) => fp,
+      None => {
         cleanup().await;
-        return Err(format!("Failed to get fingerprint: {e}").into());
+        return Err(
+          format!(
+            "Failed to generate a host-compatible fingerprint after {FINGERPRINT_GENERATION_ATTEMPTS} attempts (last: {last_reject}). \
+             Prefer matching devicePixelRatio to your display scale and keep screen size within the logical monitor bounds."
+          )
+          .into(),
+        );
       }
     };
+
+    // reqwest's SOCKS connector (hyper-util) corrupts its parse buffer
+    // when a proxy splits a handshake reply across TCP segments, so a
+    // socks upstream here can fail even though the proxy is healthy.
+    // Route the geolocation lookup through a temporary local donut-proxy
+    // worker — the same path the browser itself uses — and fall back to
+    // the upstream URL only if the worker can't start. Two exclusions:
+    // no worker when geolocation won't fetch through the proxy at all
+    // (disabled, or a fixed geoip IP), and none for loopback socks URLs —
+    // launch-time callers pass the already-running local worker's
+    // socks5://127.0.0.1 URL, whose single-segment replies don't trigger
+    // the bug, so chaining a second worker would only add latency.
+    let needs_proxied_geo_fetch = !matches!(
+      config.geoip.as_ref(),
+      Some(serde_json::Value::Bool(false)) | Some(serde_json::Value::String(_))
+    );
+    let remote_socks_upstream = config
+      .proxy
+      .as_deref()
+      .filter(|url| Self::is_remote_socks_url(url));
+    let (geo_proxy, temp_worker_id) = match remote_socks_upstream {
+      Some(url) if needs_proxied_geo_fetch => {
+        match crate::proxy_runner::start_proxy_process(Some(url.to_string()), None)
+          .await
+          .map_err(|e| e.to_string())
+        {
+          Ok(worker) => {
+            let local_url = format!("http://127.0.0.1:{}", worker.local_port.unwrap_or(0));
+            (Some(local_url), Some(worker.id))
+          }
+          Err(e) => {
+            log::warn!(
+              "Could not start local proxy worker for geolocation ({e}); using the socks upstream directly"
+            );
+            (config.proxy.clone(), None)
+          }
+        }
+      }
+      _ => (config.proxy.clone(), None),
+    };
+
+    // Apply timezone/geolocation for the proxy this fingerprint is being
+    // generated against. Shared with the launch-time location refresh.
+    let geolocation_applied =
+      Self::apply_geolocation(&mut normalized, geo_proxy.as_deref(), config.geoip.as_ref()).await;
+
+    if let Some(worker_id) = temp_worker_id {
+      let _ = crate::proxy_runner::stop_proxy_process(&worker_id).await;
+    }
+
+    let fingerprint = normalized;
 
     cleanup().await;
 

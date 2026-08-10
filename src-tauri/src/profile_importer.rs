@@ -144,7 +144,10 @@ struct BrowserSource {
 }
 
 pub struct ProfileImporter {
-  base_dirs: BaseDirs,
+  /// `None` in stripped/odd environments where the OS directory APIs fail
+  /// (observed in Windows e2e driver sessions); detection then falls back to
+  /// environment variables instead of panicking the command.
+  base_dirs: Option<BaseDirs>,
   downloaded_browsers_registry: &'static DownloadedBrowsersRegistry,
   profile_manager: &'static ProfileManager,
   wayfern_manager: &'static crate::wayfern_manager::WayfernManager,
@@ -153,7 +156,7 @@ pub struct ProfileImporter {
 impl ProfileImporter {
   fn new() -> Self {
     Self {
-      base_dirs: BaseDirs::new().expect("Failed to get base directories"),
+      base_dirs: BaseDirs::new(),
       downloaded_browsers_registry: DownloadedBrowsersRegistry::instance(),
       profile_manager: ProfileManager::instance(),
       wayfern_manager: crate::wayfern_manager::WayfernManager::instance(),
@@ -236,8 +239,14 @@ impl ProfileImporter {
     {
       let support = self
         .base_dirs
-        .home_dir()
-        .join("Library/Application Support");
+        .as_ref()
+        .map(|b| b.home_dir().join("Library/Application Support"))
+        .or_else(|| {
+          std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library/Application Support"))
+        });
+      let Some(support) = support else {
+        return sources;
+      };
       let standard: &[(&str, &str)] = &[
         ("chromium", "Google/Chrome"),
         ("chrome-beta", "Google/Chrome Beta"),
@@ -276,7 +285,11 @@ impl ProfileImporter {
 
     #[cfg(target_os = "windows")]
     {
-      let local = self.base_dirs.data_local_dir().to_path_buf();
+      let local = self
+        .base_dirs
+        .as_ref()
+        .map(|b| b.data_local_dir().to_path_buf())
+        .or_else(|| std::env::var_os("LOCALAPPDATA").map(PathBuf::from));
       let standard: &[(&str, &str)] = &[
         ("chromium", "Google/Chrome/User Data"),
         ("chrome-beta", "Google/Chrome Beta/User Data"),
@@ -296,46 +309,61 @@ impl ProfileImporter {
         ("vivaldi", "Vivaldi/User Data"),
         ("yandex", "Yandex/YandexBrowser/User Data"),
       ];
-      for (key, rel) in standard {
-        sources.push(BrowserSource {
-          key,
-          dir: local.join(rel),
-          root_profile: false,
-        });
+      if let Some(local) = local {
+        for (key, rel) in standard {
+          sources.push(BrowserSource {
+            key,
+            dir: local.join(rel),
+            root_profile: false,
+          });
+        }
+        // Arc on Windows is MSIX-packaged; the package-family suffix can vary,
+        // so glob Packages/TheBrowserCompany.Arc_*.
+        let packages = local.join("Packages");
+        if let Ok(entries) = fs::read_dir(&packages) {
+          for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with("TheBrowserCompany.Arc_") {
+              sources.push(BrowserSource {
+                key: "arc",
+                dir: entry.path().join("LocalCache/Local/Arc/User Data"),
+                root_profile: false,
+              });
+            }
+          }
+        }
       }
       // Opera keeps the profile under %APPDATA% (Roaming), not %LOCALAPPDATA%.
-      let roaming = self.base_dirs.data_dir().to_path_buf();
-      for (key, rel) in &[
-        ("opera", "Opera Software/Opera Stable"),
-        ("opera-gx", "Opera Software/Opera GX Stable"),
-      ] {
-        sources.push(BrowserSource {
-          key,
-          dir: roaming.join(rel),
-          root_profile: true,
-        });
-      }
-      // Arc on Windows is MSIX-packaged; the package-family suffix can vary,
-      // so glob Packages/TheBrowserCompany.Arc_*.
-      let packages = local.join("Packages");
-      if let Ok(entries) = fs::read_dir(&packages) {
-        for entry in entries.flatten() {
-          let name = entry.file_name();
-          let Some(name) = name.to_str() else { continue };
-          if name.starts_with("TheBrowserCompany.Arc_") {
-            sources.push(BrowserSource {
-              key: "arc",
-              dir: entry.path().join("LocalCache/Local/Arc/User Data"),
-              root_profile: false,
-            });
-          }
+      let roaming = self
+        .base_dirs
+        .as_ref()
+        .map(|b| b.data_dir().to_path_buf())
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from));
+      if let Some(roaming) = roaming {
+        for (key, rel) in &[
+          ("opera", "Opera Software/Opera Stable"),
+          ("opera-gx", "Opera Software/Opera GX Stable"),
+        ] {
+          sources.push(BrowserSource {
+            key,
+            dir: roaming.join(rel),
+            root_profile: true,
+          });
         }
       }
     }
 
     #[cfg(target_os = "linux")]
     {
-      let home = self.base_dirs.home_dir().to_path_buf();
+      let home = self
+        .base_dirs
+        .as_ref()
+        .map(|b| b.home_dir().to_path_buf())
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+      let Some(home) = home else {
+        return sources;
+      };
       let config = home.join(".config");
       let standard: &[(&str, &str)] = &[
         ("chromium", "google-chrome"),

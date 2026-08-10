@@ -102,6 +102,7 @@ export function WayfernConfigForm({
     if (isCreating && typeof window !== "undefined") {
       const screenWidth = window.screen.width;
       const screenHeight = window.screen.height;
+      const dpr = window.devicePixelRatio || 1;
 
       if (!config.screen_max_width) {
         onConfigChange("screen_max_width", screenWidth);
@@ -109,11 +110,19 @@ export function WayfernConfigForm({
       if (!config.screen_max_height) {
         onConfigChange("screen_max_height", screenHeight);
       }
+      if (config.expected_device_pixel_ratio == null) {
+        onConfigChange("expected_device_pixel_ratio", dpr);
+      }
+      if (config.randomize_fingerprint_on_launch == null) {
+        onConfigChange("randomize_fingerprint_on_launch", false);
+      }
     }
   }, [
     isCreating,
     config.screen_max_width,
     config.screen_max_height,
+    config.expected_device_pixel_ratio,
+    config.randomize_fingerprint_on_launch,
     onConfigChange,
   ]);
 

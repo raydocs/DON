@@ -100,7 +100,15 @@ function log(message) {
 
 function run(command, args, cwd, env = process.env) {
   log(`${command} ${args.join(" ")}`);
-  const result = spawnSync(command, args, { cwd, env, stdio: "inherit" });
+  // pnpm is a .cmd shim on Windows, which spawnSync cannot execute without a
+  // shell; real executables (node, cargo) must avoid it so paths containing
+  // spaces are not word-split by cmd.
+  const result = spawnSync(command, args, {
+    cwd,
+    env,
+    stdio: "inherit",
+    shell: process.platform === "win32" && command === "pnpm",
+  });
   if (result.error) {
     throw result.error;
   }

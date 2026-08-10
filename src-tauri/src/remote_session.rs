@@ -1566,6 +1566,13 @@ mod tests {
   static INDEX_TESTS: Mutex<()> = Mutex::new(());
 
   fn index_test<T>(body: impl FnOnce() -> T) -> T {
+    // `apply_to_index` writes the shared remote-handoff store through
+    // `index_session`, so these frames would otherwise interleave with
+    // `remote_handoff`'s own tests. Take their lock first (before the
+    // module-local one) so lock ordering stays consistent.
+    let _handoff_guard = crate::remote_handoff::HANDOFF_TEST_LOCK
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = INDEX_TESTS
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -176,15 +176,6 @@
         "mismatchToast": "Le mot de passe ne correspond pas"
       }
     },
-    "commercial": {
-      "title": "Licence commerciale",
-      "trialActive": "Essai: {{days}} jours, {{hours}} heures restantes",
-      "trialActiveDescription": "L'utilisation commerciale est gratuite pendant l'essai. À l'expiration, toutes les fonctionnalités continuent de fonctionner — l'utilisation personnelle reste gratuite, seule l'utilisation commerciale nécessitera une licence.",
-      "trialExpired": "Essai expiré",
-      "trialExpiredDescription": "L'utilisation personnelle reste gratuite. L'utilisation commerciale nécessite une licence.",
-      "subscriptionActive": "Abonné — formule {{plan}}",
-      "subscriptionActiveDescription": "Votre abonnement Donut Browser est actif. L'usage commercial est licencié pendant toute la durée de votre formule."
-    },
     "advanced": {
       "title": "Avancé",
       "clearCache": "Effacer tout le cache des versions",
@@ -474,7 +465,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "Nécessite XTLS Vision et REALITY.",
       "vlessUriRequired": "Saisissez une URI VLESS.",
-      "vlessUriInvalid": "Saisissez une URI VLESS valide avec un hôte et un port."
+      "vlessUriInvalid": "Saisissez une URI VLESS valide avec un hôte et un port.",
+      "pasteFilled": "Champs remplis depuis le proxy collé"
     },
     "types": {
       "http": "HTTP",
@@ -1573,14 +1565,6 @@
     "acceptFailed": "Échec de l'acceptation des conditions",
     "tryAgain": "Veuillez réessayer"
   },
-  "commercialTrial": {
-    "title": "Période d'essai commerciale expirée",
-    "description": "Votre période d'essai commercial de 2 semaines est terminée.",
-    "body": "Si vous utilisez Donut Browser à des fins professionnelles, vous devez acheter une licence commerciale pour continuer. Vous pouvez toujours l'utiliser gratuitement à des fins personnelles.",
-    "understandButton": "J'ai compris",
-    "failed": "Échec de l'enregistrement de la confirmation",
-    "tryAgain": "Veuillez réessayer"
-  },
   "permissionDialog": {
     "titleMicrophone": "Accès au microphone requis",
     "titleCamera": "Accès à la caméra requis",
@@ -2131,8 +2115,7 @@
       "personalTitle": "Usage personnel",
       "personalDesc": "Gratuit à vie.",
       "commercialTitle": "Usage commercial",
-      "trialBadge": "2 semaines gratuites",
-      "commercialDesc": "Gratuit pendant une évaluation de 2 semaines. Ensuite, un forfait payant permet de maintenir et de faire prospérer le projet."
+      "commercialDesc": "DON est un fork AGPL : toutes les fonctionnalités locales sont débloquées, sans abonnement payant."
     }
   },
   "wayfernBlocked": {
@@ -2538,5 +2521,45 @@
     "cancelled": "Lancement annulé",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Ce profil n'a jamais été lancé : seules les extensions gérées par Donut ont pu être vérifiées."
+  },
+  "claudeWorkflow": {
+    "quickTitle": "Création rapide depuis un proxy",
+    "quickPlaceholder": "host:port:user:pass ou scheme://user:pass@host:port",
+    "quickCta": "Créer et vérifier",
+    "quickOk": "{{name}} créé",
+    "quickFailed": "Échec de la création rapide : {{message}}",
+    "quickInvalid": "Impossible d'analyser ce proxy",
+    "reportTitle": "Vérification après création",
+    "reportChecking": "Vérification de la sortie du proxy…",
+    "reportProbeFailed": "Échec du sondage de sortie : {{message}}",
+    "reportExitIp": "IP de sortie",
+    "reportCountry": "Pays",
+    "reportExitTimezone": "Fuseau de sortie",
+    "reportFpTimezone": "Fuseau de l'empreinte",
+    "reportFpLanguage": "Langue de l'empreinte",
+    "reportWebrtcBlocked": "bloqué (tout le trafic passe par le proxy)",
+    "reportWebrtcOpen": "ouvert",
+    "reportScreen": "Écran",
+    "reportConsistent": "Fuseau et langue correspondent à la sortie du proxy",
+    "reportTzMismatch": "Fuseau non conforme : sortie {{exit}} vs empreinte {{fp}}",
+    "reportLangMismatch": "Langue non conforme : pays de sortie {{country}} vs empreinte {{lang}}",
+    "reportMatchCta": "Aligner sur le proxy",
+    "reportMatchedOk": "Empreinte alignée sur la sortie du proxy",
+    "reportNotChecked": "Rien à comparer — aucune sortie proxy mesurée",
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed"
   }
 }

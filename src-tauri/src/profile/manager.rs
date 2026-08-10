@@ -294,7 +294,10 @@ impl ProfileManager {
       last_sync: None,
       host_os: Some(get_host_os()),
       ephemeral,
-      extension_group_id: None,
+      // Every new profile gets the built-in extension set (Session Key for
+      // Claude) unless the reserved group hasn't been created yet.
+      extension_group_id: crate::extension_manager::ExtensionManager::new()
+        .builtin_default_group_id(),
       proxy_bypass_rules: Vec::new(),
       created_by_id: None,
       created_by_email: None,
@@ -1616,8 +1619,10 @@ mod tests {
     let profiles_dir = manager.get_profiles_dir();
 
     assert!(
-      profiles_dir.to_string_lossy().contains("DonutBrowser"),
-      "Profiles dir should contain DonutBrowser"
+      profiles_dir
+        .to_string_lossy()
+        .contains(crate::app_dirs::app_name()),
+      "Profiles dir should contain the app data dir name"
     );
     assert!(
       profiles_dir.to_string_lossy().contains("profiles"),
@@ -1633,8 +1638,8 @@ mod tests {
     let path_str = binaries_dir.to_string_lossy();
 
     assert!(
-      path_str.contains("DonutBrowser"),
-      "Binaries dir should contain DonutBrowser"
+      path_str.contains(crate::app_dirs::app_name()),
+      "Binaries dir should contain the app data dir name"
     );
     assert!(
       path_str.contains("binaries"),

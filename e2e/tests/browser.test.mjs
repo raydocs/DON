@@ -288,6 +288,20 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       /PROFILE_NOT_FOUND/,
     );
 
+    // On-demand consistency check: a profile with no route has nothing to
+    // compare, so the command reports "not checked" without any network.
+    const consistencyNow = await app.invoke("check_profile_consistency_now", {
+      profileId: profile.id,
+    });
+    assert.equal(consistencyNow.checked, false);
+    assert.equal(consistencyNow.consistent, true);
+    assert.match(
+      await app.invokeError("check_profile_consistency_now", {
+        profileId: "00000000-0000-0000-0000-000000000000",
+      }),
+      /PROFILE_NOT_FOUND/,
+    );
+
     const directProfile = (await app.invoke("list_browser_profiles")).find(
       (item) => item.id === profile.id,
     );

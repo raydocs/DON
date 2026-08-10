@@ -176,15 +176,6 @@
         "mismatchToast": "Password does not match"
       }
     },
-    "commercial": {
-      "title": "Commercial License",
-      "trialActive": "Trial: {{days}} days, {{hours}} hours remaining",
-      "trialActiveDescription": "Commercial use is free during the trial. When it ends, all features keep working — personal use stays free, only commercial use will require a license.",
-      "trialExpired": "Trial expired",
-      "trialExpiredDescription": "Personal use remains free. Commercial use requires a license.",
-      "subscriptionActive": "Subscribed — {{plan}} plan",
-      "subscriptionActiveDescription": "Your Donut Browser subscription is active. Commercial use is licensed for the duration of your plan."
-    },
     "advanced": {
       "title": "Advanced",
       "clearCache": "Clear All Version Cache",
@@ -473,7 +464,8 @@
       "vlessUriPlaceholder": "vless://…",
       "vlessUriHint": "Requires XTLS Vision and REALITY.",
       "vlessUriRequired": "Enter a VLESS URI.",
-      "vlessUriInvalid": "Enter a valid VLESS URI with a host and port."
+      "vlessUriInvalid": "Enter a valid VLESS URI with a host and port.",
+      "pasteFilled": "Fields filled from the pasted proxy"
     },
     "types": {
       "http": "HTTP",
@@ -1566,14 +1558,6 @@
     "acceptFailed": "Failed to accept terms",
     "tryAgain": "Please try again"
   },
-  "commercialTrial": {
-    "title": "Commercial Trial Expired",
-    "description": "Your 2-week commercial trial period has ended.",
-    "body": "If you are using Donut Browser for business purposes, you need to purchase a commercial license to continue. You can still use it for personal use for free.",
-    "understandButton": "I Understand",
-    "failed": "Failed to save acknowledgment",
-    "tryAgain": "Please try again"
-  },
   "permissionDialog": {
     "titleMicrophone": "Microphone Access Required",
     "titleCamera": "Camera Access Required",
@@ -2124,8 +2108,7 @@
       "personalTitle": "Personal use",
       "personalDesc": "Free forever.",
       "commercialTitle": "Commercial use",
-      "trialBadge": "2 weeks free",
-      "commercialDesc": "Free for a 2-week evaluation. After that, a paid plan keeps the project maintained and thriving."
+      "commercialDesc": "DON is an AGPL fork — all local features are unlocked, no paid plan required."
     }
   },
   "wayfernBlocked": {
@@ -2509,5 +2492,45 @@
     "cancelled": "Launch cancelled",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
     "scanIncompleteMissing": "This profile has not been launched yet, so only Donut-managed extensions could be checked."
+  },
+  "claudeWorkflow": {
+    "title": "Claude isolation workflow",
+    "headerTooltip": "Claude isolation workflow & health scan",
+    "rulesTitle": "Hard rules (1 · 1 · 1 · 1)",
+    "stepsTitle": "Create a new Claude profile",
+    "createCta": "Create Claude profile",
+    "healthTitle": "Profile health scan",
+    "createToggle": "Claude isolation (1 家宽 IP · 1 timezone · 1 card)",
+    "createHint": "Requires a dedicated residential proxy. Geo/timezone follow that IP. WebRTC blocked. Fingerprint fixed. One payment card label per profile.",
+    "residentialLabel": "家宽 / residential label",
+    "cardLabel": "Card label (unique)",
+    "ephemeralDisabled": "Disabled in Claude isolation — profiles must persist cookies/login.",
+    "launchBlocked": "Launch blocked: {{message}}",
+    "fixFlagsOk": "Isolation flags fixed",
+    "regenOk": "Fingerprint regenerated",
+    "fixFailed": "Fix failed",
+    "quickTitle": "Quick create from a proxy string",
+    "quickPlaceholder": "host:port:user:pass or scheme://user:pass@host:port",
+    "quickCta": "Create & check",
+    "quickOk": "Created {{name}}",
+    "quickFailed": "Quick create failed: {{message}}",
+    "quickInvalid": "Could not parse that proxy string",
+    "reportTitle": "Post-create check",
+    "reportChecking": "Checking the proxy exit…",
+    "reportProbeFailed": "Exit probe failed: {{message}}",
+    "reportExitIp": "Exit IP",
+    "reportCountry": "Country",
+    "reportExitTimezone": "Exit timezone",
+    "reportFpTimezone": "Fingerprint timezone",
+    "reportFpLanguage": "Fingerprint language",
+    "reportWebrtcBlocked": "blocked (all traffic via proxy)",
+    "reportWebrtcOpen": "open",
+    "reportScreen": "Screen",
+    "reportConsistent": "Timezone & language match the proxy exit",
+    "reportTzMismatch": "Timezone mismatch: exit {{exit}} vs fingerprint {{fp}}",
+    "reportLangMismatch": "Language mismatch: exit country {{country}} vs fingerprint {{lang}}",
+    "reportMatchCta": "Match to proxy",
+    "reportMatchedOk": "Fingerprint matched to the proxy exit",
+    "reportNotChecked": "Nothing to compare — no proxy exit was measured"
   }
 }

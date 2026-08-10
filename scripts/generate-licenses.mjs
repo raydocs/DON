@@ -169,10 +169,11 @@ function commandOutput(command, args) {
 function generateInventory() {
   const entries = [...MANUAL_LICENSES];
 
+  // Package name is "don" in this fork (was "donutbrowser" upstream).
   const pnpmReport = JSON.parse(
     commandOutput("pnpm", [
       "--filter",
-      "donutbrowser",
+      "don",
       "licenses",
       "list",
       "--prod",
