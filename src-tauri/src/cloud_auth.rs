@@ -818,9 +818,33 @@ impl CloudAuthManager {
   }
 
   /// Account is in a paid/active state. Used for the "any active plan" gates
-  /// (sync token, wayfern token); per-feature access uses the capability helpers.
+  /// (sync token); per-feature access uses the capability helpers.
   pub async fn has_active_paid_subscription(&self) -> bool {
     true
+  }
+
+  /// Whether this session's plan entitles it to a Wayfern automation token.
+  ///
+  /// The token IS the automation entitlement, so this is `browser_automation`
+  /// and NOT `has_active_paid_subscription`. Gating the mint on "any active
+  /// plan" meant a Solo account — active, paying, and deliberately sold without
+  /// automation or fingerprint editing — asked for a token on every startup,
+  /// every login and every 10-hour refresh, collected a 403 each time, and got
+  /// the "account temporarily restricted" toast that belongs to the
+  /// multiple-device rule. Nothing was restricted; the plan simply does not
+  /// include the feature.
+  ///
+  /// Reads the signed-in cloud account directly rather than the DON-local
+  /// entitlement helpers. Local features stay unlocked, but that cannot make
+  /// the upstream service mint a token for a signed-out or ineligible account.
+  /// Keeping those concepts separate also prevents every tokenless launch from
+  /// waiting three seconds for a request that can never succeed.
+  pub async fn is_entitled_to_wayfern_token(&self) -> bool {
+    let state = self.state.lock().await;
+    state.as_ref().is_some_and(|auth| {
+      let entitlements = auth.user.entitlements();
+      entitlements.active && entitlements.browser_automation
+    })
   }
 
   /// Non-async version that uses try_lock, defaults to false if lock can't be acquired.
@@ -1080,9 +1104,20 @@ impl CloudAuthManager {
       .await
   }
 
-  /// Request a wayfern token from the cloud API. Only succeeds for paid users.
+  /// Request a wayfern token from the cloud API. Only succeeds for plans that
+  /// include browser automation.
+  ///
+  /// Self-gating on purpose: every caller used to repeat the check, and the one
+  /// they repeated was the wrong one. A plan without automation is not an error
+  /// state here — it clears any stale token and reports success, because there
+  /// is nothing to fetch and nothing wrong.
   pub async fn request_wayfern_token(&self) -> Result<(), String> {
-    if !self.has_active_paid_subscription().await {
+    if !self.is_entitled_to_wayfern_token().await {
+      // Ok(()) here means callers log nothing, so a session that declined to
+      // mint left no trace at all and looked identical to one that succeeded.
+      log::info!(
+        "Skipping wayfern token request: the cached plan does not include browser automation"
+      );
       self.clear_wayfern_token().await;
       return Ok(());
     }
@@ -1109,7 +1144,11 @@ impl CloudAuthManager {
 
           if !response.status().is_success() {
             let status = response.status();
-            return Err(format!("Wayfern token request failed ({status})"));
+            // The body carries WHICH rule refused: a device-family conflict or
+            // a plan that lacks automation. They need different handling, so
+            // keep the text instead of collapsing every failure to a status.
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Wayfern token request failed ({status}): {body}"));
           }
 
           let result: WayfernTokenResponse = response
@@ -1128,12 +1167,21 @@ impl CloudAuthManager {
         // A 403 rejects the entitlement without invalidating the login session.
         // Clear the browser token and refresh account state before notifying UI.
         if e.contains("(403") || e.contains("Forbidden") {
-          log::warn!("Wayfern token blocked by backend (403)");
+          log::warn!("Wayfern token blocked by backend (403): {e}");
           self.clear_wayfern_token().await;
           if let Err(fetch_err) = self.fetch_profile().await {
             log::warn!("Profile re-fetch after wayfern block failed: {fetch_err}");
           }
-          let _ = crate::events::emit_empty("wayfern-paid-blocked");
+          // Only the device rules produce a restriction the user can lift, and
+          // the toast tells them to sign other devices out — so only those may
+          // raise it. A plan-level refusal that slipped past the gate above
+          // (cached entitlements the re-fetch just corrected) must stay silent:
+          // telling a Solo customer they are "temporarily restricted" describes
+          // a lockout that does not exist and hides the real answer, which is
+          // that their plan does not include browser automation.
+          if is_device_restriction(&e) {
+            let _ = crate::events::emit_empty("wayfern-paid-blocked");
+          }
         }
         return Err(e);
       }
@@ -1205,9 +1253,11 @@ impl CloudAuthManager {
         }
       }
 
-      // Refresh profile data periodically
+      // Refresh profile data periodically. A failure here leaves the cached
+      // plan stale, which silently gates paid features, so it belongs at warn
+      // rather than debug where the shipped log level hides it.
       if let Err(e) = CLOUD_AUTH.fetch_profile().await {
-        log::debug!("Failed to refresh cloud profile: {e}");
+        log::warn!("Failed to refresh cloud profile: {e}");
       }
 
       // Reconnect profile lock manager if needed
@@ -1220,21 +1270,37 @@ impl CloudAuthManager {
       // Sync cloud proxy credentials
       CLOUD_AUTH.sync_cloud_proxy().await;
 
-      // Refresh wayfern token every 10 hours (60 iterations of 10-minute loop)
-      if wayfern_refresh_counter >= 60 {
+      // Refresh wayfern token every 10 hours (60 iterations of 10-minute loop).
+      // request_wayfern_token owns the entitlement check and clears the cached
+      // token when the plan doesn't include automation.
+      //
+      // Also mint one as soon as the plan starts granting it. `fetch_profile`
+      // above picks up an upgrade within ten minutes, but nothing watched that
+      // transition, so a session that signed in before upgrading stayed
+      // tokenless for up to ten hours while reporting the feature as unlocked.
+      let missing_entitled_token = CLOUD_AUTH.is_entitled_to_wayfern_token().await
+        && CLOUD_AUTH.get_wayfern_token().await.is_none();
+      if wayfern_refresh_counter >= 60 || missing_entitled_token {
         wayfern_refresh_counter = 0;
-        if CLOUD_AUTH.has_active_paid_subscription().await {
-          if let Err(e) = CLOUD_AUTH.request_wayfern_token().await {
-            log::warn!("Failed to refresh wayfern token: {e}");
-          }
-        } else {
-          CLOUD_AUTH.clear_wayfern_token().await;
+        if let Err(e) = CLOUD_AUTH.request_wayfern_token().await {
+          log::warn!("Failed to refresh wayfern token: {e}");
         }
       }
 
       let _ = &app_handle; // keep app_handle alive
     }
   }
+}
+
+/// Whether a rejected wayfern-token request was refused by one of the
+/// device-family rules (automation is pinned to the primary desktop session)
+/// rather than by the plan's capabilities.
+///
+/// Matches on the backend's message because that is the only thing that
+/// distinguishes them: both arrive as a bare 403. Only these two are a state
+/// the user can clear themselves, which is what the toast asks them to do.
+fn is_device_restriction(error: &str) -> bool {
+  error.contains("primary device") || error.contains("requires the desktop app")
 }
 
 fn solve_pow(prefix: &str, difficulty: u32) -> Option<String> {
@@ -1334,6 +1400,20 @@ pub async fn cloud_get_user() -> Result<Option<CloudAuthState>, String> {
 pub async fn cloud_refresh_profile() -> Result<CloudUser, String> {
   let mut user = CLOUD_AUTH.fetch_profile().await?;
   user.entitlements = Some(user.entitlements());
+
+  // Minting the token is what actually unlocks cross-OS fingerprints, and it
+  // only happened at login, at startup and once every 10 hours. An account
+  // that upgraded after its last sign-in therefore refreshed into the correct
+  // entitlements while still holding no token, and "Refresh" did not fix it.
+  // Only mint when one is genuinely missing, so this stays a no-op afterwards.
+  if CLOUD_AUTH.is_entitled_to_wayfern_token().await
+    && CLOUD_AUTH.get_wayfern_token().await.is_none()
+  {
+    if let Err(e) = CLOUD_AUTH.request_wayfern_token().await {
+      log::warn!("Refresh could not obtain a wayfern token: {e}");
+    }
+  }
+
   Ok(user)
 }
 
@@ -1557,4 +1637,66 @@ pub async fn restart_sync_service(app_handle: tauri::AppHandle) -> Result<(), St
   });
 
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn active_solo() -> Entitlements {
+    derive_entitlements("solo", Some("monthly"), "active", 20)
+  }
+
+  #[test]
+  fn solo_is_active_without_browser_automation() {
+    let solo = active_solo();
+    assert!(solo.active, "solo is a paid, active plan");
+    assert!(solo.cloud_backup, "solo buys cloud profile backups");
+    assert!(solo.cookie_bot, "solo buys the nightly cookie bot");
+    assert!(
+      !solo.browser_automation,
+      "solo is sold without browser automation"
+    );
+    assert!(
+      !solo.cross_os_fingerprints,
+      "solo is sold without fingerprint editing"
+    );
+  }
+
+  #[test]
+  fn wayfern_token_is_gated_on_automation_not_on_being_paid() {
+    // The regression this guards: gating the mint on `active` asked for a token
+    // on behalf of a Solo account, which the backend answers with a 403.
+    let solo = active_solo();
+    assert!(!(solo.active && solo.browser_automation));
+
+    let pro = derive_entitlements("pro", Some("monthly"), "active", 50);
+    assert!(pro.active && pro.browser_automation);
+  }
+
+  #[tokio::test]
+  async fn signed_out_local_unlock_does_not_wait_for_a_cloud_token() {
+    let auth = CloudAuthManager::new();
+
+    assert!(auth.can_use_browser_automation().await);
+    assert!(!auth.is_entitled_to_wayfern_token().await);
+  }
+
+  #[test]
+  fn only_the_device_rules_read_as_a_restriction() {
+    assert!(is_device_restriction(
+      "Wayfern token request failed (403 Forbidden): {\"message\":\"Browser automation is restricted to your primary device. Log out other devices to use it here.\",\"statusCode\":403}"
+    ));
+    assert!(is_device_restriction(
+      "Wayfern token request failed (403 Forbidden): {\"message\":\"Browser automation requires the desktop app. Open Donut Browser and try again.\",\"statusCode\":403}"
+    ));
+    // A plan-level refusal is not a restriction, and must not raise the toast
+    // that tells the user to sign other devices out.
+    assert!(!is_device_restriction(
+      "Wayfern token request failed (403 Forbidden): {\"message\":\"Browser automation subscription required\",\"statusCode\":403}"
+    ));
+    assert!(!is_device_restriction(
+      "Wayfern token request failed (500 Internal Server Error): "
+    ));
+  }
 }

@@ -360,12 +360,11 @@ pub async fn match_profile_fingerprint_to_exit(
     .find(|p| p.id.to_string() == profile_id)
     .ok_or_else(|| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
 
-  let mut config = profile
+  let fingerprint = profile
     .wayfern_config
-    .clone()
-    .filter(|c| c.fingerprint.is_some())
+    .as_ref()
+    .and_then(|config| config.fingerprint.clone())
     .ok_or_else(|| serde_json::json!({ "code": "FINGERPRINT_MATCH_FAILED" }).to_string())?;
-  let fingerprint = config.fingerprint.clone().unwrap();
 
   let geoip_override = serde_json::Value::String(exit_ip);
   let refreshed = crate::wayfern_manager::WayfernManager::refresh_fingerprint_geolocation(
@@ -376,12 +375,22 @@ pub async fn match_profile_fingerprint_to_exit(
   .await
   .ok_or_else(|| serde_json::json!({ "code": "FINGERPRINT_MATCH_FAILED" }).to_string())?;
 
-  config.fingerprint = Some(refreshed);
-  profile.wayfern_config = Some(config);
-  manager.save_profile(&profile).map_err(|e| {
-    serde_json::json!({ "code": "INTERNAL_ERROR", "params": { "detail": e.to_string() } })
-      .to_string()
-  })?;
+  let source_fingerprint = fingerprint;
+  profile = manager
+    .mutate_profile(&profile_id, move |latest| {
+      let config = latest
+        .wayfern_config
+        .as_mut()
+        .filter(|config| config.fingerprint.as_deref() == Some(source_fingerprint.as_str()))
+        .ok_or_else(|| "Fingerprint changed while matching it to the proxy exit".to_string())?;
+      config.fingerprint = Some(refreshed);
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
+    .map_err(|e| {
+      serde_json::json!({ "code": "INTERNAL_ERROR", "params": { "detail": e.to_string() } })
+        .to_string()
+    })?;
 
   // The stored verdict was computed against the fingerprint we just rewrote.
   // Leaving it would re-block the very launch this fix exists to unblock.

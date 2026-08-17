@@ -38,49 +38,122 @@ fn cmd_matches_profile_path(cmd: &[std::ffi::OsString], profile_path: &str) -> b
   false
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+  use super::macos::launch_services_arguments;
+  use std::path::Path;
+
+  #[test]
+  fn macos_bundle_launch_uses_launch_services_and_preserves_browser_arguments() {
+    let args = launch_services_arguments(
+      Path::new("/tmp/Wayfern.app"),
+      &[
+        "--user-data-dir=/tmp/profile".to_string(),
+        "--remote-debugging-port=9222".to_string(),
+      ],
+      &[("WAYFERN_TOKEN", "test-token")],
+    );
+    let args: Vec<String> = args
+      .into_iter()
+      .map(|arg| arg.to_string_lossy().into_owned())
+      .collect();
+
+    assert_eq!(
+      args,
+      vec![
+        "-n",
+        "-a",
+        "/tmp/Wayfern.app",
+        "--env",
+        "WAYFERN_TOKEN=test-token",
+        "--args",
+        "--user-data-dir=/tmp/profile",
+        "--remote-debugging-port=9222",
+      ]
+    );
+  }
+}
+
 // Platform-specific modules
 #[cfg(target_os = "macos")]
 #[allow(dead_code)]
 pub mod macos {
   use super::*;
+  use std::ffi::OsString;
   use sysinfo::{Pid, System};
+
+  pub fn app_bundle_for_executable(executable_path: &Path) -> Option<std::path::PathBuf> {
+    let mut current = Some(executable_path);
+    while let Some(path) = current {
+      if path.extension().is_some_and(|extension| extension == "app") {
+        return Some(path.to_path_buf());
+      }
+      current = path.parent();
+    }
+    None
+  }
+
+  pub(crate) fn launch_services_arguments(
+    app_path: &Path,
+    args: &[String],
+    environment: &[(&str, &str)],
+  ) -> Vec<OsString> {
+    let mut open_args = vec![
+      OsString::from("-n"),
+      OsString::from("-a"),
+      app_path.as_os_str().to_owned(),
+    ];
+    for (name, value) in environment {
+      open_args.push(OsString::from("--env"));
+      open_args.push(OsString::from(format!("{name}={value}")));
+    }
+    open_args.push(OsString::from("--args"));
+    open_args.extend(args.iter().map(OsString::from));
+    open_args
+  }
 
   pub async fn launch_browser_process(
     executable_path: &std::path::Path,
     args: &[String],
   ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
-    log::info!("Launching browser on macOS: {executable_path:?} with args: {args:?}");
+    launch_browser_process_with_environment(executable_path, args, &[]).await
+  }
+
+  pub async fn launch_browser_process_with_environment(
+    executable_path: &std::path::Path,
+    args: &[String],
+    environment: &[(&str, &str)],
+  ) -> Result<std::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+    log::info!(
+      "Launching browser on macOS: {executable_path:?} with {} argument(s) and environment keys {:?}",
+      args.len(),
+      environment.iter().map(|(name, _)| *name).collect::<Vec<_>>()
+    );
     // If the executable is inside an app bundle, launch via Launch Services so
     // macOS recognizes the real application for privacy permissions (e.g. Screen Recording).
     // This ensures TCC prompts are attributed to the browser app, not our launcher.
-    let mut current = Some(executable_path);
-    let mut app_bundle: Option<std::path::PathBuf> = None;
-    while let Some(path) = current {
-      if let Some(file_name) = path.file_name().and_then(|s| s.to_str()) {
-        if file_name.ends_with(".app") {
-          app_bundle = Some(path.to_path_buf());
-          break;
-        }
-      }
-      current = path.parent();
-    }
-
-    if let Some(app_path) = app_bundle {
+    if let Some(app_path) = app_bundle_for_executable(executable_path) {
       // Use `open -n -a <App>.app --args ...` to launch the app bundle.
       // Note: The returned child PID will belong to `open`, not the browser.
       // The caller should resolve the actual browser PID after launch.
       let mut cmd = Command::new("open");
-      cmd.arg("-n");
-      cmd.arg("-a");
-      cmd.arg(app_path);
-      cmd.arg("--args");
-      for a in args {
-        cmd.arg(a);
-      }
+      cmd.args(launch_services_arguments(&app_path, args, environment));
+      cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
       Ok(cmd.spawn()?)
     } else {
       // Fallback: direct spawn if this is not an app bundle
-      Ok(Command::new(executable_path).args(args).spawn()?)
+      Ok(
+        Command::new(executable_path)
+          .args(args)
+          .envs(environment.iter().copied())
+          .stdin(std::process::Stdio::null())
+          .stdout(std::process::Stdio::null())
+          .stderr(std::process::Stdio::null())
+          .spawn()?,
+      )
     }
   }
 

@@ -347,10 +347,44 @@ function startFixtureServer(geoIpFixture) {
       createReadStream(geoIpFixture).pipe(response);
       return;
     }
+    if (url.pathname === "/stripe-frame") {
+      response.writeHead(200, {
+        "content-type": "text/html; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end(`<!doctype html>
+        <html>
+          <body>
+            <input aria-label="Card number" autocomplete="cc-number" />
+            <script>
+              parent.postMessage({
+                source: "stripe-frame",
+                devicePixelRatio: window.devicePixelRatio,
+                screenWidth: window.screen.width,
+                screenHeight: window.screen.height,
+                visualViewportScale: window.visualViewport?.scale ?? 1,
+              }, "*");
+            </script>
+          </body>
+        </html>`);
+      return;
+    }
     response.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
     });
+    const crossOriginFrame =
+      url.pathname === "/stripe-checkout"
+        ? `<script>
+             window.__stripeFrameMetrics = null;
+             addEventListener("message", (event) => {
+               if (event.data?.source === "stripe-frame") {
+                 window.__stripeFrameMetrics = event.data;
+               }
+             });
+           </script>
+           <iframe title="Secure payment input" src="http://localhost:${server.address().port}/stripe-frame"></iframe>`
+        : "";
     response.end(`<!doctype html>
       <html>
         <head><title>Donut E2E Browser Fixture</title></head>
@@ -358,6 +392,7 @@ function startFixtureServer(geoIpFixture) {
           <h1 id="fixture-title">Donut E2E Browser Fixture</h1>
           <p id="path">${url.pathname}</p>
           <button id="fixture-button" onclick="this.dataset.clicked='yes'; this.textContent='Clicked'">Click fixture</button>
+          ${crossOriginFrame}
           <script>window.__fixtureReady = true;</script>
         </body>
       </html>`);

@@ -2031,20 +2031,15 @@ export function ProfilesDataTable({
     const fetchTrafficSnapshots = async () => {
       try {
         const allSnapshots = await invoke<TrafficSnapshot[]>(
-          "get_all_traffic_snapshots",
+          "get_running_profile_traffic_snapshots",
+          { profileIds: runningProfileIds },
         );
         const newSnapshots: Record<string, TrafficSnapshot> = {};
-        // O(1) membership; runningProfileIds.includes() in this loop would be
-        // O(snapshots * runningProfiles).
-        const runningSet = new Set(runningProfileIds);
         for (const snapshot of allSnapshots) {
           if (snapshot.profile_id) {
-            // Only keep snapshots for profiles that are currently running
-            if (runningSet.has(snapshot.profile_id)) {
-              const existing = newSnapshots[snapshot.profile_id];
-              if (!existing || snapshot.last_update > existing.last_update) {
-                newSnapshots[snapshot.profile_id] = snapshot;
-              }
+            const existing = newSnapshots[snapshot.profile_id];
+            if (!existing || snapshot.last_update > existing.last_update) {
+              newSnapshots[snapshot.profile_id] = snapshot;
             }
           }
         }

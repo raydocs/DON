@@ -60,6 +60,11 @@ const osLabels: Record<WayfernOS, string> = {
   ios: "iOS",
 };
 
+const desktopDevicePresets = devicePresetCatalog.presets.filter(
+  (preset) =>
+    !preset.mobile && (preset.os === "windows" || preset.os === "macos"),
+);
+
 export function WayfernConfigForm({
   config,
   onConfigChange,
@@ -80,7 +85,6 @@ export function WayfernConfigForm({
     useState<WayfernFingerprintConfig>({});
   const [currentOS] = useState<WayfernOS>(getCurrentOS);
   const [isGeneratingFingerprint, setIsGeneratingFingerprint] = useState(false);
-  const [hasWayfernToken, setHasWayfernToken] = useState<boolean | null>(null);
 
   const handleGenerateFingerprint = async () => {
     if (!profileVersion) return;
@@ -101,23 +105,9 @@ export function WayfernConfigForm({
   };
 
   const selectedOS = config.os || currentOS;
-  const selectedDevicePreset = devicePresetCatalog.presets.find(
+  const selectedDevicePreset = desktopDevicePresets.find(
     (preset) => preset.id === config.device_preset,
   );
-
-  useEffect(() => {
-    let cancelled = false;
-    void invoke<string | null>("cloud_get_wayfern_token")
-      .then((token) => {
-        if (!cancelled) setHasWayfernToken(Boolean(token));
-      })
-      .catch(() => {
-        if (!cancelled) setHasWayfernToken(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
 
   useEffect(() => {
     if (isCreating && typeof window !== "undefined") {
@@ -262,9 +252,9 @@ export function WayfernConfigForm({
         </p>
       </div>
       <Select
-        value={config.device_preset ?? "none"}
+        value={selectedDevicePreset?.id ?? "none"}
         onValueChange={(value) => {
-          const preset = devicePresetCatalog.presets.find(
+          const preset = desktopDevicePresets.find(
             (candidate) => candidate.id === value,
           );
           onConfigChange("device_preset", value === "none" ? undefined : value);
@@ -283,7 +273,7 @@ export function WayfernConfigForm({
         </SelectTrigger>
         <SelectContent>
           <SelectItem value="none">{t("devicePresets.none")}</SelectItem>
-          {devicePresetCatalog.presets.map((preset) => {
+          {desktopDevicePresets.map((preset) => {
             const isCrossOs = preset.os !== currentOS;
             const isDisabled = isCrossOs && !crossOsUnlocked;
             return (
@@ -305,13 +295,6 @@ export function WayfernConfigForm({
         <p className="text-sm text-muted-foreground">
           {t(selectedDevicePreset.descriptionKey)}
         </p>
-      )}
-      {selectedDevicePreset?.mobile && hasWayfernToken === false && (
-        <Alert className="border-warning/40 bg-warning/10">
-          <AlertDescription>
-            {t("devicePresets.mobileTokenWarning")}
-          </AlertDescription>
-        </Alert>
       )}
     </div>
   );
@@ -347,9 +330,7 @@ export function WayfernConfigForm({
             <SelectValue placeholder={t("fingerprint.selectOSPlaceholder")} />
           </SelectTrigger>
           <SelectContent>
-            {(
-              ["windows", "macos", "linux", "android", "ios"] as WayfernOS[]
-            ).map((os) => {
+            {(["windows", "macos"] as WayfernOS[]).map((os) => {
               const isDisabled = os !== currentOS && !crossOsUnlocked;
               return (
                 <SelectItem key={os} value={os} disabled={isDisabled}>
@@ -1832,15 +1813,7 @@ export function WayfernConfigForm({
                   />
                 </SelectTrigger>
                 <SelectContent>
-                  {(
-                    [
-                      "windows",
-                      "macos",
-                      "linux",
-                      "android",
-                      "ios",
-                    ] as WayfernOS[]
-                  ).map((os) => {
+                  {(["windows", "macos"] as WayfernOS[]).map((os) => {
                     const isDisabled = os !== currentOS && !crossOsUnlocked;
                     return (
                       <SelectItem key={os} value={os} disabled={isDisabled}>

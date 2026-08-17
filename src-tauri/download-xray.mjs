@@ -60,8 +60,12 @@ export function requestedTarget() {
   return match[1].trim();
 }
 
-function sha256(path) {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
+function sha256(bytes) {
+  return createHash("sha256").update(bytes).digest("hex");
+}
+
+function sha256File(path) {
+  return sha256(readFileSync(path));
 }
 
 export function xrayBinaryName(target) {
@@ -128,11 +132,60 @@ function extractArchive(archive, destinationDir, windowsTarget) {
   };
 }
 
+/// Attempts for the archive download. A release asset fetch is a network call
+/// on every CI job, and a single transport error ("fetch failed") has taken
+/// whole builds down. Retrying is safe because the checksum below is verified
+/// on every attempt, so a truncated or substituted archive still cannot pass.
+const DOWNLOAD_ATTEMPTS = 3;
+
+export async function downloadVerifiedArchive(url, archive, expectedSha256) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= DOWNLOAD_ATTEMPTS; attempt += 1) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(
+          `Failed to download Xray-core (${response.status} ${response.statusText})`,
+        );
+      }
+
+      // The response body is verified in memory and only then written out, so
+      // bytes that fail the pinned digest never reach the file system at all.
+      // Writing first and checking afterwards left an unverified archive on
+      // disk for the rest of the attempt, and any later reader of that path
+      // would have been trusting a plain network download.
+      const payload = Buffer.from(await response.arrayBuffer());
+      const actual = sha256(payload);
+      if (actual !== expectedSha256) {
+        throw new Error(
+          `Xray-core checksum mismatch: expected ${expectedSha256}, got ${actual}`,
+        );
+      }
+      writeFileSync(archive, payload);
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt < DOWNLOAD_ATTEMPTS) {
+        console.warn(
+          `Xray-core download attempt ${attempt} failed (${error.message}); retrying`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, attempt * 2000));
+      }
+    }
+  }
+
+  throw lastError;
+}
+
 export async function downloadXray(target = requestedTarget()) {
-  const asset = XRAY_ASSETS[target];
-  if (!asset) {
+  // `target` comes from --target/$TARGET, and it decides the file this writes
+  // into src-tauri/binaries. Only an own key of the pinned table is a target;
+  // a plain lookup also answers for inherited names like `constructor`.
+  if (!Object.hasOwn(XRAY_ASSETS, target)) {
     throw new Error(`Xray-core is not packaged for Rust target '${target}'`);
   }
+  const asset = XRAY_ASSETS[target];
 
   const windowsTarget = target.includes("windows");
   const destinationDir = join(MANIFEST_DIR, "binaries");
@@ -150,8 +203,8 @@ export async function downloadXray(target = requestedTarget()) {
       if (
         source.version === XRAY_VERSION &&
         source.archiveSha256 === asset.sha256 &&
-        source.binarySha256 === sha256(destination) &&
-        source.licenseSha256 === sha256(licenseDestination)
+        source.binarySha256 === sha256File(destination) &&
+        source.licenseSha256 === sha256File(licenseDestination)
       ) {
         return destination;
       }
@@ -164,20 +217,11 @@ export async function downloadXray(target = requestedTarget()) {
   const scratch = mkdtempSync(join(tmpdir(), "donut-xray-"));
   try {
     const archive = join(scratch, basename(asset.name));
-    const response = await fetch(xrayDownloadUrl(asset.name));
-    if (!response.ok) {
-      throw new Error(
-        `Failed to download Xray-core (${response.status} ${response.statusText})`,
-      );
-    }
-    writeFileSync(archive, Buffer.from(await response.arrayBuffer()));
-
-    const actual = sha256(archive);
-    if (actual !== asset.sha256) {
-      throw new Error(
-        `Xray-core checksum mismatch: expected ${asset.sha256}, got ${actual}`,
-      );
-    }
+    await downloadVerifiedArchive(
+      xrayDownloadUrl(asset.name),
+      archive,
+      asset.sha256,
+    );
 
     const extracted = extractArchive(archive, scratch, windowsTarget);
     if (!existsSync(extracted.binary) || !existsSync(extracted.license)) {
@@ -196,8 +240,8 @@ export async function downloadXray(target = requestedTarget()) {
         {
           version: XRAY_VERSION,
           archiveSha256: asset.sha256,
-          binarySha256: sha256(destination),
-          licenseSha256: sha256(licenseDestination),
+          binarySha256: sha256File(destination),
+          licenseSha256: sha256File(licenseDestination),
         },
         null,
         2,

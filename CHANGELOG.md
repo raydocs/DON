@@ -1,6 +1,24 @@
 # Changelog
 
 
+## v0.0.2 (Unreleased)
+
+### Upstream integration
+
+- incorporate upstream Donut Browser fixes and features through v0.29.5
+- add the modular profile importer and extension export/API support
+- improve ephemeral profile cleanup, portable storage, and proxy clipboard parsing
+- preserve Don identity, isolated data roots, SOCKS-safe routing, and fingerprint constraints
+- update Mac and Windows from authenticated private `raydocs/DON` releases only
+
+### Performance and fixes
+
+- restore Chromium background-tab timer throttling and avoid full process-table scans during the five-second running-state poll
+- remove synchronous cookie-database diagnostics from the Wayfern launch hot path
+- preserve newly applied proxy-matched timezone metadata when a stale frontend profile is stopped
+- regenerate incompatible desktop fingerprints once against the live Mac or Windows display constraints
+
+
 ## v0.0.1 (2026-08-10)
 
 First public push of **DON**, the AGPL fork of donutbrowser (upstream v0.28.2). See FORK.md for the standing fork policy.
@@ -33,6 +51,222 @@ First public push of **DON**, the AGPL fork of donutbrowser (upstream v0.28.2). 
 - regenerate `e2e/app/Cargo.lock` after the fork rename; embed the comctl32 v6 manifest in the e2e app
 - never crash on failed OS directory lookups (Wayfern terms, profile importer); fall back to environment variables
 - resolve localized `__MSG_*` placeholders in extension metadata names/descriptions
+
+
+## Upstream changes incorporated through v0.29.5
+
+## v0.29.5 (2026-08-16)
+
+### Features
+
+- extension export via api
+
+### Refactoring
+
+- better proxy clipboard autofill
+- improve ephemeral ux
+- store logs and window state inside portable build
+
+### Maintenance
+
+- chore: version bump
+- chore: update flake.nix for v0.29.4 [skip ci] (#561)
+
+
+## v0.29.4 (2026-08-15)
+
+### Refactoring
+
+- cleanup
+
+### Documentation
+
+- update CHANGELOG.md and README.md for v0.29.3 [skip ci] (#556)
+
+### Maintenance
+
+- chore: version bump
+- ci(deps): bump the github-actions group with 4 updates (#559)
+- chore: update flake.nix for v0.29.3 [skip ci] (#557)
+
+
+## v0.29.3 (2026-08-12)
+
+### Refactoring
+
+- minor improvement
+
+### Maintenance
+
+- chore: update pnpm
+- chore: version bump
+- chore: update flake.nix for v0.29.2 [skip ci] (#552)
+
+
+## v0.29.2 (2026-08-10)
+
+### Refactoring
+
+- cleanup sync
+- profile imports
+
+### Maintenance
+
+- chore: linting
+- chore: version bump
+- chore: linting
+- chore: update flake.nix for v0.29.1 [skip ci] (#546)
+
+
+## v0.29.1 (2026-08-08)
+
+### Bug Fixes
+
+- prevent settings page from crashing on some systems
+
+### Refactoring
+
+- update logic and locks around vpn extensions
+
+### Maintenance
+
+- chore: linting
+- chore: update pnpm
+- chore: switch to ai-inference v3 and fail workflows on 410
+- chore: version bump
+- chore: update flake.nix for v0.29.0 [skip ci] (#542)
+
+
+## v0.29.0 (2026-08-08)
+
+### Features
+
+- prevent launch with inconsistent geodata
+- cookie bot
+- remote sessions
+- xray support
+- mass import via gui, api, and mcp
+- add Turkish (tr) language support
+
+### Bug Fixes
+
+- properly handle x-amz-meta-updated-at
+- improve UI interactions and page consistency
+
+### Refactoring
+
+- cleanup
+- cleanup
+- improve proxy lifetime management
+- cleanup
+- remote cleanup
+- cleanup cloud sync
+- cleanup
+- harden tests
+- block windows app update if the browser is running
+- ui refresh
+
+### Documentation
+
+- update CHANGELOG.md and README.md for v0.29.0 [skip ci] (#539)
+- contrib-readme-action has updated readme
+- contrib-readme-action has updated readme
+
+### Maintenance
+
+- chore: version bump
+- ci(deps): bump the github-actions group with 3 updates (#538)
+- chore: linting
+- chore: linting
+- chore: linting
+- chore: ci
+- chore: upload sidecars to cdn
+- chore: linting
+- ci(deps): bump the github-actions group with 4 updates
+- chore: linting
+- chore: disable e2e in ci
+- chore: linting
+- chore: linting
+- chore: ai compliance
+- chore: linting
+- ci(deps): bump the github-actions group across 1 directory with 3 updates (#514)
+- chore: linting
+- chore: linting
+- chore: add cross-platform webdriver tests
+- ci(deps): bump the github-actions group with 2 updates
+- chore: update flake.nix for v0.28.2 [skip ci] (#501)
+
+### Other
+
+- deps(deps): bump next from 16.2.10 to 16.2.11 (#515)
+- refactors: animations cleanup
+- restore settings redirect
+- fix group create translation key
+
+
+## v0.29.0 (2026-08-08)
+
+### Features
+
+- prevent launch with inconsistent geodata
+- cookie bot
+- remote sessions
+- xray support
+- mass import via gui, api, and mcp
+- add Turkish (tr) language support
+
+### Bug Fixes
+
+- properly handle x-amz-meta-updated-at
+- improve UI interactions and page consistency
+
+### Refactoring
+
+- cleanup
+- cleanup
+- improve proxy lifetime management
+- cleanup
+- remote cleanup
+- cleanup cloud sync
+- cleanup
+- harden tests
+- block windows app update if the browser is running
+- ui refresh
+
+### Documentation
+
+- contrib-readme-action has updated readme
+- contrib-readme-action has updated readme
+
+### Maintenance
+
+- ci(deps): bump the github-actions group with 3 updates (#538)
+- chore: linting
+- chore: linting
+- chore: linting
+- chore: ci
+- chore: upload sidecars to cdn
+- chore: linting
+- ci(deps): bump the github-actions group with 4 updates
+- chore: linting
+- chore: disable e2e in ci
+- chore: linting
+- chore: linting
+- chore: ai compliance
+- chore: linting
+- ci(deps): bump the github-actions group across 1 directory with 3 updates (#514)
+- chore: linting
+- chore: linting
+- chore: add cross-platform webdriver tests
+- ci(deps): bump the github-actions group with 2 updates
+- chore: update flake.nix for v0.28.2 [skip ci] (#501)
+
+### Other
+
+- deps(deps): bump next from 16.2.10 to 16.2.11 (#515)
+- refactors: animations cleanup
+- restore settings redirect
+- fix group create translation key
 
 
 ## v0.28.2 (2026-07-12)
@@ -752,4 +986,3 @@ Note: created manually due to CI issue
 - chore: issues get stale after 30 days
 - chore: better issue validation
 - chore: update flake.nix for v0.18.0 [skip ci] (#247)
-

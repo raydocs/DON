@@ -187,7 +187,7 @@
       "copyLogsDescription": "Copia un paquete censurado de los registros recientes (hasta 5 MB). Revísalo antes de compartirlo, ya que la censura no puede identificar todos los tipos de datos personales."
     },
     "disableAutoUpdates": "Desactivar Actualizaciones Automáticas de la App",
-    "disableAutoUpdatesDescription": "Evita que la aplicación busque e instale actualizaciones de Donut Browser automáticamente. Las actualizaciones de navegadores no se ven afectadas.",
+    "disableAutoUpdatesDescription": "Evita que la aplicación busque e instale actualizaciones de DON automáticamente. Las actualizaciones de navegadores no se ven afectadas.",
     "keepDecryptedProfilesInRam": "Mantener Perfiles Descifrados en RAM",
     "keepDecryptedProfilesInRamDescription": "Conservar la copia descifrada en RAM de los perfiles protegidos por contraseña entre lanzamientos para un inicio más rápido. La copia en disco permanece cifrada en cualquier caso.",
     "privacy": {
@@ -433,7 +433,8 @@
       "newVpn": "Nueva VPN",
       "protocolCol": "Protocolo",
       "hostPort": "Host : puerto",
-      "title": "Proxies y VPN"
+      "title": "Proxies y VPN",
+      "cannotDelete_few": "No se puede eliminar: en uso por {{count}} perfiles"
     },
     "add": "Agregar Proxy",
     "edit": "Editar Proxy",
@@ -629,6 +630,7 @@
       "connectionSuccess": "¡Conexión exitosa!",
       "serverError": "El servidor respondió con un error",
       "connectFailed": "Error al conectar con el servidor",
+      "storageEndpoint": "Almacenamiento: {{endpoint}}",
       "settingsSaved": "Ajustes de sincronización guardados",
       "saveFailed": "Error al guardar los ajustes",
       "disconnected": "Sincronización desconectada",
@@ -836,7 +838,9 @@
       "copyButton_one": "Copiar {{count}} cookie",
       "copyButton_other": "Copiar {{count}} cookies",
       "copyButton_many": "Copiar {{count}} cookies",
-      "copyButtonEmpty": "Copiar cookies"
+      "copyButtonEmpty": "Copiar cookies",
+      "copyButton_few": "Copiar {{count}} cookies",
+      "dialogDescription_few": "Copiar cookies de un perfil de origen a {{count}} perfiles seleccionados."
     },
     "success": "Cookies copiadas exitosamente",
     "error": "Error al copiar cookies",
@@ -1117,61 +1121,6 @@
     "mimeTypesJson": "Tipos MIME (matriz JSON)",
     "voicesJson": "Voces (matriz JSON)"
   },
-  "fingerprintAudit": {
-    "open": "Auditar huella",
-    "title": "Auditoría de huella",
-    "description": "Compara la huella guardada con lo que puede observar una página Wayfern activa.",
-    "run": "Ejecutar auditoría",
-    "running": "Ejecutando auditoría…",
-    "runAgain": "Ejecutar de nuevo",
-    "export": "Exportar JSON",
-    "exportSuccess": "Auditoría de huella exportada",
-    "summary": "Resumen",
-    "matches": "Coincidencias",
-    "mismatches": "Diferencias",
-    "unknown": "Desconocido",
-    "total": "Comprobaciones totales",
-    "noReport": "Ejecuta la auditoría para recopilar observaciones del navegador.",
-    "mismatchNotice": "Algunos valores activos difieren de la huella guardada. Revísalos antes de cambiar el perfil.",
-    "expected": "Esperado",
-    "actual": "Actual",
-    "statusMatch": "Match",
-    "statusMismatch": "Mismatch",
-    "statusUnknown": "Unknown",
-    "statusObserved": "Observed",
-    "statusCrossOriginFrame": "Cross-origin frame",
-    "statusFramePresent": "Frame present",
-    "details": "Comparación de campos",
-    "observations": "Observaciones adicionales",
-    "oopif": "Comprobación de marco de origen cruzado",
-    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
-    "frameCount": "Número de marcos",
-    "childDevicePixelRatio": "Child DPR",
-    "childScreenWidth": "Child screen width",
-    "notAvailable": "No disponible",
-    "categories": {
-      "navigator": "Navigator",
-      "screen": "Pantalla",
-      "window": "Ventana",
-      "timezone": "Zona horaria",
-      "webgl": "WebGL",
-      "media": "Preferencias multimedia",
-      "color": "Color y HDR",
-      "storage": "Almacenamiento",
-      "battery": "Batería",
-      "fonts": "Fuentes",
-      "browser": "Colecciones del navegador",
-      "network": "Red",
-      "performance": "Rendimiento",
-      "observation": "Observación"
-    },
-    "observationLabels": {
-      "audioHash": "Hash de audio sin conexión",
-      "mediaDevices": "Dispositivos multimedia",
-      "webrtcCandidates": "Candidatos WebRTC",
-      "webglParameters": "Observaciones WebGL"
-    }
-  },
   "warnings": {
     "windowResizeTitle": "Dimensiones de ventana personalizadas",
     "windowResizeDescription": "Cambiar las dimensiones de la ventana del navegador puede aumentar la posibilidad de que los sitios web detecten que la información del navegador está falsificada.",
@@ -1314,6 +1263,12 @@
       "syncing": "Sincronizando",
       "synced": "Sincronizado",
       "error": "Error"
+    },
+    "ephemeral": {
+      "cookiesUnavailable": "Los perfiles efímeros se descartan al cerrar el navegador, así que aquí no hay cookies que gestionar.",
+      "extensionsUnavailable": "Los perfiles efímeros se descartan al cerrar el navegador, así que no se les pueden asignar grupos de extensiones.",
+      "syncUnavailable": "Los perfiles efímeros se descartan al cerrar el navegador, así que no hay nada que sincronizar con la nube.",
+      "hint": "Crea un perfil normal si necesitas que esto se conserve."
     }
   },
   "extensions": {
@@ -1349,7 +1304,7 @@
     "deleteConfirmDescription": "¿Estás seguro de que deseas eliminar \"{{name}}\"? Esta acción no se puede deshacer.",
     "deleteGroupConfirmTitle": "Eliminar Grupo de Extensiones",
     "deleteGroupConfirmDescription": "¿Estás seguro de que deseas eliminar el grupo \"{{name}}\"? Esta acción no se puede deshacer.",
-    "invalidFileType": "Tipo de archivo no válido. Suba un archivo .crx, .xpi o .zip.",
+    "invalidFileType": "Tipo de archivo no válido. Elige un archivo .crx o .zip.",
     "readError": "No se pudo leer el archivo de extensión.",
     "assignTitle": "Asignar Grupo de Extensiones",
     "assignDescription": "Asignar {{count}} perfil(es) seleccionado(s) a un grupo de extensiones.",
@@ -1357,7 +1312,6 @@
     "assignSuccess": "Grupo de extensiones asignado exitosamente",
     "editExtension": "Editar extensión",
     "updateSuccess": "Extensión actualizada exitosamente",
-    "reupload": "Re-subir",
     "version": "Versión",
     "author": "Autor",
     "homepage": "Página de inicio",
@@ -1365,10 +1319,26 @@
     "editGroupDescription": "Actualiza el nombre del grupo y gestiona qué extensiones están incluidas.",
     "groupExtensions": "Extensiones en este grupo",
     "noExtensionsInGroup": "Aún no se han añadido extensiones",
-    "editExtensionDescription": "Actualizar el nombre de la extensión, ver metadatos o volver a cargar el archivo de extensión.",
+    "editExtensionDescription": "Actualiza el nombre de la extensión, consulta sus metadatos o reemplázala por otro archivo comprimido o carpeta.",
     "metadata": "Metadatos",
     "noMetadata": "No hay metadatos disponibles del manifiesto.",
     "selectFile": "Elegir archivo",
+    "loadUnpacked": "Cargar sin empaquetar",
+    "loadUnpackedTooltip": "Carga una extensión desde una carpeta que contenga manifest.json",
+    "selectFolderTitle": "Seleccionar carpeta de la extensión",
+    "selectedFolder": "Carpeta seleccionada",
+    "selectFolder": "Elegir carpeta",
+    "linkFolder": "Cargar directamente desde esta carpeta",
+    "linkFolderOff": "La carpeta se copia en Donut. La extensión es portátil y se sincroniza con tus otros dispositivos.",
+    "linkFolderOn": "Donut carga la extensión directamente desde esta carpeta en cada inicio. Tus cambios se aplican al abrir el navegador de nuevo, pero la extensión permanece en este equipo y nunca se sincroniza.",
+    "replaceSource": "Reemplazar origen",
+    "linkedNoSync": "Las extensiones enlazadas permanecen en este equipo y no se pueden sincronizar.",
+    "uploadFailed": "No se pudo añadir la extensión",
+    "updateFailed": "No se pudo actualizar la extensión",
+    "deleteFailed": "No se pudo eliminar la extensión",
+    "groupCreateFailed": "No se pudo crear el grupo de extensiones",
+    "groupUpdateFailed": "No se pudo actualizar el grupo de extensiones",
+    "groupDeleteFailed": "No se pudo eliminar el grupo de extensiones",
     "syncEnabled": "Sincronización habilitada",
     "syncDisabled": "Sincronización deshabilitada",
     "syncEnableTooltip": "Habilitar sincronización",
@@ -1381,6 +1351,14 @@
       "groupsTitle": "Eliminar grupos de extensiones",
       "groupsDescription": "¿Eliminar {{count}} grupos de extensiones? {{names}}",
       "confirmButton": "Eliminar"
+    },
+    "source": {
+      "label": "Origen",
+      "archive": "Archivo comprimido",
+      "unpacked": "Carpeta sin empaquetar",
+      "linked": "Carpeta enlazada",
+      "folderLabel": "Carpeta",
+      "linkedTooltip": "Se carga directamente desde {{path}}"
     }
   },
   "pro": {
@@ -1501,7 +1479,8 @@
       "deleteSuccess": "VPN eliminada correctamente",
       "deleteFailed": "Error al eliminar la VPN",
       "deleteTitle": "Eliminar VPN",
-      "deleteDescription": "Esta acción no se puede deshacer. Se eliminará permanentemente la VPN \"{{name}}\"."
+      "deleteDescription": "Esta acción no se puede deshacer. Se eliminará permanentemente la VPN \"{{name}}\".",
+      "cannotDelete_few": "No se puede eliminar: en uso por {{count}} perfiles"
     }
   },
   "importProfile": {
@@ -1553,7 +1532,43 @@
     "vpnOptional": "VPN (opcional)",
     "noVpn": "Sin VPN",
     "advancedOptions": "Opciones avanzadas",
-    "configureFingerprint": "Configurar huella digital (opcional)"
+    "configureFingerprint": "Configurar huella digital (opcional)",
+    "reportCookies": "Cookies",
+    "reportPasswords": "Contraseñas",
+    "reportAutofill": "Métodos de pago",
+    "reportExtensions": "Extensiones",
+    "reportHistory": "Historial",
+    "reportBookmarks": "Marcadores",
+    "reportLocalStorage": "Datos de sitios",
+    "reportNothingCarried": "No se transfirió ningún dato legible",
+    "reportUnrecoverable": "No se pudo descifrar: {{count}}",
+    "closeSourceBrowserHint": "Cierra el navegador de origen y vuelve a intentarlo para obtener una copia completa, o importa ahora aceptando que los datos de sitios pueden quedar incompletos.",
+    "importAnyway": "Importar de todos modos",
+    "warnings": {
+      "secretsNotMigrated": "No se pudieron desbloquear las cookies ni las contraseñas, así que tendrás que iniciar sesión de nuevo.",
+      "appBoundEncrypted": "Chrome 127+ en Windows vincula las cookies al propio navegador; ninguna otra aplicación puede migrarlas.",
+      "storeTooOld": "Una base de datos era demasiado antigua para este navegador y se omitió.",
+      "storeTooNew": "Una base de datos procede de un navegador más reciente que este y se omitió.",
+      "sourceBrowserRunning": "El navegador de origen estaba en ejecución, por lo que los datos de sitios pueden estar incompletos.",
+      "securePreferencesReset": "Los ajustes protegidos, como la página de inicio y el buscador, volvieron a sus valores predeterminados.",
+      "extensionsPartial": "Algunas extensiones pertenecían al navegador de origen y no se transfirieron.",
+      "storeUnreadable": "No se pudo leer una base de datos y se omitió en lugar de copiarla dañada."
+    },
+    "legacyDonut": "Move from old Donut",
+    "legacyTitle": "Copy data from old Donut",
+    "legacyDescription": "Preview and selectively copy your local data into DON.",
+    "legacyScanning": "Checking for old Donut data...",
+    "legacyNotFound": "No old Donut data was found on this computer.",
+    "legacyCopyOnly": "DON only reads and copies the selected data. Your old Donut data is never changed, and account tokens, cloud login, update state, VPNs, and browser binaries are not copied.",
+    "legacyConflicts": "{{count}} existing item(s) will be safely skipped or linked to the matching DON item. Nothing will be overwritten.",
+    "legacyResult": "{{copied}} copied, {{skipped}} skipped, {{failed}} failed",
+    "legacyMigrateButton": "Copy selected data to DON",
+    "legacyCategories": {
+      "profiles": "Profiles and browsing data",
+      "proxies": "Local proxies",
+      "groups": "Profile groups",
+      "extensions": "Extensions and extension groups"
+    }
   },
   "syncTooltips": {
     "syncing": "Sincronizando...",
@@ -1587,7 +1602,8 @@
       "description": "¿Estás seguro de que quieres eliminar {{count}} grupos? {{names}}. Los perfiles se moverán a Predeterminado.",
       "description_one": "¿Estás seguro de que quieres eliminar {{count}} grupo? {{names}}. Los perfiles se moverán a Predeterminado.",
       "confirmButton": "Eliminar grupos"
-    }
+    },
+    "profileCount_few": "{{count}} perfiles"
   },
   "proxyAssignment": {
     "title": "Asignar proxy / VPN",
@@ -1607,7 +1623,8 @@
     "noneOption": "Ninguno",
     "noValidProfiles": "No hay perfiles válidos seleccionados.",
     "vpnGroupHeading": "VPN",
-    "failedFallback": "Error al asignar proxy/VPN a los perfiles"
+    "failedFallback": "Error al asignar proxy/VPN a los perfiles",
+    "description_few": "Asigna un proxy o VPN a {{count}} perfiles seleccionados."
   },
   "groupAssignment": {
     "title": "Asignar grupo",
@@ -1623,7 +1640,8 @@
     "selectedProfilesLabel": "Perfiles seleccionados:",
     "assignGroupLabel": "Asignar a grupo:",
     "noValidProfiles": "No hay perfiles válidos seleccionados.",
-    "failedFallback": "Error al asignar grupo a los perfiles"
+    "failedFallback": "Error al asignar grupo a los perfiles",
+    "description_few": "Asigna un grupo a {{count}} perfiles seleccionados."
   },
   "profileSelector": {
     "title": "Seleccionar perfil",
@@ -1764,7 +1782,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Error al actualizar Donut Browser",
+      "updateFailed": "Error al actualizar DON",
       "restartFailed": "Error al reiniciar",
       "updateReady": "Actualización lista, reinicia para aplicar",
       "manualDownloadRequired": "Descarga manual requerida",
@@ -1895,6 +1913,15 @@
     "vpnNotFound": "VPN no encontrada",
     "extensionNotFound": "Extensión no encontrada",
     "extensionGroupNotFound": "Grupo de extensiones no encontrado",
+    "extensionUnsupportedFileType": "Ese tipo de archivo no es compatible. Una extensión debe ser un archivo .crx o .zip, o una carpeta.",
+    "extensionDirNotFound": "Esa carpeta ya no existe.",
+    "extensionNotADirectory": "Esa ruta no es una carpeta.",
+    "extensionManifestMissing": "No hay ningún manifest.json en esa carpeta. Elige la carpeta que contiene el manifest.json de la extensión.",
+    "extensionManifestInvalid": "No se pudo leer el manifest.json de esa carpeta.",
+    "extensionDirTooLarge": "Esa carpeta es demasiado grande para copiarla en Donut (el límite es 256 MB y 20 000 archivos). Enlázala en su ubicación.",
+    "extensionPathHasComma": "La ruta de esa carpeta contiene una coma, que Chromium no puede cargar. Cambia el nombre de la carpeta o muévela.",
+    "extensionLinkRequiresDirectory": "Solo se puede cargar en su ubicación una carpeta. Desactiva el enlace para añadir un archivo comprimido.",
+    "extensionLinkedCannotSync": "Esta extensión se carga desde una carpeta de este equipo, así que no hay nada que sincronizar.",
     "cannotModifyCloudManagedProxy": "No se puede modificar la sincronización de un proxy gestionado en la nube",
     "syncLockedByProfile": "No se puede desactivar la sincronización mientras se usa en perfiles sincronizados",
     "syncNotConfigured": "La sincronización no está configurada. Inicia sesión o configura un servidor propio.",
@@ -1996,7 +2023,11 @@
     },
     "camoufoxRemoved": "Camoufox ya no es compatible. Vuelve a crear este perfil con Wayfern.",
     "noE2ePasswordSet": "No hay contraseña de cifrado de extremo a extremo. Establece una antes de sincronizar datos cifrados.",
-    "fingerprintAuditFailed": "La auditoría de huella falló: {{detail}}"
+    "importSourceNotChromium": "Esta carpeta no es un perfil de navegador Chromium",
+    "importSourceNotChromiumNamed": "Los perfiles de {{family}} no se pueden importar; solo se admiten navegadores basados en Chromium",
+    "importSourceBrowserRunning": "Cierra {{browser}} primero o elige importar de todos modos",
+    "fingerprintAuditFailed": "La auditoría de huella falló: {{detail}}",
+    "legacyMigrationFailed": "Old Donut data could not be copied safely. Your old data was not changed."
   },
   "rail": {
     "profiles": "Perfiles",
@@ -2211,7 +2242,7 @@
   },
   "wayfernBlocked": {
     "title": "Automatización del navegador en pausa",
-    "description": "Tu cuenta fue restringida temporalmente de las funciones Pro del navegador, normalmente por iniciar sesión en varios dispositivos a la vez. Cierra sesión en los demás dispositivos y vuelve a iniciar el perfil para restaurarla."
+    "description": "La automatización del navegador funciona en un solo dispositivo a la vez y otro dispositivo con la sesión abierta la está usando. Cierra la sesión allí y vuelve a iniciar el perfil."
   },
   "wayfernConfigDialog": {
     "titleView": "Ver configuración de huella - {{name}} ({{browser}})",
@@ -2259,7 +2290,7 @@
     },
     "locked": {
       "title": "Cookie Bot",
-      "hint": "Cookie Bot calienta tus perfiles por la noche en una máquina remota, así conservan sus cookies y su historial sin que tu ordenador esté encendido. Requiere un plan Pro o Team."
+      "hint": "Cookie Bot calienta tus perfiles por la noche en una máquina remota, así conservan sus cookies y su historial sin que tu ordenador esté encendido."
     },
     "empty": {
       "title": "No hay perfiles inscritos",
@@ -2272,7 +2303,8 @@
       "dueCount_one": "{{count}} perfil pendiente",
       "dueCount_other": "{{count}} perfiles pendientes",
       "dueCount_many": "{{count}} perfiles pendientes",
-      "nothingScheduled": "Nada programado"
+      "nothingScheduled": "Nada programado",
+      "dueCount_few": "{{count}} perfiles pendientes"
     },
     "lastDay": {
       "label": "Últimas 24 horas",
@@ -2285,7 +2317,10 @@
       "partial_many": "{{count}} parciales",
       "failed_one": "{{count}} fallido",
       "failed_other": "{{count}} fallidos",
-      "failed_many": "{{count}} fallidos"
+      "failed_many": "{{count}} fallidos",
+      "failed_few": "{{count}} fallidos",
+      "partial_few": "{{count}} parciales",
+      "ran_few": "{{count}} ejecutados"
     },
     "chart": {
       "machineTime": "Tiempo de máquina por noche",
@@ -2326,7 +2361,9 @@
       "unenrol": "Quitar de Cookie Bot",
       "unenrolTitle": "¿Quitar {{name}} de Cookie Bot?",
       "unenrolDescription": "Dejará de calentarse esta noche. Las ejecuciones anteriores se conservan en Actividad.",
-      "unenrolled": "Quitado de Cookie Bot"
+      "unenrolled": "Quitado de Cookie Bot",
+      "crowded_few": "{{count}} perfiles empiezan a la vez",
+      "quietHours_few": "{{count}} horas libres"
     },
     "status": {
       "provisioning": "Preparando una máquina",
@@ -2364,7 +2401,8 @@
       "consentUnknown": "Avisos de consentimiento aún no informados",
       "billed": "{{duration}} facturados",
       "billedUnknown": "Tiempo facturado aún no informado",
-      "chunk": "Parte {{index}} de {{total}}"
+      "chunk": "Parte {{index}} de {{total}}",
+      "consentHandled_few": "{{count}} avisos de consentimiento gestionados"
     },
     "history": {
       "title": "Ejecuciones",
@@ -2391,7 +2429,9 @@
       "consentHandled_one": "{{count}} aviso de consentimiento gestionado",
       "consentHandled_other": "{{count}} avisos de consentimiento gestionados",
       "consentHandled_many": "{{count}} avisos de consentimiento gestionados",
-      "sitesUnknown": "Sin datos"
+      "sitesUnknown": "Sin datos",
+      "consentHandled_few": "{{count}} avisos de consentimiento gestionados",
+      "sitesFailed_few": "No se pudo acceder a {{count}} sitios"
     },
     "duration": {
       "hm": "{{hours}} h {{minutes}} min",
@@ -2406,7 +2446,8 @@
       "alreadyEnrolled": "Inscrito",
       "continue_one": "Continuar con {{count}}",
       "continue_other": "Continuar con {{count}}",
-      "continue_many": "Continuar con {{count}}"
+      "continue_many": "Continuar con {{count}}",
+      "continue_few": "Continuar con {{count}}"
     },
     "enrol": {
       "titleOne": "Inscribir {{name}}",
@@ -2492,7 +2533,17 @@
       "summarySlots_one": "Se ejecuta {{count}} vez a la semana, hasta {{minutes}} min cada vez.",
       "summarySlots_other": "Se ejecuta {{count}} veces a la semana, hasta {{minutes}} min cada vez.",
       "summarySlots_many": "Se ejecuta {{count}} veces a la semana, hasta {{minutes}} min cada vez.",
-      "templateNameInvalidNoMax": "Ese nombre no se puede usar para una lista guardada."
+      "templateNameInvalidNoMax": "Ese nombre no se puede usar para una lista guardada.",
+      "cadenceCustom_few": "{{count}} noches a la semana",
+      "confirmBulkButton_few": "Continuar con {{count}} perfiles",
+      "confirmBulkDescription_few": "Reservan {{count}} ejecuciones nocturnas con cargo a vuestras horas remotas compartidas. La hora y los sitios se eligen a continuación.",
+      "confirmBulkTitle_few": "¿Inscribir {{count}} perfiles en Cookie Bot?",
+      "enrolled_few": "{{count}} perfiles inscritos",
+      "listSites_few": "{{count}} sitios",
+      "sitesHint_few": "{{count}} sitios. Solo se visitan las páginas que indiques aquí.",
+      "summaryCustom_few": "Se ejecuta {{count}} noches a la semana a las {{time}}, hasta {{minutes}} min cada vez.",
+      "summarySlots_few": "Se ejecuta {{count}} veces a la semana, hasta {{minutes}} min cada vez.",
+      "titleCount_few": "Inscribir {{count}} perfiles"
     },
     "preset": {
       "light": "Ligera",
@@ -2516,7 +2567,8 @@
       "fixEncrypted": "Abrir los ajustes de sincronización",
       "fixProxy": "Asignar un proxy",
       "fixFailed": "No se pudo aplicar esa corrección.",
-      "exitNodeHint": "Sin proxy ni VPN, la ejecución sale por la propia dirección del centro de datos de la flota. Horas de tráfico desde una red de alojamiento dañan la identidad del perfil más que no calentarlo en absoluto."
+      "exitNodeHint": "Sin proxy ni VPN, la ejecución sale por la propia dirección del centro de datos de la flota. Horas de tráfico desde una red de alojamiento dañan la identidad del perfil más que no calentarlo en absoluto.",
+      "ineligible_few": "{{count}} perfiles no pueden ejecutarse en remoto"
     },
     "conflict": {
       "title": "{{email}} ya calienta este perfil a las {{time}}",
@@ -2530,7 +2582,7 @@
     },
     "actionBar": {
       "enrol": "Inscribir en Cookie Bot",
-      "proRequired": "Cookie Bot requiere un plan Pro o Team",
+      "proRequired": "Cookie Bot requiere un plan de pago",
       "noneEligible": "Ninguno de los perfiles seleccionados se puede calentar en remoto"
     },
     "actions": {
@@ -2563,7 +2615,8 @@
       "columnShare": "Cuota",
       "noActivity": "No hay sesiones remotas en este periodo.",
       "soloNote": "De momento solo tu propio uso. Invita a compañeros para ver el reparto por miembro.",
-      "runsFailed": "· {{n}} con errores"
+      "runsFailed": "· {{n}} con errores",
+      "pooled_few": "{{used}} de {{total}} h compartidas entre {{count}} plazas"
     },
     "closeReason": {
       "stoppedByUser": "Detenido a mano",
@@ -2591,15 +2644,18 @@
     "titleBlocked": "Inicio bloqueado",
     "titleWarning": "Antes de iniciar",
     "intro": "Revisa estos problemas de \"{{name}}\" antes de iniciar el navegador.",
-    "fingerprintHeading": "La salida del proxy no coincide con la huella digital",
-    "vpnExtensionHeading": "Extensión VPN detectada",
+    "fingerprintHeading": "La salida medida no coincide con la huella digital",
+    "vpnExtensionHeading": "Extensión de VPN o proxy detectada",
     "vpnExtensionIntro": "Extensiones de este perfil que pueden redirigir el tráfico del navegador:",
-    "vpnExtensionConfirmed": "Puede cambiar el proxy",
-    "vpnExtensionLikely": "Podría cambiar el proxy",
+    "vpnExtensionConfirmed": "Herramienta de VPN o proxy conocida",
+    "vpnExtensionLikely": "Parece una herramienta de VPN o proxy",
+    "vpnExtensionCapability": "Tiene el permiso de proxy",
     "vpnExtensionExplainer": "Si alguna de ellas redirige tu tráfico a otro lugar, la ubicación real del navegador dejará de coincidir con la zona horaria, el idioma y la geolocalización con los que se creó este perfil, y Donut no puede detectarlo desde fuera.",
+    "proxyCapableHeading": "Extensiones que pueden cambiar el proxy",
+    "proxyCapableIntro": "No parecen VPN, pero tienen el permiso de proxy de Chromium, que también necesitan los gestores de descargas y las herramientas de depuración. Donut no puede saber si alguna lo está usando:",
     "sourceDonut": "Gestionada por Donut",
     "sourceBrowser": "Instalada en el perfil",
-    "measurementUnreliable": "Como una extensión VPN puede anular el proxy, la comprobación de salida podría no reflejar la ruta que el navegador usa realmente.",
+    "measurementUnreliable": "Una extensión de este perfil tiene el permiso de proxy, así que la comprobación de salida podría no reflejar la ruta que el navegador usa realmente.",
     "scanIncompleteEncrypted": "Este perfil está cifrado, así que solo se pudieron comprobar las extensiones gestionadas por Donut.",
     "scanIncompleteEphemeral": "Este perfil aún no tiene datos, así que solo se pudieron comprobar las extensiones gestionadas por Donut.",
     "scanIncompletePartial": "El análisis de extensiones se interrumpió, así que puede que falten algunas.",
@@ -2609,9 +2665,64 @@
     "dontWarnExtensions": "No volver a avisar sobre estas extensiones",
     "applyToRemaining": "Aplicar esta decisión a los perfiles restantes",
     "cancelledSummary": "{{cancelled}} de {{total}} inicios cancelados",
-    "cancelled": "Inicio cancelado",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
+    "vpnExtensionEntryNoVersion": " — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Este perfil aún no se ha iniciado, así que solo se pudieron comprobar las extensiones gestionadas por Donut."
+  },
+  "fingerprintAudit": {
+    "open": "Auditar huella",
+    "title": "Auditoría de huella",
+    "description": "Compara la huella guardada con lo que puede observar una página Wayfern activa.",
+    "run": "Ejecutar auditoría",
+    "running": "Ejecutando auditoría…",
+    "runAgain": "Ejecutar de nuevo",
+    "export": "Exportar JSON",
+    "exportSuccess": "Auditoría de huella exportada",
+    "summary": "Resumen",
+    "matches": "Coincidencias",
+    "mismatches": "Diferencias",
+    "unknown": "Desconocido",
+    "total": "Comprobaciones totales",
+    "noReport": "Ejecuta la auditoría para recopilar observaciones del navegador.",
+    "mismatchNotice": "Algunos valores activos difieren de la huella guardada. Revísalos antes de cambiar el perfil.",
+    "expected": "Esperado",
+    "actual": "Actual",
+    "statusMatch": "Match",
+    "statusMismatch": "Mismatch",
+    "statusUnknown": "Unknown",
+    "statusObserved": "Observed",
+    "statusCrossOriginFrame": "Cross-origin frame",
+    "statusFramePresent": "Frame present",
+    "details": "Comparación de campos",
+    "observations": "Observaciones adicionales",
+    "oopif": "Comprobación de marco de origen cruzado",
+    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
+    "frameCount": "Número de marcos",
+    "childDevicePixelRatio": "Child DPR",
+    "childScreenWidth": "Child screen width",
+    "notAvailable": "No disponible",
+    "categories": {
+      "navigator": "Navigator",
+      "screen": "Pantalla",
+      "window": "Ventana",
+      "timezone": "Zona horaria",
+      "webgl": "WebGL",
+      "media": "Preferencias multimedia",
+      "color": "Color y HDR",
+      "storage": "Almacenamiento",
+      "battery": "Batería",
+      "fonts": "Fuentes",
+      "browser": "Colecciones del navegador",
+      "network": "Red",
+      "performance": "Rendimiento",
+      "observation": "Observación"
+    },
+    "observationLabels": {
+      "audioHash": "Hash de audio sin conexión",
+      "mediaDevices": "Dispositivos multimedia",
+      "webrtcCandidates": "Candidatos WebRTC",
+      "webglParameters": "Observaciones WebGL"
+    }
   },
   "claudeWorkflow": {
     "quickTitle": "Creación rápida desde un proxy",

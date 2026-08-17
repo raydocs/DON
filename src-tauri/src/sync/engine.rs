@@ -109,6 +109,37 @@ fn is_critical_file(path: &str) -> bool {
     .any(|pattern| path.contains(pattern))
 }
 
+/// How many failed paths to name before collapsing the rest into a count.
+const MAX_LISTED_FAILURES: usize = 10;
+
+/// Aggregate a batch of failed transfers into the message the user sees.
+///
+/// Whatever breaks a sync usually breaks every file the same way — one
+/// unreachable storage host, one rejected signature — so the per-file causes
+/// were dropped and only the paths survived into the message. That left users
+/// staring at a list of filenames with nothing to act on. Carry the first
+/// cause through, and stop pasting hundreds of paths into a toast.
+fn critical_failure_message(action: &str, failures: &[(String, String)]) -> String {
+  let listed: Vec<&str> = failures
+    .iter()
+    .take(MAX_LISTED_FAILURES)
+    .map(|(path, _)| path.as_str())
+    .collect();
+  let hidden = failures.len().saturating_sub(listed.len());
+  let files = if hidden > 0 {
+    format!("{} (and {} more)", listed.join(", "), hidden)
+  } else {
+    listed.join(", ")
+  };
+
+  match failures.first() {
+    Some((_, cause)) => format!(
+      "Critical files failed to {action}: {files}. Cause: {cause}. Sync aborted to prevent data loss."
+    ),
+    None => format!("Critical files failed to {action}: {files}. Sync aborted to prevent data loss."),
+  }
+}
+
 /// Validate that a manifest-supplied relative file path is safe to join onto a
 /// profile directory before writing/deleting. The manifest is remote-controlled
 /// (a self-hosted or compromised sync server, a MITM on a plaintext Regular-mode
@@ -790,15 +821,17 @@ impl SyncEngine {
       let _ = self.sync_vpn(vpn_id, Some(app_handle)).await;
     }
 
-    let mut updated_profile = profile.clone();
-    updated_profile.last_sync = Some(
+    let last_sync = Some(
       std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs(),
     );
     profile_manager
-      .save_profile(&updated_profile)
+      .mutate_profile(&profile_id, |latest| {
+        latest.last_sync = last_sync;
+        Ok(())
+      })
       .map_err(|e| {
         SyncError::IoError(format!("Failed to save reconciled profile metadata: {e}"))
       })?;
@@ -938,8 +971,8 @@ impl SyncEngine {
     remote.process_id = profile.process_id;
     remote.last_launch = profile.last_launch;
     remote.last_sync = profile.last_sync;
-    ProfileManager::instance()
-      .save_profile(&remote)
+    remote = ProfileManager::instance()
+      .apply_remote_profile(&remote)
       .map_err(|e| SyncError::IoError(format!("Failed to save remote profile metadata: {e}")))?;
     Ok(remote)
   }
@@ -1283,10 +1316,9 @@ impl SyncEngine {
     }
 
     if !critical_failures.is_empty() {
-      let file_list: Vec<&str> = critical_failures.iter().map(|(p, _)| p.as_str()).collect();
-      return Err(SyncError::IoError(format!(
-        "Critical files failed to upload: {}. Sync aborted to prevent data loss.",
-        file_list.join(", ")
+      return Err(SyncError::IoError(critical_failure_message(
+        "upload",
+        &critical_failures,
       )));
     }
 
@@ -1559,10 +1591,9 @@ impl SyncEngine {
     }
 
     if !critical_failures.is_empty() {
-      let file_list: Vec<&str> = critical_failures.iter().map(|(p, _)| p.as_str()).collect();
-      return Err(SyncError::IoError(format!(
-        "Critical files failed to download: {}. Sync aborted to prevent data loss.",
-        file_list.join(", ")
+      return Err(SyncError::IoError(critical_failure_message(
+        "download",
+        &critical_failures,
       )));
     }
 
@@ -2055,6 +2086,13 @@ impl SyncEngine {
       manager.get_extension(ext_id).ok()
     };
 
+    // A linked extension is an absolute path on this machine with no payload in
+    // the store. Uploading it would publish metadata another device could never
+    // resolve, so it stays local whatever queued this run.
+    if local_ext.as_ref().is_some_and(|e| e.is_linked()) {
+      return Ok(());
+    }
+
     let remote_key = format!("extensions/{}.json", ext_id);
     let stat = self.client.stat(&remote_key).await?;
 
@@ -2462,8 +2500,8 @@ impl SyncEngine {
           .as_secs(),
       );
 
-      profile_manager
-        .save_profile(&profile)
+      profile = profile_manager
+        .apply_remote_profile(&profile)
         .map_err(|e| SyncError::IoError(format!("Failed to save cross-OS profile: {e}")))?;
 
       let _ = events::emit("profiles-changed", ());
@@ -2617,8 +2655,8 @@ impl SyncEngine {
         .as_secs(),
     );
 
-    profile_manager
-      .save_profile(&profile)
+    profile = profile_manager
+      .apply_remote_profile(&profile)
       .map_err(|e| SyncError::IoError(format!("Failed to save downloaded profile: {e}")))?;
 
     let _ = events::emit("profiles-changed", ());
@@ -2862,7 +2900,7 @@ impl SyncEngine {
                       .unwrap()
                       .as_secs(),
                   );
-                  if let Err(e) = profile_manager.save_profile(&remote_profile) {
+                  if let Err(e) = profile_manager.apply_remote_profile(&remote_profile) {
                     log::warn!("Failed to refresh cross-OS profile {} metadata: {}", pid, e);
                   } else {
                     log::debug!("Refreshed cross-OS profile {} metadata", pid);
@@ -3222,7 +3260,9 @@ pub async fn enable_extension_group_sync_if_needed(extension_group_id: &str) -> 
       manager
         .get_extension(ext_id)
         .ok()
-        .map(|e| e.sync_enabled)
+        // A linked extension has no binary to hand the other device, only a
+        // path that means nothing there, so the cascade must not pick it up.
+        .map(|e| e.sync_enabled || e.is_linked())
         .unwrap_or(true)
     };
     if !already_synced {
@@ -3335,12 +3375,15 @@ pub async fn set_profile_sync_mode(
   }
 
   // If switching to Encrypted, verify password is set and generate salt
+  let mut generated_encryption_salt = None;
   if new_mode == SyncMode::Encrypted {
     if !encryption::has_e2e_password() {
       return Err("E2E password not set. Please set a password in Settings first.".to_string());
     }
     if profile.encryption_salt.is_none() {
-      profile.encryption_salt = Some(encryption::generate_salt());
+      let salt = encryption::generate_salt();
+      profile.encryption_salt = Some(salt.clone());
+      generated_encryption_salt = Some(salt);
     }
   }
 
@@ -3360,10 +3403,15 @@ pub async fn set_profile_sync_mode(
     }
   }
 
-  profile.sync_mode = new_mode;
-
-  profile_manager
-    .save_profile(&profile)
+  profile = profile_manager
+    .mutate_profile(&profile_id, move |latest| {
+      latest.sync_mode = new_mode;
+      if latest.encryption_salt.is_none() {
+        latest.encryption_salt = generated_encryption_salt;
+      }
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
     .map_err(|e| format!("Failed to save profile: {e}"))?;
 
   // The bot materialises the profile from donut-sync, so switching sync off (or
@@ -3954,7 +4002,9 @@ pub async fn enable_sync_for_all_entities(app_handle: tauri::AppHandle) -> Resul
         .map_err(|e| format!("Failed to list extensions: {e}"))?
     };
     for ext in &exts {
-      if !ext.sync_enabled {
+      // Linked extensions are machine-local by definition and are skipped
+      // rather than reported as a failure on every sync setup.
+      if !ext.sync_enabled && !ext.is_linked() {
         if let Err(e) = set_extension_sync_enabled(app_handle.clone(), ext.id.clone(), true).await {
           log::warn!("Failed to enable sync for extension {}: {e}", ext.id);
         }
@@ -4000,6 +4050,11 @@ pub async fn set_extension_sync_enabled(
   };
 
   if enabled {
+    // A linked extension is a path on this machine and nothing else; there is
+    // no payload to upload and the path would be meaningless on another device.
+    if ext.is_linked() {
+      return Err(serde_json::json!({ "code": "EXTENSION_LINKED_CANNOT_SYNC" }).to_string());
+    }
     ensure_sync_configured(&app_handle).await?;
   }
 
@@ -4246,6 +4301,40 @@ pub async fn rollover_encryption_for_all_entities(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn test_critical_failure_message_carries_the_cause() {
+    // A self-hosted server that hands out unreachable presigned URLs fails
+    // every file with the same connect error. Naming only the files told the
+    // user nothing about why, which is what made this undiagnosable.
+    let failures = vec![
+      (
+        "Default/Cookies".to_string(),
+        "Failed to upload Default/Cookies after 3 retries: error sending request".to_string(),
+      ),
+      ("Local State".to_string(), "same".to_string()),
+    ];
+
+    let message = critical_failure_message("upload", &failures);
+    assert!(message.contains("Default/Cookies"));
+    assert!(message.contains("Local State"));
+    assert!(message.contains("Cause: Failed to upload Default/Cookies"));
+    assert!(message.contains("Sync aborted to prevent data loss."));
+  }
+
+  #[test]
+  fn test_critical_failure_message_collapses_long_lists() {
+    let failures: Vec<(String, String)> = (0..25)
+      .map(|i| (format!("file-{i}"), "connect error".to_string()))
+      .collect();
+
+    let message = critical_failure_message("download", &failures);
+    assert!(message.contains("file-0"));
+    assert!(message.contains(&format!("file-{}", MAX_LISTED_FAILURES - 1)));
+    assert!(!message.contains(&format!("file-{MAX_LISTED_FAILURES}")));
+    assert!(message.contains("(and 15 more)"));
+    assert!(message.contains("failed to download"));
+  }
 
   #[test]
   fn test_is_safe_manifest_path() {

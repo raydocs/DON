@@ -187,7 +187,7 @@
       "copyLogsDescription": "최근 로그를 민감 정보가 제거된 묶음으로 복사합니다(최대 5MB). 모든 유형의 개인 데이터를 식별할 수는 없으므로 공유하기 전에 검토하세요."
     },
     "disableAutoUpdates": "앱 자동 업데이트 사용 안 함",
-    "disableAutoUpdatesDescription": "Donut Browser 업데이트를 앱이 자동으로 확인하고 설치하지 않도록 합니다. 브라우저 업데이트는 영향을 받지 않습니다.",
+    "disableAutoUpdatesDescription": "DON 업데이트를 앱이 자동으로 확인하고 설치하지 않도록 합니다. 브라우저 업데이트는 영향을 받지 않습니다.",
     "keepDecryptedProfilesInRam": "복호화된 프로필을 RAM에 유지",
     "keepDecryptedProfilesInRamDescription": "비밀번호로 보호된 프로필의 복호화된 RAM 사본을 실행 사이에 유지하여 시작 속도를 높입니다. 디스크의 사본은 그대로 암호화된 상태로 유지됩니다.",
     "privacy": {
@@ -432,7 +432,9 @@
       "newVpn": "새 VPN",
       "protocolCol": "프로토콜",
       "hostPort": "호스트 : 포트",
-      "title": "프록시 및 VPN"
+      "title": "프록시 및 VPN",
+      "cannotDelete_few": "삭제할 수 없습니다: {{count}}개 프로필에서 사용 중",
+      "cannotDelete_many": "삭제할 수 없습니다: {{count}}개 프로필에서 사용 중"
     },
     "add": "프록시 추가",
     "edit": "프록시 편집",
@@ -628,6 +630,7 @@
       "connectionSuccess": "연결 성공!",
       "serverError": "서버가 오류로 응답했습니다",
       "connectFailed": "서버에 연결하지 못했습니다",
+      "storageEndpoint": "스토리지: {{endpoint}}",
       "settingsSaved": "동기화 설정이 저장되었습니다",
       "saveFailed": "설정 저장 실패",
       "disconnected": "동기화 연결 끊김",
@@ -833,7 +836,11 @@
       "failedMessage": "쿠키 복사 실패: {{error}}",
       "copyButton_one": "{{count}}개 쿠키 복사",
       "copyButton_other": "{{count}}개 쿠키 복사",
-      "copyButtonEmpty": "쿠키 복사"
+      "copyButtonEmpty": "쿠키 복사",
+      "copyButton_few": "{{count}}개 쿠키 복사",
+      "copyButton_many": "{{count}}개 쿠키 복사",
+      "dialogDescription_few": "원본 프로필의 쿠키를 선택한 {{count}}개 프로필로 복사합니다.",
+      "dialogDescription_many": "원본 프로필의 쿠키를 선택한 {{count}}개 프로필로 복사합니다."
     },
     "success": "쿠키가 복사되었습니다",
     "error": "쿠키 복사 실패",
@@ -1114,61 +1121,6 @@
     "mimeTypesJson": "MIME 유형 (JSON 배열)",
     "voicesJson": "음성 (JSON 배열)"
   },
-  "fingerprintAudit": {
-    "open": "지문 감사",
-    "title": "지문 감사",
-    "description": "저장된 지문과 실행 중인 Wayfern 페이지에서 관찰할 수 있는 값을 비교합니다.",
-    "run": "감사 실행",
-    "running": "감사 실행 중…",
-    "runAgain": "다시 실행",
-    "export": "JSON 내보내기",
-    "exportSuccess": "지문 감사를 내보냈습니다",
-    "summary": "요약",
-    "matches": "일치",
-    "mismatches": "불일치",
-    "unknown": "알 수 없음",
-    "total": "전체 검사",
-    "noReport": "감사를 실행하여 브라우저 관찰 값을 수집하세요.",
-    "mismatchNotice": "일부 실제 값이 저장된 지문과 다릅니다. 프로필을 변경하기 전에 확인하세요.",
-    "expected": "예상",
-    "actual": "실제",
-    "statusMatch": "Match",
-    "statusMismatch": "Mismatch",
-    "statusUnknown": "Unknown",
-    "statusObserved": "Observed",
-    "statusCrossOriginFrame": "Cross-origin frame",
-    "statusFramePresent": "Frame present",
-    "details": "필드 비교",
-    "observations": "추가 관찰",
-    "oopif": "교차 출처 프레임 검사",
-    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
-    "frameCount": "프레임 수",
-    "childDevicePixelRatio": "Child DPR",
-    "childScreenWidth": "Child screen width",
-    "notAvailable": "사용할 수 없음",
-    "categories": {
-      "navigator": "Navigator",
-      "screen": "화면",
-      "window": "창",
-      "timezone": "시간대",
-      "webgl": "WebGL",
-      "media": "미디어 환경설정",
-      "color": "색상 및 HDR",
-      "storage": "저장소",
-      "battery": "배터리",
-      "fonts": "글꼴",
-      "browser": "브라우저 컬렉션",
-      "network": "네트워크",
-      "performance": "성능",
-      "observation": "관찰"
-    },
-    "observationLabels": {
-      "audioHash": "오프라인 오디오 해시",
-      "mediaDevices": "미디어 장치",
-      "webrtcCandidates": "WebRTC 후보",
-      "webglParameters": "WebGL 관찰 값"
-    }
-  },
   "warnings": {
     "windowResizeTitle": "사용자 지정 창 크기",
     "windowResizeDescription": "브라우저 창 크기를 변경하면 브라우저 정보가 스푸핑된 것으로 웹사이트에서 감지될 가능성이 높아질 수 있습니다.",
@@ -1311,6 +1263,12 @@
       "syncing": "동기화 중",
       "synced": "동기화됨",
       "error": "오류"
+    },
+    "ephemeral": {
+      "cookiesUnavailable": "임시 프로필은 브라우저를 닫으면 삭제되므로 여기에서 관리할 쿠키가 없습니다.",
+      "extensionsUnavailable": "임시 프로필은 브라우저를 닫으면 삭제되므로 확장 프로그램 그룹을 지정할 수 없습니다.",
+      "syncUnavailable": "임시 프로필은 브라우저를 닫으면 삭제되므로 클라우드에 동기화할 항목이 없습니다.",
+      "hint": "데이터를 유지하려면 일반 프로필을 만드세요."
     }
   },
   "extensions": {
@@ -1346,7 +1304,7 @@
     "deleteConfirmDescription": "\"{{name}}\"을(를) 정말 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.",
     "deleteGroupConfirmTitle": "확장 프로그램 그룹 삭제",
     "deleteGroupConfirmDescription": "그룹 \"{{name}}\"을(를) 정말 삭제하시겠습니까? 이 작업은 취소할 수 없습니다.",
-    "invalidFileType": "잘못된 파일 유형입니다. .crx, .xpi 또는 .zip 파일을 업로드하세요.",
+    "invalidFileType": "지원하지 않는 파일 형식입니다. .crx 또는 .zip 파일을 선택하세요.",
     "readError": "확장 프로그램 파일 읽기 실패.",
     "assignTitle": "확장 프로그램 그룹 할당",
     "assignDescription": "선택한 {{count}}개 프로필을 확장 프로그램 그룹에 할당합니다.",
@@ -1354,7 +1312,6 @@
     "assignSuccess": "확장 프로그램 그룹이 할당되었습니다",
     "editExtension": "확장 프로그램 편집",
     "updateSuccess": "확장 프로그램이 업데이트되었습니다",
-    "reupload": "다시 업로드",
     "version": "버전",
     "author": "작성자",
     "homepage": "홈페이지",
@@ -1362,10 +1319,26 @@
     "editGroupDescription": "그룹 이름을 업데이트하고 포함된 확장 프로그램을 관리합니다.",
     "groupExtensions": "이 그룹의 확장 프로그램",
     "noExtensionsInGroup": "아직 추가된 확장 프로그램이 없습니다",
-    "editExtensionDescription": "확장 프로그램 이름을 업데이트하거나, 메타데이터를 보거나, 확장 프로그램 파일을 다시 업로드합니다.",
+    "editExtensionDescription": "확장 프로그램 이름을 변경하고, 메타데이터를 확인하고, 다른 압축 파일이나 폴더로 교체할 수 있습니다.",
     "metadata": "메타데이터",
     "noMetadata": "manifest에서 사용할 수 있는 메타데이터가 없습니다.",
     "selectFile": "파일 선택",
+    "loadUnpacked": "폴더에서 불러오기",
+    "loadUnpackedTooltip": "manifest.json이 있는 폴더에서 확장 프로그램을 불러옵니다",
+    "selectFolderTitle": "확장 프로그램 폴더 선택",
+    "selectedFolder": "선택한 폴더",
+    "selectFolder": "폴더 선택",
+    "linkFolder": "이 폴더에서 바로 불러오기",
+    "linkFolderOff": "폴더가 Donut으로 복사됩니다. 확장 프로그램을 옮길 수 있고 다른 기기와 동기화됩니다.",
+    "linkFolderOn": "Donut이 실행할 때마다 이 폴더에서 바로 확장 프로그램을 불러옵니다. 수정한 내용은 브라우저를 다시 시작할 때 적용되지만, 확장 프로그램은 이 컴퓨터에만 남고 동기화되지 않습니다.",
+    "replaceSource": "소스 교체",
+    "linkedNoSync": "연결된 확장 프로그램은 이 컴퓨터에만 있어 동기화할 수 없습니다.",
+    "uploadFailed": "확장 프로그램을 추가하지 못했습니다",
+    "updateFailed": "확장 프로그램을 업데이트하지 못했습니다",
+    "deleteFailed": "확장 프로그램을 삭제하지 못했습니다",
+    "groupCreateFailed": "확장 프로그램 그룹을 만들지 못했습니다",
+    "groupUpdateFailed": "확장 프로그램 그룹을 업데이트하지 못했습니다",
+    "groupDeleteFailed": "확장 프로그램 그룹을 삭제하지 못했습니다",
     "syncEnabled": "동기화 사용됨",
     "syncDisabled": "동기화 사용 안 함",
     "syncEnableTooltip": "동기화 사용",
@@ -1378,6 +1351,14 @@
       "groupsTitle": "확장 프로그램 그룹 삭제",
       "groupsDescription": "{{count}}개의 확장 프로그램 그룹을 삭제하시겠습니까? {{names}}",
       "confirmButton": "삭제"
+    },
+    "source": {
+      "label": "소스",
+      "archive": "압축 파일",
+      "unpacked": "압축 해제된 폴더",
+      "linked": "연결된 폴더",
+      "folderLabel": "폴더",
+      "linkedTooltip": "{{path}}에서 바로 불러옵니다"
     }
   },
   "pro": {
@@ -1497,7 +1478,9 @@
       "deleteSuccess": "VPN이 삭제되었습니다",
       "deleteFailed": "VPN 삭제 실패",
       "deleteTitle": "VPN 삭제",
-      "deleteDescription": "이 작업은 취소할 수 없습니다. VPN \"{{name}}\"이(가) 영구적으로 삭제됩니다."
+      "deleteDescription": "이 작업은 취소할 수 없습니다. VPN \"{{name}}\"이(가) 영구적으로 삭제됩니다.",
+      "cannotDelete_few": "삭제할 수 없습니다: {{count}}개 프로필에서 사용 중",
+      "cannotDelete_many": "삭제할 수 없습니다: {{count}}개 프로필에서 사용 중"
     }
   },
   "importProfile": {
@@ -1549,7 +1532,43 @@
     "vpnOptional": "VPN (선택 사항)",
     "noVpn": "VPN 없음",
     "advancedOptions": "고급 옵션",
-    "configureFingerprint": "핑거프린트 구성 (선택 사항)"
+    "configureFingerprint": "핑거프린트 구성 (선택 사항)",
+    "reportCookies": "쿠키",
+    "reportPasswords": "비밀번호",
+    "reportAutofill": "결제 수단",
+    "reportExtensions": "확장 프로그램",
+    "reportHistory": "방문 기록",
+    "reportBookmarks": "북마크",
+    "reportLocalStorage": "사이트 데이터",
+    "reportNothingCarried": "읽을 수 있는 데이터가 이전되지 않았습니다",
+    "reportUnrecoverable": "복호화할 수 없음: {{count}}",
+    "closeSourceBrowserHint": "완전하게 복사하려면 원본 브라우저를 닫고 다시 시도하세요. 사이트 데이터가 불완전할 수 있음을 감수하고 지금 가져올 수도 있습니다.",
+    "importAnyway": "그래도 가져오기",
+    "warnings": {
+      "secretsNotMigrated": "쿠키와 비밀번호를 잠금 해제하지 못해 다시 로그인해야 합니다.",
+      "appBoundEncrypted": "Windows의 Chrome 127 이상은 쿠키를 브라우저 자체에 묶어 두므로 다른 앱에서는 이전할 수 없습니다.",
+      "storeTooOld": "이 브라우저가 열 수 없을 만큼 오래된 데이터베이스가 있어 건너뛰었습니다.",
+      "storeTooNew": "이 브라우저보다 최신 브라우저의 데이터베이스여서 건너뛰었습니다.",
+      "sourceBrowserRunning": "원본 브라우저가 실행 중이어서 사이트 데이터가 불완전할 수 있습니다.",
+      "securePreferencesReset": "홈페이지와 검색 엔진 같은 보호된 설정이 기본값으로 초기화되었습니다.",
+      "extensionsPartial": "일부 확장 프로그램은 원본 브라우저의 것이어서 이전되지 않았습니다.",
+      "storeUnreadable": "읽을 수 없는 데이터베이스가 있어 손상된 채로 복사하지 않고 건너뛰었습니다."
+    },
+    "legacyDonut": "Move from old Donut",
+    "legacyTitle": "Copy data from old Donut",
+    "legacyDescription": "Preview and selectively copy your local data into DON.",
+    "legacyScanning": "Checking for old Donut data...",
+    "legacyNotFound": "No old Donut data was found on this computer.",
+    "legacyCopyOnly": "DON only reads and copies the selected data. Your old Donut data is never changed, and account tokens, cloud login, update state, VPNs, and browser binaries are not copied.",
+    "legacyConflicts": "{{count}} existing item(s) will be safely skipped or linked to the matching DON item. Nothing will be overwritten.",
+    "legacyResult": "{{copied}} copied, {{skipped}} skipped, {{failed}} failed",
+    "legacyMigrateButton": "Copy selected data to DON",
+    "legacyCategories": {
+      "profiles": "Profiles and browsing data",
+      "proxies": "Local proxies",
+      "groups": "Profile groups",
+      "extensions": "Extensions and extension groups"
+    }
   },
   "syncTooltips": {
     "syncing": "동기화 중...",
@@ -1582,7 +1601,9 @@
       "description": "{{count}}개의 그룹을 정말 삭제하시겠습니까? {{names}}. 프로필은 기본으로 이동됩니다.",
       "description_one": "{{count}}개의 그룹을 정말 삭제하시겠습니까? {{names}}. 프로필은 기본으로 이동됩니다.",
       "confirmButton": "그룹 삭제"
-    }
+    },
+    "profileCount_few": "{{count}}개 프로필",
+    "profileCount_many": "{{count}}개 프로필"
   },
   "proxyAssignment": {
     "title": "프록시 / VPN 할당",
@@ -1601,7 +1622,9 @@
     "noneOption": "없음",
     "noValidProfiles": "유효한 프로필이 선택되지 않았습니다.",
     "vpnGroupHeading": "VPN",
-    "failedFallback": "프로필에 프록시/VPN 할당 실패"
+    "failedFallback": "프로필에 프록시/VPN 할당 실패",
+    "description_few": "선택한 {{count}}개 프로필에 프록시 또는 VPN을 할당합니다.",
+    "description_many": "선택한 {{count}}개 프로필에 프록시 또는 VPN을 할당합니다."
   },
   "groupAssignment": {
     "title": "그룹 할당",
@@ -1616,7 +1639,9 @@
     "selectedProfilesLabel": "선택된 프로필:",
     "assignGroupLabel": "그룹에 할당:",
     "noValidProfiles": "유효한 프로필이 선택되지 않았습니다.",
-    "failedFallback": "프로필에 그룹 할당 실패"
+    "failedFallback": "프로필에 그룹 할당 실패",
+    "description_few": "선택한 {{count}}개 프로필에 그룹을 할당합니다.",
+    "description_many": "선택한 {{count}}개 프로필에 그룹을 할당합니다."
   },
   "profileSelector": {
     "title": "프로필 선택",
@@ -1757,7 +1782,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Donut Browser 업데이트 실패",
+      "updateFailed": "DON 업데이트 실패",
       "restartFailed": "재시작 실패",
       "updateReady": "업데이트 준비됨, 적용하려면 재시작하세요",
       "manualDownloadRequired": "수동 다운로드 필요",
@@ -1888,6 +1913,15 @@
     "vpnNotFound": "VPN을 찾을 수 없습니다",
     "extensionNotFound": "확장 프로그램을 찾을 수 없습니다",
     "extensionGroupNotFound": "확장 프로그램 그룹을 찾을 수 없습니다",
+    "extensionUnsupportedFileType": "지원하지 않는 파일 형식입니다. 확장 프로그램은 .crx 또는 .zip 압축 파일이거나 폴더여야 합니다.",
+    "extensionDirNotFound": "해당 폴더가 더 이상 존재하지 않습니다.",
+    "extensionNotADirectory": "해당 경로는 폴더가 아닙니다.",
+    "extensionManifestMissing": "해당 폴더에 manifest.json이 없습니다. 확장 프로그램의 manifest.json이 있는 폴더를 선택하세요.",
+    "extensionManifestInvalid": "해당 폴더의 manifest.json을 읽을 수 없습니다.",
+    "extensionDirTooLarge": "폴더가 너무 커서 Donut으로 복사할 수 없습니다(최대 256MB, 20,000개 파일). 대신 폴더를 연결해 사용하세요.",
+    "extensionPathHasComma": "폴더 경로에 쉼표가 있어 Chromium이 불러올 수 없습니다. 폴더 이름을 바꾸거나 옮기세요.",
+    "extensionLinkRequiresDirectory": "폴더만 그 자리에서 불러올 수 있습니다. 압축 파일을 추가하려면 연결을 끄세요.",
+    "extensionLinkedCannotSync": "이 확장 프로그램은 이 컴퓨터의 폴더에서 불러오므로 동기화할 항목이 없습니다.",
     "cannotModifyCloudManagedProxy": "클라우드 관리 프록시의 동기화는 수정할 수 없습니다",
     "syncLockedByProfile": "동기화된 프로필에서 사용 중인 동안에는 동기화를 비활성화할 수 없습니다",
     "syncNotConfigured": "동기화가 구성되지 않았습니다. 먼저 로그인하거나 자체 호스팅 서버를 구성하세요.",
@@ -1989,7 +2023,11 @@
     },
     "camoufoxRemoved": "Camoufox는 더 이상 지원되지 않습니다. Wayfern으로 이 프로필을 다시 만드세요.",
     "noE2ePasswordSet": "종단 간 암호화 비밀번호가 설정되지 않았습니다. 암호화된 데이터를 동기화하기 전에 설정하세요.",
-    "fingerprintAuditFailed": "지문 감사 실패: {{detail}}"
+    "importSourceNotChromium": "이 폴더는 Chromium 브라우저 프로필이 아닙니다",
+    "importSourceNotChromiumNamed": "{{family}} 프로필은 가져올 수 없습니다. Chromium 기반 브라우저만 지원합니다",
+    "importSourceBrowserRunning": "{{browser}}을(를) 먼저 닫거나 그래도 가져오기를 선택하세요",
+    "fingerprintAuditFailed": "지문 감사 실패: {{detail}}",
+    "legacyMigrationFailed": "Old Donut data could not be copied safely. Your old data was not changed."
   },
   "rail": {
     "profiles": "프로필",
@@ -2204,7 +2242,7 @@
   },
   "wayfernBlocked": {
     "title": "브라우저 자동화가 일시 중지됨",
-    "description": "보통 여러 기기에서 동시에 로그인하여 계정의 Pro 브라우저 기능이 일시적으로 제한되었습니다. 다른 기기에서 로그아웃한 후 프로필을 다시 실행하면 복원됩니다."
+    "description": "브라우저 자동화는 한 번에 기기 한 대에서만 실행되며, 현재 로그인된 다른 기기가 사용 중입니다. 해당 기기에서 로그아웃한 후 프로필을 다시 실행하세요."
   },
   "wayfernConfigDialog": {
     "titleView": "핑거프린트 설정 보기 - {{name}} ({{browser}})",
@@ -2252,7 +2290,7 @@
     },
     "locked": {
       "title": "Cookie Bot",
-      "hint": "Cookie Bot은 원격 머신에서 밤새 프로필을 예열해, 내 컴퓨터를 켜 두지 않아도 쿠키와 방문 기록이 유지됩니다. Pro 또는 Team 요금제가 필요합니다."
+      "hint": "Cookie Bot은 원격 머신에서 밤새 프로필을 예열해, 내 컴퓨터를 켜 두지 않아도 쿠키와 방문 기록이 유지됩니다."
     },
     "empty": {
       "title": "등록된 프로필이 없습니다",
@@ -2264,7 +2302,9 @@
       "nextRun": "다음 실행 {{time}}",
       "dueCount_one": "프로필 {{count}}개 예정",
       "dueCount_other": "프로필 {{count}}개 예정",
-      "nothingScheduled": "예정된 작업 없음"
+      "nothingScheduled": "예정된 작업 없음",
+      "dueCount_few": "프로필 {{count}}개 예정",
+      "dueCount_many": "프로필 {{count}}개 예정"
     },
     "lastDay": {
       "label": "최근 24시간",
@@ -2274,7 +2314,13 @@
       "partial_one": "{{count}}건 일부 완료",
       "partial_other": "{{count}}건 일부 완료",
       "failed_one": "{{count}}건 실패",
-      "failed_other": "{{count}}건 실패"
+      "failed_other": "{{count}}건 실패",
+      "failed_few": "{{count}}건 실패",
+      "failed_many": "{{count}}건 실패",
+      "partial_few": "{{count}}건 일부 완료",
+      "partial_many": "{{count}}건 일부 완료",
+      "ran_few": "{{count}}건 실행",
+      "ran_many": "{{count}}건 실행"
     },
     "chart": {
       "machineTime": "하룻밤당 머신 시간",
@@ -2313,7 +2359,11 @@
       "unenrol": "Cookie Bot에서 제거",
       "unenrolTitle": "{{name}}을(를) Cookie Bot에서 제거할까요?",
       "unenrolDescription": "오늘 밤부터 예열이 중단됩니다. 지난 실행 기록은 활동 탭에 남습니다.",
-      "unenrolled": "Cookie Bot에서 제거했습니다"
+      "unenrolled": "Cookie Bot에서 제거했습니다",
+      "crowded_few": "프로필 {{count}}개가 동시에 시작",
+      "crowded_many": "프로필 {{count}}개가 동시에 시작",
+      "quietHours_few": "빈 시간 {{count}}시간",
+      "quietHours_many": "빈 시간 {{count}}시간"
     },
     "status": {
       "provisioning": "머신 준비 중",
@@ -2350,7 +2400,9 @@
       "consentUnknown": "동의 창이 아직 보고되지 않았습니다",
       "billed": "{{duration}} 청구",
       "billedUnknown": "청구 시간이 아직 보고되지 않았습니다",
-      "chunk": "{{total}}개 중 {{index}}번째"
+      "chunk": "{{total}}개 중 {{index}}번째",
+      "consentHandled_few": "동의 창 {{count}}개 처리",
+      "consentHandled_many": "동의 창 {{count}}개 처리"
     },
     "history": {
       "title": "실행 내역",
@@ -2375,7 +2427,11 @@
       "sitesFailed_other": "사이트 {{count}}개에 접속하지 못했습니다",
       "consentHandled_one": "동의 창 {{count}}개 처리",
       "consentHandled_other": "동의 창 {{count}}개 처리",
-      "sitesUnknown": "보고되지 않음"
+      "sitesUnknown": "보고되지 않음",
+      "consentHandled_few": "동의 창 {{count}}개 처리",
+      "consentHandled_many": "동의 창 {{count}}개 처리",
+      "sitesFailed_few": "사이트 {{count}}개에 접속하지 못했습니다",
+      "sitesFailed_many": "사이트 {{count}}개에 접속하지 못했습니다"
     },
     "duration": {
       "hm": "{{hours}}시간 {{minutes}}분",
@@ -2389,7 +2445,9 @@
       "noProfiles": "일치하는 프로필이 없습니다.",
       "alreadyEnrolled": "등록됨",
       "continue_one": "{{count}}개로 계속",
-      "continue_other": "{{count}}개로 계속"
+      "continue_other": "{{count}}개로 계속",
+      "continue_few": "{{count}}개로 계속",
+      "continue_many": "{{count}}개로 계속"
     },
     "enrol": {
       "titleOne": "{{name}} 등록",
@@ -2465,7 +2523,27 @@
       "listSites_other": "사이트 {{count}}개",
       "summarySlots_one": "주 {{count}}회, 회당 최대 {{minutes}}분 실행합니다.",
       "summarySlots_other": "주 {{count}}회, 회당 최대 {{minutes}}분 실행합니다.",
-      "templateNameInvalidNoMax": "저장된 목록에 그 이름은 사용할 수 없습니다."
+      "templateNameInvalidNoMax": "저장된 목록에 그 이름은 사용할 수 없습니다.",
+      "cadenceCustom_few": "주 {{count}}회 밤",
+      "cadenceCustom_many": "주 {{count}}회 밤",
+      "confirmBulkButton_few": "프로필 {{count}}개로 계속",
+      "confirmBulkButton_many": "프로필 {{count}}개로 계속",
+      "confirmBulkDescription_few": "공유 원격 시간에서 야간 실행 {{count}}건을 예약합니다. 시각과 사이트는 다음 단계에서 선택합니다.",
+      "confirmBulkDescription_many": "공유 원격 시간에서 야간 실행 {{count}}건을 예약합니다. 시각과 사이트는 다음 단계에서 선택합니다.",
+      "confirmBulkTitle_few": "프로필 {{count}}개를 Cookie Bot에 등록할까요?",
+      "confirmBulkTitle_many": "프로필 {{count}}개를 Cookie Bot에 등록할까요?",
+      "enrolled_few": "프로필 {{count}}개를 등록했습니다",
+      "enrolled_many": "프로필 {{count}}개를 등록했습니다",
+      "listSites_few": "사이트 {{count}}개",
+      "listSites_many": "사이트 {{count}}개",
+      "sitesHint_few": "사이트 {{count}}개. 여기에 적은 페이지만 방문합니다.",
+      "sitesHint_many": "사이트 {{count}}개. 여기에 적은 페이지만 방문합니다.",
+      "summaryCustom_few": "주 {{count}}회 밤 {{time}}에 회당 최대 {{minutes}}분 실행합니다.",
+      "summaryCustom_many": "주 {{count}}회 밤 {{time}}에 회당 최대 {{minutes}}분 실행합니다.",
+      "summarySlots_few": "주 {{count}}회, 회당 최대 {{minutes}}분 실행합니다.",
+      "summarySlots_many": "주 {{count}}회, 회당 최대 {{minutes}}분 실행합니다.",
+      "titleCount_few": "프로필 {{count}}개 등록",
+      "titleCount_many": "프로필 {{count}}개 등록"
     },
     "preset": {
       "light": "가볍게",
@@ -2488,7 +2566,9 @@
       "fixEncrypted": "동기화 설정 열기",
       "fixProxy": "프록시 연결",
       "fixFailed": "해당 수정을 적용하지 못했습니다.",
-      "exitNodeHint": "프록시나 VPN이 없으면 실행 트래픽이 머신 풀 자체의 데이터센터 주소로 나갑니다. 호스팅 네트워크에서 몇 시간씩 발생하는 트래픽은 예열을 아예 하지 않는 것보다 프로필 신뢰도를 더 크게 해칩니다."
+      "exitNodeHint": "프록시나 VPN이 없으면 실행 트래픽이 머신 풀 자체의 데이터센터 주소로 나갑니다. 호스팅 네트워크에서 몇 시간씩 발생하는 트래픽은 예열을 아예 하지 않는 것보다 프로필 신뢰도를 더 크게 해칩니다.",
+      "ineligible_few": "프로필 {{count}}개는 원격으로 실행할 수 없습니다",
+      "ineligible_many": "프로필 {{count}}개는 원격으로 실행할 수 없습니다"
     },
     "conflict": {
       "title": "{{email}} 님이 이미 이 프로필을 {{time}}에 예열합니다",
@@ -2502,7 +2582,7 @@
     },
     "actionBar": {
       "enrol": "Cookie Bot에 등록",
-      "proRequired": "Cookie Bot에는 Pro 또는 Team 요금제가 필요합니다",
+      "proRequired": "Cookie Bot에는 유료 요금제가 필요합니다",
       "noneEligible": "선택한 프로필 중 원격으로 예열할 수 있는 것이 없습니다"
     },
     "actions": {
@@ -2534,7 +2614,9 @@
       "columnShare": "비중",
       "noActivity": "이 기간에는 원격 세션이 없습니다.",
       "soloNote": "현재는 본인 사용량만 표시됩니다. 구성원별 분배를 보려면 팀원을 초대하세요.",
-      "runsFailed": "· 실패 {{n}}회"
+      "runsFailed": "· 실패 {{n}}회",
+      "pooled_few": "{{total}}시간 중 {{used}}시간을 {{count}}석이 공유",
+      "pooled_many": "{{total}}시간 중 {{used}}시간을 {{count}}석이 공유"
     },
     "closeReason": {
       "stoppedByUser": "직접 중지했습니다",
@@ -2562,15 +2644,18 @@
     "titleBlocked": "실행이 차단됨",
     "titleWarning": "실행하기 전에",
     "intro": "브라우저를 시작하기 전에 \"{{name}}\"의 다음 문제를 확인하세요.",
-    "fingerprintHeading": "프록시 출구가 핑거프린트와 일치하지 않음",
-    "vpnExtensionHeading": "VPN 확장 프로그램 감지됨",
+    "fingerprintHeading": "측정된 출구가 핑거프린트와 일치하지 않음",
+    "vpnExtensionHeading": "VPN 또는 프록시 확장 프로그램 감지됨",
     "vpnExtensionIntro": "이 프로필에서 브라우저 트래픽의 경로를 바꿀 수 있는 확장 프로그램:",
-    "vpnExtensionConfirmed": "프록시를 변경할 수 있음",
-    "vpnExtensionLikely": "프록시를 변경할 수 있음(추정)",
+    "vpnExtensionConfirmed": "알려진 VPN 또는 프록시 도구",
+    "vpnExtensionLikely": "VPN 또는 프록시 도구로 보임",
+    "vpnExtensionCapability": "프록시 권한을 보유함",
     "vpnExtensionExplainer": "이 중 하나가 트래픽을 다른 곳으로 보내면 브라우저의 실제 위치가 이 프로필을 만들 때 사용한 시간대, 언어, 지리 정보와 더 이상 일치하지 않으며, Donut은 외부에서 이를 감지할 수 없습니다.",
+    "proxyCapableHeading": "프록시를 변경할 수 있는 확장 프로그램",
+    "proxyCapableIntro": "VPN으로 보이지는 않지만 Chromium의 프록시 권한을 가지고 있습니다. 다운로드 관리자나 디버깅 도구에도 필요한 권한이며, 실제로 사용하는지는 Donut이 알 수 없습니다:",
     "sourceDonut": "Donut이 관리",
     "sourceBrowser": "프로필에 설치됨",
-    "measurementUnreliable": "VPN 확장 프로그램이 프록시를 덮어쓸 수 있으므로, 출구 확인 결과가 브라우저의 실제 경로와 다를 수 있습니다.",
+    "measurementUnreliable": "이 프로필의 확장 프로그램이 프록시 권한을 가지고 있어, 출구 확인 결과가 브라우저의 실제 경로와 다를 수 있습니다.",
     "scanIncompleteEncrypted": "이 프로필은 암호화되어 있어 Donut이 관리하는 확장 프로그램만 확인할 수 있었습니다.",
     "scanIncompleteEphemeral": "이 프로필에는 아직 데이터가 없어 Donut이 관리하는 확장 프로그램만 확인할 수 있었습니다.",
     "scanIncompletePartial": "확장 프로그램 검사가 중단되어 일부가 표시되지 않을 수 있습니다.",
@@ -2580,9 +2665,64 @@
     "dontWarnExtensions": "이 확장 프로그램에 대해 다시 경고하지 않기",
     "applyToRemaining": "이 선택을 나머지 프로필에 적용",
     "cancelledSummary": "{{total}}개 중 {{cancelled}}개의 실행이 취소됨",
-    "cancelled": "실행이 취소됨",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
+    "vpnExtensionEntryNoVersion": " — {{capability}}, {{source}}",
     "scanIncompleteMissing": "이 프로필은 아직 실행된 적이 없어 Donut이 관리하는 확장 프로그램만 확인할 수 있었습니다."
+  },
+  "fingerprintAudit": {
+    "open": "지문 감사",
+    "title": "지문 감사",
+    "description": "저장된 지문과 실행 중인 Wayfern 페이지에서 관찰할 수 있는 값을 비교합니다.",
+    "run": "감사 실행",
+    "running": "감사 실행 중…",
+    "runAgain": "다시 실행",
+    "export": "JSON 내보내기",
+    "exportSuccess": "지문 감사를 내보냈습니다",
+    "summary": "요약",
+    "matches": "일치",
+    "mismatches": "불일치",
+    "unknown": "알 수 없음",
+    "total": "전체 검사",
+    "noReport": "감사를 실행하여 브라우저 관찰 값을 수집하세요.",
+    "mismatchNotice": "일부 실제 값이 저장된 지문과 다릅니다. 프로필을 변경하기 전에 확인하세요.",
+    "expected": "예상",
+    "actual": "실제",
+    "statusMatch": "Match",
+    "statusMismatch": "Mismatch",
+    "statusUnknown": "Unknown",
+    "statusObserved": "Observed",
+    "statusCrossOriginFrame": "Cross-origin frame",
+    "statusFramePresent": "Frame present",
+    "details": "필드 비교",
+    "observations": "추가 관찰",
+    "oopif": "교차 출처 프레임 검사",
+    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
+    "frameCount": "프레임 수",
+    "childDevicePixelRatio": "Child DPR",
+    "childScreenWidth": "Child screen width",
+    "notAvailable": "사용할 수 없음",
+    "categories": {
+      "navigator": "Navigator",
+      "screen": "화면",
+      "window": "창",
+      "timezone": "시간대",
+      "webgl": "WebGL",
+      "media": "미디어 환경설정",
+      "color": "색상 및 HDR",
+      "storage": "저장소",
+      "battery": "배터리",
+      "fonts": "글꼴",
+      "browser": "브라우저 컬렉션",
+      "network": "네트워크",
+      "performance": "성능",
+      "observation": "관찰"
+    },
+    "observationLabels": {
+      "audioHash": "오프라인 오디오 해시",
+      "mediaDevices": "미디어 장치",
+      "webrtcCandidates": "WebRTC 후보",
+      "webglParameters": "WebGL 관찰 값"
+    }
   },
   "claudeWorkflow": {
     "quickTitle": "프록시 문자열로 빠른 생성",

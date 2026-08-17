@@ -13,6 +13,17 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+fn select_new_wayfern_process(
+  candidates: &[(u32, Option<u16>)],
+  existing: &std::collections::HashSet<u32>,
+  expected_cdp_port: u16,
+) -> Option<u32> {
+  candidates
+    .iter()
+    .find(|(pid, port)| !existing.contains(pid) && *port == Some(expected_cdp_port))
+    .map(|(pid, _)| *pid)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WayfernConfig {
   #[serde(default)]
@@ -67,6 +78,31 @@ const FINGERPRINT_GENERATION_ATTEMPTS: usize = 30;
 const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
+fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
+  vec![
+    format!("--remote-debugging-port={port}"),
+    "--remote-debugging-address=127.0.0.1".to_string(),
+    format!("--user-data-dir={profile_path}"),
+    "--no-first-run".to_string(),
+    "--no-default-browser-check".to_string(),
+    "--disable-background-mode".to_string(),
+    "--disable-component-update".to_string(),
+    "--crash-server-url=".to_string(),
+    "--disable-updater".to_string(),
+    "--disable-session-crashed-bubble".to_string(),
+    "--hide-crash-restore-bubble".to_string(),
+    "--disable-infobars".to_string(),
+    // Prefetch* / NoStatePrefetch: cross-site Speculation-Rules prefetch uses
+    // an isolated NetworkContext that defaults to DIRECT egress (real host IP
+    // leaks past the per-profile proxy). Disabling via a LAUNCH FLAG cannot be
+    // re-enabled by an imported/synced network_prediction_options pref (which a
+    // compile-time pref default could be).
+    "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,Prefetch,PrefetchProxy,SpeculationRulesPrefetchFuture,NoStatePrefetch".to_string(),
+    "--use-mock-keychain".to_string(),
+    "--password-store=basic".to_string(),
+  ]
+}
+
 #[derive(Debug, Deserialize)]
 struct DevicePresetCatalog {
   presets: Vec<DevicePreset>,
@@ -94,6 +130,15 @@ struct DevicePresetConstraints {
   max_dpr: Option<f64>,
   #[serde(default)]
   gpu_tokens: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct FingerprintHostConstraints {
+  device_pixel_ratio: Option<f64>,
+  screen_max_width: Option<u32>,
+  screen_max_height: Option<u32>,
+  screen_available_max_width: Option<u32>,
+  screen_available_max_height: Option<u32>,
 }
 
 fn device_preset(id: &str) -> Result<DevicePreset, String> {
@@ -161,10 +206,12 @@ impl WayfernConfig {
     fingerprint: &serde_json::Value,
     config: Option<&WayfernConfig>,
   ) -> Result<(), String> {
+    let fingerprint = fingerprint.get("fingerprint").unwrap_or(fingerprint);
     let dpr = fingerprint
       .get("devicePixelRatio")
       .and_then(|v| v.as_f64())
-      .ok_or_else(|| "missing devicePixelRatio".to_string())?;
+      .filter(|value| value.is_finite() && *value > 0.0)
+      .ok_or_else(|| "missing or invalid devicePixelRatio".to_string())?;
 
     if let Some(expected) = config.and_then(|c| c.expected_device_pixel_ratio) {
       if (dpr - expected).abs() > 0.05 {
@@ -174,18 +221,16 @@ impl WayfernConfig {
       }
     }
 
-    let screen_w = fingerprint
-      .get("screenWidth")
-      .and_then(|v| v.as_u64())
-      .ok_or_else(|| "missing screenWidth".to_string())? as u32;
-    let screen_h = fingerprint
-      .get("screenHeight")
-      .and_then(|v| v.as_u64())
-      .ok_or_else(|| "missing screenHeight".to_string())? as u32;
-
-    if screen_w == 0 || screen_h == 0 {
-      return Err(format!("invalid screen {screen_w}x{screen_h}"));
-    }
+    let dimension = |key: &str| -> Result<u32, String> {
+      fingerprint
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0 && *value <= u64::from(u32::MAX))
+        .map(|value| value as u32)
+        .ok_or_else(|| format!("missing or invalid {key}"))
+    };
+    let screen_w = dimension("screenWidth")?;
+    let screen_h = dimension("screenHeight")?;
 
     if let Some(max_w) = config.and_then(|c| c.screen_max_width) {
       if screen_w > max_w {
@@ -208,31 +253,26 @@ impl WayfernConfig {
       }
     }
 
-    let avail_w = fingerprint
-      .get("screenAvailWidth")
-      .and_then(|v| v.as_u64())
-      .unwrap_or(screen_w as u64) as u32;
-    let avail_h = fingerprint
-      .get("screenAvailHeight")
-      .and_then(|v| v.as_u64())
-      .unwrap_or(screen_h as u64) as u32;
-    let outer_w = fingerprint
-      .get("windowOuterWidth")
-      .and_then(|v| v.as_u64())
-      .unwrap_or(0) as u32;
-    let outer_h = fingerprint
-      .get("windowOuterHeight")
-      .and_then(|v| v.as_u64())
-      .unwrap_or(0) as u32;
+    let avail_w = dimension("screenAvailWidth")?;
+    let avail_h = dimension("screenAvailHeight")?;
+    let outer_w = dimension("windowOuterWidth")?;
+    let outer_h = dimension("windowOuterHeight")?;
+    let inner_w = dimension("windowInnerWidth")?;
+    let inner_h = dimension("windowInnerHeight")?;
 
-    if outer_w > 0 && outer_w > avail_w.max(screen_w) {
+    if avail_w > screen_w || avail_h > screen_h {
       return Err(format!(
-        "windowOuterWidth {outer_w} exceeds avail/screen {avail_w}/{screen_w}"
+        "available screen {avail_w}x{avail_h} exceeds full screen {screen_w}x{screen_h}"
       ));
     }
-    if outer_h > 0 && outer_h > avail_h.max(screen_h) {
+    if outer_w > avail_w || outer_h > avail_h {
       return Err(format!(
-        "windowOuterHeight {outer_h} exceeds avail/screen {avail_h}/{screen_h}"
+        "outer window {outer_w}x{outer_h} exceeds available screen {avail_w}x{avail_h}"
+      ));
+    }
+    if inner_w > outer_w || inner_h > outer_h {
+      return Err(format!(
+        "inner window {inner_w}x{inner_h} exceeds outer window {outer_w}x{outer_h}"
       ));
     }
 
@@ -335,6 +375,58 @@ impl WayfernConfig {
 
     Ok(())
   }
+
+  fn fingerprint_satisfies_host_constraints(
+    fingerprint: &serde_json::Value,
+    config: &WayfernConfig,
+    host: FingerprintHostConstraints,
+  ) -> Result<(), String> {
+    let strictest_max = |configured: Option<u32>, live: Option<u32>| match (configured, live) {
+      (Some(configured), Some(live)) => Some(configured.min(live)),
+      (configured, live) => configured.or(live),
+    };
+    let mut resolved = config.clone();
+    // The live display wins over a stale or preset value stored on a different
+    // machine or monitor. DON targets real macOS and Windows desktops rather
+    // than mobile-device emulation, so every launch must remain physically
+    // consistent with the host scale.
+    resolved.expected_device_pixel_ratio = host
+      .device_pixel_ratio
+      .or(resolved.expected_device_pixel_ratio);
+    resolved.screen_max_width = strictest_max(resolved.screen_max_width, host.screen_max_width);
+    resolved.screen_max_height = strictest_max(resolved.screen_max_height, host.screen_max_height);
+
+    Self::fingerprint_satisfies_constraints_with(fingerprint, Some(&resolved))?;
+    let fingerprint = fingerprint.get("fingerprint").unwrap_or(fingerprint);
+    let dimension = |key: &str| {
+      fingerprint
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| format!("missing or invalid {key}"))
+    };
+    let available_width = dimension("screenAvailWidth")?;
+    let available_height = dimension("screenAvailHeight")?;
+    if host
+      .screen_available_max_width
+      .is_some_and(|maximum| available_width > maximum)
+    {
+      return Err(format!(
+        "screenAvailWidth {available_width} exceeds display work area {}",
+        host.screen_available_max_width.unwrap()
+      ));
+    }
+    if host
+      .screen_available_max_height
+      .is_some_and(|maximum| available_height > maximum)
+    {
+      return Err(format!(
+        "screenAvailHeight {available_height} exceeds display work area {}",
+        host.screen_available_max_height.unwrap()
+      ));
+    }
+    Ok(())
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -418,6 +510,28 @@ impl WayfernManager {
     Ok(port)
   }
 
+  fn terminate_process(process_id: Option<u32>) {
+    let Some(process_id) = process_id else {
+      return;
+    };
+
+    #[cfg(unix)]
+    {
+      use nix::sys::signal::{kill, Signal};
+      use nix::unistd::Pid;
+      let _ = kill(Pid::from_raw(process_id as i32), Signal::SIGTERM);
+    }
+    #[cfg(windows)]
+    {
+      use std::os::windows::process::CommandExt;
+      const CREATE_NO_WINDOW: u32 = 0x08000000;
+      let _ = std::process::Command::new("taskkill")
+        .args(["/PID", &process_id.to_string(), "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    }
+  }
+
   /// Normalize fingerprint data from Wayfern CDP format to our storage format.
   /// Wayfern returns fields like fonts, webglParameters as JSON strings which we keep as-is.
   fn normalize_fingerprint(fingerprint: serde_json::Value) -> serde_json::Value {
@@ -436,6 +550,51 @@ impl WayfernManager {
     // - webglParameters, webgl2Parameters, etc. are JSON strings
     // So no conversion is needed
     fingerprint
+  }
+
+  fn fingerprint_host_constraints(app_handle: &AppHandle) -> FingerprintHostConstraints {
+    app_handle
+      .primary_monitor()
+      .ok()
+      .flatten()
+      .map(|monitor| {
+        let scale_factor = monitor.scale_factor();
+        let size = monitor.size();
+        let work_area = monitor.work_area().size;
+        FingerprintHostConstraints {
+          device_pixel_ratio: Some(scale_factor),
+          screen_max_width: Some((f64::from(size.width) / scale_factor).round() as u32),
+          screen_max_height: Some((f64::from(size.height) / scale_factor).round() as u32),
+          screen_available_max_width: Some(
+            (f64::from(work_area.width) / scale_factor).round() as u32
+          ),
+          screen_available_max_height: Some(
+            (f64::from(work_area.height) / scale_factor).round() as u32
+          ),
+        }
+      })
+      .unwrap_or_default()
+  }
+
+  pub(crate) fn stored_fingerprint_mismatch(
+    &self,
+    app_handle: &AppHandle,
+    config: &WayfernConfig,
+  ) -> Option<String> {
+    let fingerprint_json = match config.fingerprint.as_deref().map(str::trim) {
+      Some(fingerprint_json) if !fingerprint_json.is_empty() => fingerprint_json,
+      _ => return Some("fingerprint is missing".to_string()),
+    };
+    let fingerprint = match serde_json::from_str(fingerprint_json) {
+      Ok(fingerprint) => fingerprint,
+      Err(error) => return Some(format!("fingerprint JSON is invalid: {error}")),
+    };
+    WayfernConfig::fingerprint_satisfies_host_constraints(
+      &fingerprint,
+      config,
+      Self::fingerprint_host_constraints(app_handle),
+    )
+    .err()
   }
 
   /// Derive the on-screen window size Chromium should open at, from the stored
@@ -511,6 +670,102 @@ impl WayfernManager {
     // in customer reports without needing them to reproduce in the moment.
     log::error!("CDP not ready after {max_attempts} attempts on port {port}: {detail}");
     Err(format!("CDP not ready after {max_attempts} attempts on port {port}: {detail}").into())
+  }
+
+  async fn spawn_wayfern_and_wait(
+    &self,
+    executable_path: &std::path::Path,
+    args: &[String],
+    wayfern_token: Option<&str>,
+    profile_path: &str,
+    port: u16,
+  ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(target_os = "macos")]
+    if crate::platform_browser::macos::app_bundle_for_executable(executable_path).is_some() {
+      let target_path = std::path::Path::new(profile_path)
+        .canonicalize()
+        .unwrap_or_else(|_| std::path::Path::new(profile_path).to_path_buf());
+      let existing: std::collections::HashSet<u32> =
+        Self::find_wayfern_processes_by_profile(&target_path)
+          .into_iter()
+          .map(|(pid, _, _)| pid)
+          .collect();
+      let environment: Vec<(&str, &str)> = wayfern_token
+        .map(|token| vec![("WAYFERN_TOKEN", token)])
+        .unwrap_or_default();
+      let mut launcher = crate::platform_browser::macos::launch_browser_process_with_environment(
+        executable_path,
+        args,
+        &environment,
+      )
+      .await?;
+      let launcher_status = tokio::task::spawn_blocking(move || launcher.wait()).await??;
+      if !launcher_status.success() {
+        return Err(
+          format!("macOS Launch Services failed to start Wayfern with status {launcher_status}")
+            .into(),
+        );
+      }
+
+      if let Err(error) = self.wait_for_cdp_ready(port).await {
+        for _ in 0..20 {
+          for (pid, _, _) in Self::find_wayfern_processes_by_profile(&target_path) {
+            if !existing.contains(&pid) {
+              Self::terminate_process(Some(pid));
+            }
+          }
+          tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        return Err(error);
+      }
+
+      for _ in 0..20 {
+        let candidates: Vec<(u32, Option<u16>)> =
+          Self::find_wayfern_processes_by_profile(&target_path)
+            .into_iter()
+            .map(|(pid, _, cdp_port)| (pid, cdp_port))
+            .collect();
+        if let Some(pid) = select_new_wayfern_process(&candidates, &existing, port) {
+          return Ok(Some(pid));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+      }
+
+      for (pid, _, _) in Self::find_wayfern_processes_by_profile(&target_path) {
+        if !existing.contains(&pid) {
+          Self::terminate_process(Some(pid));
+        }
+      }
+      return Err("Wayfern launched through macOS Launch Services, but its real process could not be identified".into());
+    }
+
+    let mut command = TokioCommand::new(executable_path);
+    command
+      .args(args)
+      .stdin(Stdio::null())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null());
+    if let Some(token) = wayfern_token {
+      command.env("WAYFERN_TOKEN", token);
+    }
+    let child = command
+      .spawn()
+      .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+        let hint = if error.raw_os_error() == Some(14001) {
+          ". This usually means the Visual C++ Redistributable is not installed. \
+           Download it from https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        } else {
+          ""
+        };
+        format!("Failed to spawn Wayfern: {error}{hint}").into()
+      })?;
+    let process_id = child.id();
+    drop(child);
+    if let Err(error) = self.wait_for_cdp_ready(port).await {
+      Self::terminate_process(process_id);
+      return Err(error);
+    }
+    Ok(process_id)
   }
 
   async fn get_cdp_targets(
@@ -726,7 +981,7 @@ impl WayfernManager {
   /// this proxy and permanently disable the one path that can repair it.
   pub async fn generate_fingerprint_config(
     &self,
-    _app_handle: &AppHandle,
+    app_handle: &AppHandle,
     profile: &BrowserProfile,
     config: &WayfernConfig,
   ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
@@ -776,23 +1031,7 @@ impl WayfernManager {
     let child_id = child.id();
 
     let cleanup = || async {
-      if let Some(id) = child_id {
-        #[cfg(unix)]
-        {
-          use nix::sys::signal::{kill, Signal};
-          use nix::unistd::Pid;
-          let _ = kill(Pid::from_raw(id as i32), Signal::SIGTERM);
-        }
-        #[cfg(windows)]
-        {
-          use std::os::windows::process::CommandExt;
-          const CREATE_NO_WINDOW: u32 = 0x08000000;
-          let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &id.to_string(), "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        }
-      }
+      Self::terminate_process(child_id);
       let _ = std::fs::remove_dir_all(&temp_profile_dir);
     };
 
@@ -866,6 +1105,7 @@ impl WayfernManager {
 
     // DON: regenerate full fingerprints until host display constraints pass.
     // Never patch individual fields — Wayfern re-normalizes inconsistent edits.
+    let host_constraints = Self::fingerprint_host_constraints(app_handle);
     let mut last_reject = String::from("no fingerprint candidate");
     let mut normalized = None;
     for attempt in 1..=FINGERPRINT_GENERATION_ATTEMPTS {
@@ -894,7 +1134,11 @@ impl WayfernManager {
 
       let fp = result.get("fingerprint").cloned().unwrap_or(result);
       let candidate = Self::normalize_fingerprint(fp);
-      match WayfernConfig::fingerprint_satisfies_constraints_with(&candidate, Some(config)) {
+      match WayfernConfig::fingerprint_satisfies_host_constraints(
+        &candidate,
+        config,
+        host_constraints,
+      ) {
         Ok(()) => {
           log::info!(
             "DON: accepted fingerprint candidate on attempt {attempt} (dpr={:?} screen={:?}x{:?})",
@@ -982,9 +1226,13 @@ impl WayfernManager {
     let fingerprint_json = serde_json::to_string(&fingerprint)
       .map_err(|e| format!("Failed to serialize fingerprint: {e}"))?;
 
+    // Report the platform the engine actually produced alongside the one that
+    // was asked for. Logging only the request made this line useless for
+    // diagnosing a fingerprint that came back as something else.
     log::info!(
-      "Generated Wayfern fingerprint for OS: {}, fields: {:?}",
+      "Generated Wayfern fingerprint for requested OS: {}, produced platform: {:?}, fields: {:?}",
       os,
+      fingerprint.get("platform").and_then(|p| p.as_str()),
       fingerprint
         .as_object()
         .map(|o| o.keys().collect::<Vec<_>>())
@@ -1008,7 +1256,7 @@ impl WayfernManager {
   #[allow(clippy::too_many_arguments)]
   pub async fn launch_wayfern(
     &self,
-    _app_handle: &AppHandle,
+    app_handle: &AppHandle,
     profile: &BrowserProfile,
     profile_path: &str,
     config: &WayfernConfig,
@@ -1029,117 +1277,7 @@ impl WayfernManager {
     };
     log::info!("Launching Wayfern on CDP port {port} (detached)");
 
-    // Diagnostic: verify critical profile files and test cookie decryption
-    {
-      let profile_path_buf = std::path::PathBuf::from(profile_path);
-      let key_path = profile_path_buf.join("os_crypt_key");
-      let cookies_path = {
-        let network = profile_path_buf
-          .join("Default")
-          .join("Network")
-          .join("Cookies");
-        if network.exists() {
-          network
-        } else {
-          profile_path_buf.join("Default").join("Cookies")
-        }
-      };
-
-      if key_path.exists() {
-        let key_text = std::fs::read_to_string(&key_path).unwrap_or_default();
-        log::info!(
-          "Pre-launch: os_crypt_key present ({} bytes, content: '{}')",
-          key_text.len(),
-          key_text.trim()
-        );
-      } else {
-        log::warn!("Pre-launch: os_crypt_key NOT FOUND");
-      }
-
-      if cookies_path.exists() {
-        // Try to open Cookies DB and check if encrypted cookies can be decrypted
-        if let Ok(conn) = rusqlite::Connection::open_with_flags(
-          &cookies_path,
-          rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        ) {
-          let cookie_count: i64 = conn
-            .query_row(
-              "SELECT COUNT(*) FROM cookies WHERE length(encrypted_value) > 0",
-              [],
-              |r| r.get(0),
-            )
-            .unwrap_or(0);
-          let total_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM cookies", [], |r| r.get(0))
-            .unwrap_or(0);
-          log::info!(
-            "Pre-launch: Cookies DB has {} total cookies, {} encrypted",
-            total_count,
-            cookie_count
-          );
-
-          // Try decrypting one cookie using the cookie_manager
-          if let Some(encryption_key) =
-            crate::cookie_manager::chrome_decrypt::get_encryption_key(&profile_path_buf)
-          {
-            if let Ok(mut stmt) = conn.prepare(
-              "SELECT name, host_key, encrypted_value FROM cookies WHERE length(encrypted_value) > 0 LIMIT 1",
-            ) {
-              if let Ok(mut rows) = stmt.query([]) {
-                if let Ok(Some(row)) = rows.next() {
-                  let name: String = row.get(0).unwrap_or_default();
-                  let host: String = row.get(1).unwrap_or_default();
-                  let encrypted: Vec<u8> = row.get(2).unwrap_or_default();
-                  let decrypted = crate::cookie_manager::chrome_decrypt::decrypt(
-                    &encrypted,
-                    &host,
-                    &encryption_key,
-                  );
-                  match decrypted {
-                    Some(val) => log::info!(
-                      "Pre-launch: Cookie decryption SUCCEEDED for '{}' (host: {}, decrypted {} bytes)",
-                      name, host, val.len()
-                    ),
-                    None => log::error!(
-                      "Pre-launch: Cookie decryption FAILED for '{}' (host: {}, encrypted {} bytes)",
-                      name, host, encrypted.len()
-                    ),
-                  }
-                }
-              }
-            }
-          } else {
-            log::error!("Pre-launch: Failed to derive encryption key from os_crypt_key");
-          }
-        }
-      } else {
-        log::warn!("Pre-launch: Cookies NOT FOUND");
-      }
-    }
-
-    let mut args = vec![
-      format!("--remote-debugging-port={port}"),
-      "--remote-debugging-address=127.0.0.1".to_string(),
-      format!("--user-data-dir={profile_path}"),
-      "--no-first-run".to_string(),
-      "--no-default-browser-check".to_string(),
-      "--disable-background-mode".to_string(),
-      "--disable-component-update".to_string(),
-      "--disable-background-timer-throttling".to_string(),
-      "--crash-server-url=".to_string(),
-      "--disable-updater".to_string(),
-      "--disable-session-crashed-bubble".to_string(),
-      "--hide-crash-restore-bubble".to_string(),
-      "--disable-infobars".to_string(),
-      // Prefetch* / NoStatePrefetch: cross-site Speculation-Rules prefetch uses
-      // an isolated NetworkContext that defaults to DIRECT egress (real host IP
-      // leaks past the per-profile proxy). Disabling via a LAUNCH FLAG cannot be
-      // re-enabled by an imported/synced network_prediction_options pref (which a
-      // compile-time pref default could be).
-      "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,Prefetch,PrefetchProxy,SpeculationRulesPrefetchFuture,NoStatePrefetch".to_string(),
-      "--use-mock-keychain".to_string(),
-      "--password-store=basic".to_string(),
-    ];
+    let mut args = base_wayfern_launch_args(port, profile_path);
     WayfernConfig::append_webrtc_launch_args(&mut args, config);
 
     if headless {
@@ -1196,9 +1334,22 @@ impl WayfernManager {
       .unwrap_or("")
       .is_empty()
     {
-      let mut backfilled = profile.clone();
-      backfilled.window_color = Some(derive_profile_color(&backfilled.id));
-      let _ = crate::profile::ProfileManager::instance().save_profile(&backfilled);
+      let derived_color = derive_profile_color(&profile.id);
+      let _ = crate::profile::ProfileManager::instance().mutate_profile(
+        &profile.id.to_string(),
+        move |latest| {
+          if latest
+            .window_color
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+          {
+            latest.window_color = Some(derived_color);
+          }
+          Ok(())
+        },
+      );
     }
     let profile_color = profile
       .window_color
@@ -1211,9 +1362,12 @@ impl WayfernManager {
     args.push(format!("--wayfern-profile-color={profile_color}"));
 
     let mut wayfern_token = crate::cloud_auth::CLOUD_AUTH.get_wayfern_token().await;
+    // Waiting is only meaningful for a plan a token can actually be minted for.
+    // On "any active plan" this stalled every Solo launch by the full three
+    // seconds waiting for a token the backend will never issue to them.
     if wayfern_token.is_none()
       && crate::cloud_auth::CLOUD_AUTH
-        .has_active_paid_subscription()
+        .is_entitled_to_wayfern_token()
         .await
     {
       // Brief wait for the background token fetch — when the API is healthy
@@ -1257,32 +1411,18 @@ impl WayfernManager {
       args.push("--dns-prefetch-disable".to_string());
     }
 
-    let mut command = TokioCommand::new(&executable_path);
-    command
-      .args(&args)
-      .stdin(Stdio::null())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null());
-    if let Some(ref token) = wayfern_token {
-      command.env("WAYFERN_TOKEN", token);
+    if wayfern_token.is_some() {
       log::info!("Wayfern authorization configured for browser process");
     }
-
-    let child = command
-      .spawn()
-      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-        let hint = if e.raw_os_error() == Some(14001) {
-          ". This usually means the Visual C++ Redistributable is not installed. \
-           Download it from https://aka.ms/vs/17/release/vc_redist.x64.exe"
-        } else {
-          ""
-        };
-        format!("Failed to spawn Wayfern: {e}{hint}").into()
-      })?;
-    let process_id = child.id();
-    drop(child);
-
-    self.wait_for_cdp_ready(port).await?;
+    let process_id = self
+      .spawn_wayfern_and_wait(
+        &executable_path,
+        &args,
+        wayfern_token.as_deref(),
+        profile_path,
+        port,
+      )
+      .await?;
 
     let targets = self.get_cdp_targets(port).await?;
     log::info!("Found {} CDP targets", targets.len());
@@ -1363,6 +1503,8 @@ impl WayfernManager {
         }
       }
 
+      let host_constraints = Self::fingerprint_host_constraints(app_handle);
+
       for target in &page_targets {
         if let Some(ws_url) = &target.websocket_debugger_url {
           log::info!("Applying fingerprint to page target");
@@ -1382,7 +1524,21 @@ impl WayfernManager {
                 // { fingerprint: {...} }; tolerate a bare object too.
                 let fp = result.get("fingerprint").cloned().unwrap_or(result);
                 if fp.is_object() {
-                  match serde_json::to_string(&Self::normalize_fingerprint(fp)) {
+                  let normalized = Self::normalize_fingerprint(fp);
+                  if let Err(reason) = WayfernConfig::fingerprint_satisfies_host_constraints(
+                    &normalized,
+                    config,
+                    host_constraints,
+                  ) {
+                    Self::terminate_process(process_id);
+                    return Err(
+                      format!(
+                        "Wayfern applied a fingerprint that violates display constraints: {reason}"
+                      )
+                      .into(),
+                    );
+                  }
+                  match serde_json::to_string(&normalized) {
                     Ok(s) => used_fingerprint = Some(s),
                     Err(e) => {
                       log::warn!("Failed to serialize used fingerprint: {e}")
@@ -1394,6 +1550,11 @@ impl WayfernManager {
             Err(e) => log::error!("Failed to apply fingerprint to target: {e}"),
           }
         }
+      }
+
+      if used_fingerprint.is_none() {
+        Self::terminate_process(process_id);
+        return Err("Wayfern did not return a complete applied fingerprint for validation".into());
       }
     } else {
       log::warn!("No fingerprint found in config, browser will use default fingerprint");
@@ -1468,21 +1629,7 @@ impl WayfernManager {
     if let Some(instance) = inner.instances.remove(id) {
       log::info!("Cleaning up Wayfern instance {}", instance.id);
       if let Some(pid) = instance.process_id {
-        #[cfg(unix)]
-        {
-          use nix::sys::signal::{kill, Signal};
-          use nix::unistd::Pid;
-          let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-        }
-        #[cfg(windows)]
-        {
-          use std::os::windows::process::CommandExt;
-          const CREATE_NO_WINDOW: u32 = 0x08000000;
-          let _ = std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-        }
+        Self::terminate_process(Some(pid));
         log::info!("Stopped Wayfern instance {id} (PID: {pid})");
       }
     }
@@ -1558,8 +1705,6 @@ impl WayfernManager {
   }
 
   pub async fn find_wayfern_by_profile(&self, profile_path: &str) -> Option<WayfernLaunchResult> {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-
     let mut inner = self.inner.lock().await;
 
     // Canonicalize the target path for comparison
@@ -1585,12 +1730,12 @@ impl WayfernManager {
     if let Some(id) = found_id {
       if let Some(instance) = inner.instances.get(&id) {
         if let Some(pid) = instance.process_id {
-          let system = System::new_with_specifics(
-            RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-          );
-          let sysinfo_pid = sysinfo::Pid::from_u32(pid);
-
-          if system.process(sysinfo_pid).is_some() {
+          // The five-second status loop normally already knows the browser's
+          // PID. Refresh only that process instead of rebuilding the entire
+          // process table (including every renderer command line) while the
+          // user is browsing. A full profile-path scan remains below solely
+          // for recovery after the DON GUI restarts.
+          if crate::proxy_storage::is_process_running(pid) {
             return Some(WayfernLaunchResult {
               id: id.clone(),
               processId: instance.process_id,
@@ -1651,6 +1796,14 @@ impl WayfernManager {
   fn find_wayfern_process_by_profile(
     target_path: &std::path::Path,
   ) -> Option<(u32, String, Option<u16>)> {
+    Self::find_wayfern_processes_by_profile(target_path)
+      .into_iter()
+      .next()
+  }
+
+  fn find_wayfern_processes_by_profile(
+    target_path: &std::path::Path,
+  ) -> Vec<(u32, String, Option<u16>)> {
     use sysinfo::{ProcessRefreshKind, RefreshKind, System};
 
     let system = System::new_with_specifics(
@@ -1658,6 +1811,7 @@ impl WayfernManager {
     );
 
     let target_path_str = target_path.to_string_lossy();
+    let mut matches = Vec::new();
 
     for (pid, process) in system.processes() {
       let cmd = process.cmd();
@@ -1704,11 +1858,11 @@ impl WayfernManager {
       }
 
       if matched {
-        return Some((pid.as_u32(), target_path_str.to_string(), cdp_port));
+        matches.push((pid.as_u32(), target_path_str.to_string(), cdp_port));
       }
     }
 
-    None
+    matches
   }
 
   #[allow(dead_code)]
@@ -1817,6 +1971,27 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::collections::HashSet;
+
+  #[test]
+  fn production_launch_keeps_chromium_background_throttling_enabled() {
+    let args = base_wayfern_launch_args(9222, "/tmp/profile");
+
+    assert!(!args
+      .iter()
+      .any(|arg| arg == "--disable-background-timer-throttling"));
+  }
+
+  #[test]
+  fn launch_services_pid_recovery_excludes_existing_and_wrong_cdp_processes() {
+    let existing = HashSet::from([100]);
+    let candidates = vec![(100, Some(9222)), (200, Some(9333)), (300, Some(9222))];
+
+    assert_eq!(
+      select_new_wayfern_process(&candidates, &existing, 9222),
+      Some(300)
+    );
+  }
 
   #[test]
   fn webrtc_launch_args_follow_explicit_modes() {
@@ -1888,6 +2063,12 @@ mod tests {
       .find(|preset| preset["id"] == "iphone-15-pro")
       .unwrap()["fingerprint"]
       .clone();
+    fingerprint["screenAvailWidth"] = serde_json::json!(393);
+    fingerprint["screenAvailHeight"] = serde_json::json!(852);
+    fingerprint["windowOuterWidth"] = serde_json::json!(393);
+    fingerprint["windowOuterHeight"] = serde_json::json!(852);
+    fingerprint["windowInnerWidth"] = serde_json::json!(393);
+    fingerprint["windowInnerHeight"] = serde_json::json!(760);
     let config = WayfernConfig {
       device_preset: Some("iphone-15-pro".to_string()),
       ..Default::default()
@@ -1994,6 +2175,150 @@ mod tests {
     assert_eq!(
       WayfernManager::window_size_from_fingerprint("not json"),
       None
+    );
+  }
+
+  #[test]
+  fn fingerprint_constraints_reject_incomplete_candidates() {
+    let fingerprint = serde_json::json!({
+      "devicePixelRatio": 2,
+      "screenWidth": 1470,
+      "screenHeight": 956
+    });
+
+    assert!(WayfernConfig::fingerprint_satisfies_constraints(&fingerprint).is_err());
+  }
+
+  #[test]
+  fn fingerprint_constraints_reject_internally_inconsistent_dimensions() {
+    let available_exceeds_screen = serde_json::json!({
+      "devicePixelRatio": 2,
+      "screenWidth": 1470,
+      "screenHeight": 956,
+      "screenAvailWidth": 1600,
+      "screenAvailHeight": 956,
+      "windowOuterWidth": 1400,
+      "windowOuterHeight": 900,
+      "windowInnerWidth": 1300,
+      "windowInnerHeight": 800
+    });
+    let outer_exceeds_available = serde_json::json!({
+      "devicePixelRatio": 2,
+      "screenWidth": 1470,
+      "screenHeight": 956,
+      "screenAvailWidth": 1400,
+      "screenAvailHeight": 900,
+      "windowOuterWidth": 1450,
+      "windowOuterHeight": 920,
+      "windowInnerWidth": 1300,
+      "windowInnerHeight": 800
+    });
+    let inner_exceeds_outer = serde_json::json!({
+      "devicePixelRatio": 2,
+      "screenWidth": 1470,
+      "screenHeight": 956,
+      "screenAvailWidth": 1400,
+      "screenAvailHeight": 900,
+      "windowOuterWidth": 1300,
+      "windowOuterHeight": 800,
+      "windowInnerWidth": 1350,
+      "windowInnerHeight": 850
+    });
+
+    for fingerprint in [
+      available_exceeds_screen,
+      outer_exceeds_available,
+      inner_exceeds_outer,
+    ] {
+      assert!(WayfernConfig::fingerprint_satisfies_constraints(&fingerprint).is_err());
+    }
+  }
+
+  fn complete_desktop_fingerprint(device_pixel_ratio: f64) -> serde_json::Value {
+    serde_json::json!({
+      "devicePixelRatio": device_pixel_ratio,
+      "screenWidth": 1470,
+      "screenHeight": 956,
+      "screenAvailWidth": 1470,
+      "screenAvailHeight": 923,
+      "windowOuterWidth": 1400,
+      "windowOuterHeight": 900,
+      "windowInnerWidth": 1380,
+      "windowInnerHeight": 800
+    })
+  }
+
+  #[test]
+  fn host_constraints_require_the_live_desktop_scale() {
+    let fingerprint = complete_desktop_fingerprint(1.0);
+    let host = FingerprintHostConstraints {
+      device_pixel_ratio: Some(2.0),
+      screen_max_width: Some(1470),
+      screen_max_height: Some(956),
+      screen_available_max_width: Some(1470),
+      screen_available_max_height: Some(923),
+    };
+
+    assert!(WayfernConfig::fingerprint_satisfies_host_constraints(
+      &fingerprint,
+      &WayfernConfig::default(),
+      host,
+    )
+    .is_err());
+  }
+
+  #[test]
+  fn host_constraints_reject_dimensions_outside_the_live_work_area() {
+    let fingerprint = complete_desktop_fingerprint(2.0);
+    let host = FingerprintHostConstraints {
+      device_pixel_ratio: Some(2.0),
+      screen_max_width: Some(1470),
+      screen_max_height: Some(956),
+      screen_available_max_width: Some(1470),
+      screen_available_max_height: Some(900),
+    };
+
+    assert!(WayfernConfig::fingerprint_satisfies_host_constraints(
+      &fingerprint,
+      &WayfernConfig::default(),
+      host,
+    )
+    .is_err());
+  }
+
+  #[test]
+  fn device_presets_cannot_override_the_live_display_scale() {
+    let mut fingerprint = complete_desktop_fingerprint(3.0);
+    fingerprint["screenWidth"] = serde_json::json!(393);
+    fingerprint["screenHeight"] = serde_json::json!(852);
+    fingerprint["screenAvailWidth"] = serde_json::json!(393);
+    fingerprint["screenAvailHeight"] = serde_json::json!(852);
+    fingerprint["windowOuterWidth"] = serde_json::json!(393);
+    fingerprint["windowOuterHeight"] = serde_json::json!(852);
+    fingerprint["windowInnerWidth"] = serde_json::json!(393);
+    fingerprint["windowInnerHeight"] = serde_json::json!(760);
+    fingerprint["platform"] = serde_json::json!("iPhone");
+    fingerprint["userAgent"] =
+      serde_json::json!("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) CriOS/128 Mobile");
+    fingerprint["brand"] = serde_json::json!("Google Chrome");
+    fingerprint["maxTouchPoints"] = serde_json::json!(5);
+    fingerprint["webglVendor"] = serde_json::json!("Apple");
+    fingerprint["webglRenderer"] = serde_json::json!("Apple A17 Pro GPU, Metal");
+    let config = WayfernConfig {
+      device_preset: Some("iphone-15-pro".to_string()),
+      expected_device_pixel_ratio: Some(3.0),
+      ..Default::default()
+    };
+    let host = FingerprintHostConstraints {
+      device_pixel_ratio: Some(2.0),
+      screen_max_width: Some(1470),
+      screen_max_height: Some(956),
+      screen_available_max_width: Some(1470),
+      screen_available_max_height: Some(923),
+    };
+
+    assert!(
+      WayfernConfig::fingerprint_satisfies_host_constraints(&fingerprint, &config, host).is_err()
     );
   }
 }

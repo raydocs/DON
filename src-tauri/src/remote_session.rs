@@ -1566,16 +1566,17 @@ mod tests {
   static INDEX_TESTS: Mutex<()> = Mutex::new(());
 
   fn index_test<T>(body: impl FnOnce() -> T) -> T {
-    // `apply_to_index` writes the shared remote-handoff store through
-    // `index_session`, so these frames would otherwise interleave with
-    // `remote_handoff`'s own tests. Take their lock first (before the
-    // module-local one) so lock ordering stays consistent.
-    let _handoff_guard = crate::remote_handoff::HANDOFF_TEST_LOCK
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
     let _guard = INDEX_TESTS
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Applying a session transition also drives `remote_handoff`: it mutates
+    // that module's process-global store and persists the launch gate to the
+    // data directory. Its lock keeps the two test groups from clobbering each
+    // other's `p1`/`p2` fixtures, and the scratch directory keeps the gate file
+    // out of the developer's own app data.
+    let _handoff = crate::remote_handoff::lock_for_test();
+    let dir = tempfile::TempDir::new().expect("a scratch directory");
+    let _data_dir = crate::app_dirs::set_test_data_dir(dir.path().to_path_buf());
     with_index(|map| map.clear());
     with_endpoints(|map| map.clear());
     INDEX_AUTHORITATIVE.store(false, Ordering::SeqCst);

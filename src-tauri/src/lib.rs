@@ -71,6 +71,7 @@ mod extension_manager;
 mod extraction;
 mod fingerprint_audit;
 mod fingerprint_consistency;
+mod fs_secure;
 mod geoip_downloader;
 mod geolocation;
 mod group_manager;
@@ -78,9 +79,11 @@ mod human_typing;
 mod ip_utils;
 mod launch_gate;
 mod launch_gate_prefs;
+mod legacy_migration;
 mod log_redaction;
 mod platform_browser;
 mod profile;
+mod profile_import;
 mod profile_importer;
 mod proxy_manager;
 pub mod proxy_runner;
@@ -185,10 +188,13 @@ use profile_importer::{
   scan_folder_for_profiles, scan_profile_archive,
 };
 
+use legacy_migration::{migrate_legacy_donut_data, preview_legacy_donut_migration};
+
 use extension_manager::{
-  add_extension, add_extension_to_group, assign_extension_group_to_profile, create_extension_group,
-  delete_extension, delete_extension_group, get_extension_group_for_profile, get_extension_icon,
-  list_extension_groups, list_extensions, remove_extension_from_group, update_extension,
+  add_extension, add_extension_to_group, add_unpacked_extension, assign_extension_group_to_profile,
+  create_extension_group, delete_extension, delete_extension_group,
+  get_extension_group_for_profile, get_extension_icon, list_extension_groups, list_extensions,
+  remove_extension_from_group, update_extension, update_extension_from_path,
   update_extension_group,
 };
 
@@ -813,9 +819,12 @@ async fn is_geoip_database_available() -> Result<bool, String> {
 }
 
 #[tauri::command]
-async fn get_all_traffic_snapshots() -> Result<Vec<crate::traffic_stats::TrafficSnapshot>, String> {
-  // Use real-time snapshots that merge in-memory data with disk data
-  Ok(crate::traffic_stats::get_all_traffic_snapshots_realtime())
+async fn get_running_profile_traffic_snapshots(
+  profile_ids: Vec<String>,
+) -> Result<Vec<crate::traffic_stats::TrafficSnapshot>, String> {
+  Ok(crate::traffic_stats::get_traffic_snapshots_for_profiles(
+    &profile_ids,
+  ))
 }
 
 #[tauri::command]
@@ -1770,8 +1779,9 @@ pub fn run_with_builder(
 
   let log_file_name = app_dirs::app_name();
 
-  // Honor DONUTBROWSER_DATA_ROOT: when set, logs go to <root>/logs instead of
-  // the platform default app log dir, so all on-disk state lives under one root.
+  // Honor DONUTBROWSER_DATA_ROOT and portable mode: logs go to <root>/logs or
+  // <exe dir>/logs instead of the platform default app log dir, so all on-disk
+  // state lives under one root rather than leaking onto the host machine.
   let file_log_target = match app_dirs::log_dir_override() {
     Some(path) => Target::new(TargetKind::Folder {
       path,
@@ -1844,9 +1854,23 @@ pub fn run_with_builder(
     // (the green button zooms instead) — the maximized flag captures the
     // "filled screen" state, including green-button zoom on macOS.
     .plugin(
-      tauri_plugin_window_state::Builder::default()
-        .with_state_flags(
-          tauri_plugin_window_state::StateFlags::all()
+      {
+        let mut window_state = tauri_plugin_window_state::Builder::default();
+        // Keep window geometry with the rest of the relocated state instead of
+        // the host's app-config dir. The plugin only lets us name the file, so
+        // the name is an absolute path; see `window_state_path_override`.
+        if let Some(path) = app_dirs::window_state_path_override() {
+          if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+              log::warn!("Failed to create the window-state directory: {e}");
+            }
+          }
+          window_state = window_state.with_filename(path.to_string_lossy().into_owned());
+        }
+        window_state
+      }
+      .with_state_flags(
+        tauri_plugin_window_state::StateFlags::all()
             & !tauri_plugin_window_state::StateFlags::VISIBLE
             & !tauri_plugin_window_state::StateFlags::FULLSCREEN
             // Whether the window is decorated is decided per-session by
@@ -1854,11 +1878,18 @@ pub fn run_with_builder(
             // a previous run saved. Restoring it would put a real titlebar back
             // on top of the one the app draws — or strip both.
             & !tauri_plugin_window_state::StateFlags::DECORATIONS,
-        )
-        .build(),
+      )
+      .build(),
     );
 
   builder.setup(|app| {
+      // Reconcile an interrupted app update before any other startup work can
+      // fail. The network update task also calls this idempotently, but it runs
+      // too late to protect a newly swapped bundle that crashes during setup.
+      if let Err(error) = app_auto_updater::AppAutoUpdater::reconcile_pending_update() {
+        log::error!("Failed to reconcile the pending app update: {error}");
+      }
+
       // Recover ephemeral dir mappings from RAM-backed storage (tmpfs/ramdisk)
       ephemeral_dirs::recover_ephemeral_dirs();
 
@@ -1970,10 +2001,11 @@ pub fn run_with_builder(
         // saved, that geometry is the user's and has already been restored —
         // re-applying the default here would move and resize their window on
         // every launch, and the plugin would then persist the reset.
-        let has_saved_geometry = app
-          .path()
-          .app_config_dir()
-          .map(|dir| dir.join(".window-state.json").exists())
+        // Must resolve through the same helper the plugin was configured with:
+        // probing the platform default while the plugin writes elsewhere would
+        // read "first run" on every launch and reset the user's window.
+        let has_saved_geometry = app_dirs::window_state_path(app.handle())
+          .map(|path| path.exists())
           .unwrap_or(false);
         if window_decorations::use_client_side_decorations() && !has_saved_geometry {
           if let Err(e) = window.set_size(tauri::LogicalSize::new(880.0, 500.0)) {
@@ -2129,9 +2161,10 @@ pub fn run_with_builder(
                   pid,
                   profile.name
                 );
-                let mut updated = profile.clone();
-                updated.process_id = None;
-                let _ = profile_manager.save_profile(&updated);
+                let _ = profile_manager.mutate_profile(&profile.id.to_string(), |latest| {
+                  latest.process_id = None;
+                  Ok(())
+                });
               }
             }
           }
@@ -2685,10 +2718,8 @@ pub fn run_with_builder(
             cloud_auth::CLOUD_AUTH.sync_cloud_proxy().await;
           };
           let wayfern_fut = async {
-            if cloud_auth::CLOUD_AUTH.has_active_paid_subscription().await {
-              if let Err(e) = cloud_auth::CLOUD_AUTH.request_wayfern_token().await {
-                log::warn!("Failed to request wayfern token on startup: {e}");
-              }
+            if let Err(e) = cloud_auth::CLOUD_AUTH.request_wayfern_token().await {
+              log::warn!("Failed to request wayfern token on startup: {e}");
             }
           };
           tokio::join!(sync_token_fut, proxy_fut, wayfern_fut);
@@ -2772,6 +2803,8 @@ pub fn run_with_builder(
       scan_folder_for_profiles,
       scan_profile_archive,
       cleanup_profile_import_scratch,
+      preview_legacy_donut_migration,
+      migrate_legacy_donut_data,
       check_missing_binaries,
       check_missing_geoip_database,
       ensure_all_binaries_exist,
@@ -2799,7 +2832,9 @@ pub fn run_with_builder(
       list_extensions,
       get_extension_icon,
       add_extension,
+      add_unpacked_extension,
       update_extension,
+      update_extension_from_path,
       delete_extension,
       list_extension_groups,
       create_extension_group,
@@ -2814,7 +2849,7 @@ pub fn run_with_builder(
       start_api_server,
       stop_api_server,
       get_api_server_status,
-      get_all_traffic_snapshots,
+      get_running_profile_traffic_snapshots,
       get_profile_traffic_snapshot,
       clear_all_traffic_stats,
       clear_profile_traffic_stats,

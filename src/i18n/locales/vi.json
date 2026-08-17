@@ -187,7 +187,7 @@
       "copyLogsDescription": "Sao chép gói nhật ký gần đây đã được che thông tin nhạy cảm (tối đa 5 MB). Hãy xem lại trước khi chia sẻ vì việc che dữ liệu không thể nhận diện mọi loại dữ liệu cá nhân."
     },
     "disableAutoUpdates": "Tắt tự động cập nhật ứng dụng",
-    "disableAutoUpdatesDescription": "Ngăn ứng dụng tự động kiểm tra và cài đặt bản cập nhật Donut Browser. Cập nhật trình duyệt không bị ảnh hưởng.",
+    "disableAutoUpdatesDescription": "Ngăn ứng dụng tự động kiểm tra và cài đặt bản cập nhật DON. Cập nhật trình duyệt không bị ảnh hưởng.",
     "keepDecryptedProfilesInRam": "Giữ hồ sơ đã giải mã trong RAM",
     "keepDecryptedProfilesInRamDescription": "Giữ bản sao đã giải mã trong RAM của hồ sơ được bảo vệ bằng mật khẩu giữa các lần khởi chạy để khởi động nhanh hơn. Bản sao trên ổ đĩa vẫn được mã hóa.",
     "privacy": {
@@ -432,7 +432,9 @@
       "newVpn": "VPN mới",
       "protocolCol": "Giao thức",
       "hostPort": "Máy chủ : cổng",
-      "title": "Proxy & VPN"
+      "title": "Proxy & VPN",
+      "cannotDelete_few": "Không thể xóa: đang được {{count}} hồ sơ sử dụng",
+      "cannotDelete_many": "Không thể xóa: đang được {{count}} hồ sơ sử dụng"
     },
     "add": "Thêm Proxy",
     "edit": "Chỉnh sửa Proxy",
@@ -628,6 +630,7 @@
       "connectionSuccess": "Kết nối thành công!",
       "serverError": "Máy chủ trả về lỗi",
       "connectFailed": "Kết nối máy chủ thất bại",
+      "storageEndpoint": "Bộ nhớ: {{endpoint}}",
       "settingsSaved": "Đã lưu cài đặt đồng bộ",
       "saveFailed": "Lưu cài đặt thất bại",
       "disconnected": "Đã ngắt kết nối đồng bộ",
@@ -833,7 +836,11 @@
       "failedMessage": "Sao chép cookie thất bại: {{error}}",
       "copyButton_one": "Sao chép {{count}} cookie",
       "copyButton_other": "Sao chép {{count}} cookie",
-      "copyButtonEmpty": "Sao chép cookie"
+      "copyButtonEmpty": "Sao chép cookie",
+      "copyButton_few": "Sao chép {{count}} cookie",
+      "copyButton_many": "Sao chép {{count}} cookie",
+      "dialogDescription_few": "Sao chép cookie từ profile nguồn sang {{count}} profile đã chọn.",
+      "dialogDescription_many": "Sao chép cookie từ profile nguồn sang {{count}} profile đã chọn."
     },
     "success": "Sao chép cookie thành công",
     "error": "Sao chép cookie thất bại",
@@ -1114,61 +1121,6 @@
     "mimeTypesJson": "Loại MIME (mảng JSON)",
     "voicesJson": "Giọng nói (mảng JSON)"
   },
-  "fingerprintAudit": {
-    "open": "Kiểm tra dấu vân tay",
-    "title": "Kiểm tra dấu vân tay",
-    "description": "So sánh dấu vân tay đã lưu với những gì một trang Wayfern đang chạy có thể quan sát.",
-    "run": "Chạy kiểm tra",
-    "running": "Đang kiểm tra…",
-    "runAgain": "Chạy lại",
-    "export": "Xuất JSON",
-    "exportSuccess": "Đã xuất kiểm tra dấu vân tay",
-    "summary": "Tóm tắt",
-    "matches": "Khớp",
-    "mismatches": "Không khớp",
-    "unknown": "Không xác định",
-    "total": "Tổng số kiểm tra",
-    "noReport": "Chạy kiểm tra để thu thập quan sát từ trình duyệt.",
-    "mismatchNotice": "Một số giá trị thực tế khác với dấu vân tay đã lưu. Hãy xem lại trước khi thay đổi hồ sơ.",
-    "expected": "Mong đợi",
-    "actual": "Thực tế",
-    "statusMatch": "Match",
-    "statusMismatch": "Mismatch",
-    "statusUnknown": "Unknown",
-    "statusObserved": "Observed",
-    "statusCrossOriginFrame": "Cross-origin frame",
-    "statusFramePresent": "Frame present",
-    "details": "So sánh trường",
-    "observations": "Quan sát bổ sung",
-    "oopif": "Kiểm tra khung khác nguồn",
-    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
-    "frameCount": "Số khung",
-    "childDevicePixelRatio": "Child DPR",
-    "childScreenWidth": "Child screen width",
-    "notAvailable": "Không khả dụng",
-    "categories": {
-      "navigator": "Navigator",
-      "screen": "Màn hình",
-      "window": "Cửa sổ",
-      "timezone": "Múi giờ",
-      "webgl": "WebGL",
-      "media": "Tùy chọn phương tiện",
-      "color": "Màu và HDR",
-      "storage": "Bộ nhớ",
-      "battery": "Pin",
-      "fonts": "Phông chữ",
-      "browser": "Bộ sưu tập trình duyệt",
-      "network": "Mạng",
-      "performance": "Hiệu năng",
-      "observation": "Quan sát"
-    },
-    "observationLabels": {
-      "audioHash": "Mã băm âm thanh ngoại tuyến",
-      "mediaDevices": "Thiết bị phương tiện",
-      "webrtcCandidates": "Ứng viên WebRTC",
-      "webglParameters": "Quan sát WebGL"
-    }
-  },
   "warnings": {
     "windowResizeTitle": "Kích thước cửa sổ tùy chỉnh",
     "windowResizeDescription": "Thay đổi kích thước cửa sổ trình duyệt có thể tăng khả năng bị trang web phát hiện thông tin trình duyệt bị giả mạo.",
@@ -1311,6 +1263,12 @@
       "syncing": "Đang đồng bộ",
       "synced": "Đã đồng bộ",
       "error": "Lỗi"
+    },
+    "ephemeral": {
+      "cookiesUnavailable": "Hồ sơ tạm thời bị xoá khi đóng trình duyệt, nên ở đây không có cookie nào để quản lý.",
+      "extensionsUnavailable": "Hồ sơ tạm thời bị xoá khi đóng trình duyệt, nên không thể gán nhóm tiện ích mở rộng cho chúng.",
+      "syncUnavailable": "Hồ sơ tạm thời bị xoá khi đóng trình duyệt, nên không có gì để đồng bộ lên đám mây.",
+      "hint": "Hãy tạo hồ sơ thường nếu bạn cần giữ lại dữ liệu này."
     }
   },
   "extensions": {
@@ -1346,7 +1304,7 @@
     "deleteConfirmDescription": "Bạn có chắc muốn xóa \"{{name}}\"? Hành động này không thể hoàn tác.",
     "deleteGroupConfirmTitle": "Xóa nhóm tiện ích",
     "deleteGroupConfirmDescription": "Bạn có chắc muốn xóa nhóm \"{{name}}\"? Hành động này không thể hoàn tác.",
-    "invalidFileType": "Loại tệp không hợp lệ. Vui lòng tải lên tệp .crx, .xpi hoặc .zip.",
+    "invalidFileType": "Loại tệp không hợp lệ. Vui lòng chọn tệp .crx hoặc .zip.",
     "readError": "Đọc tệp tiện ích thất bại.",
     "assignTitle": "Gán nhóm tiện ích",
     "assignDescription": "Gán {{count}} profile đã chọn vào nhóm tiện ích.",
@@ -1354,7 +1312,6 @@
     "assignSuccess": "Gán nhóm tiện ích thành công",
     "editExtension": "Chỉnh sửa tiện ích",
     "updateSuccess": "Cập nhật tiện ích thành công",
-    "reupload": "Tải lên lại",
     "version": "Phiên bản",
     "author": "Tác giả",
     "homepage": "Trang chủ",
@@ -1362,10 +1319,26 @@
     "editGroupDescription": "Cập nhật tên nhóm và quản lý tiện ích trong nhóm.",
     "groupExtensions": "Tiện ích trong nhóm này",
     "noExtensionsInGroup": "Chưa thêm tiện ích nào",
-    "editExtensionDescription": "Cập nhật tên tiện ích, xem metadata hoặc tải lên lại tệp tiện ích.",
+    "editExtensionDescription": "Cập nhật tên tiện ích, xem siêu dữ liệu hoặc thay bằng tệp nén hay thư mục khác.",
     "metadata": "Metadata",
     "noMetadata": "Không có metadata từ manifest.",
     "selectFile": "Chọn tệp",
+    "loadUnpacked": "Tải từ thư mục",
+    "loadUnpackedTooltip": "Tải tiện ích từ thư mục có chứa manifest.json",
+    "selectFolderTitle": "Chọn thư mục tiện ích",
+    "selectedFolder": "Thư mục đã chọn",
+    "selectFolder": "Chọn thư mục",
+    "linkFolder": "Tải trực tiếp từ thư mục này",
+    "linkFolderOff": "Thư mục được sao chép vào Donut. Tiện ích có thể mang đi và đồng bộ sang các thiết bị khác của bạn.",
+    "linkFolderOn": "Donut tải tiện ích trực tiếp từ thư mục này mỗi lần khởi chạy. Các thay đổi của bạn có hiệu lực ở lần mở trình duyệt tiếp theo, nhưng tiện ích chỉ nằm trên máy này và không bao giờ đồng bộ.",
+    "replaceSource": "Thay nguồn",
+    "linkedNoSync": "Tiện ích được liên kết chỉ nằm trên máy này nên không thể đồng bộ.",
+    "uploadFailed": "Không thêm được tiện ích",
+    "updateFailed": "Không cập nhật được tiện ích",
+    "deleteFailed": "Không xóa được tiện ích",
+    "groupCreateFailed": "Không tạo được nhóm tiện ích",
+    "groupUpdateFailed": "Không cập nhật được nhóm tiện ích",
+    "groupDeleteFailed": "Không xóa được nhóm tiện ích",
     "syncEnabled": "Đã bật đồng bộ",
     "syncDisabled": "Đã tắt đồng bộ",
     "syncEnableTooltip": "Bật đồng bộ",
@@ -1378,6 +1351,14 @@
       "groupsTitle": "Xóa nhóm tiện ích",
       "groupsDescription": "Xóa {{count}} nhóm tiện ích? {{names}}",
       "confirmButton": "Xóa"
+    },
+    "source": {
+      "label": "Nguồn",
+      "archive": "Tệp nén",
+      "unpacked": "Thư mục đã giải nén",
+      "linked": "Thư mục liên kết",
+      "folderLabel": "Thư mục",
+      "linkedTooltip": "Tải trực tiếp từ {{path}}"
     }
   },
   "pro": {
@@ -1497,7 +1478,9 @@
       "deleteSuccess": "Xóa VPN thành công",
       "deleteFailed": "Xóa VPN thất bại",
       "deleteTitle": "Xóa VPN",
-      "deleteDescription": "Hành động này không thể hoàn tác. VPN \"{{name}}\" sẽ bị xóa vĩnh viễn."
+      "deleteDescription": "Hành động này không thể hoàn tác. VPN \"{{name}}\" sẽ bị xóa vĩnh viễn.",
+      "cannotDelete_few": "Không thể xóa: đang được sử dụng bởi {{count}} profile",
+      "cannotDelete_many": "Không thể xóa: đang được sử dụng bởi {{count}} profile"
     }
   },
   "importProfile": {
@@ -1549,7 +1532,43 @@
     "vpnOptional": "VPN (tùy chọn)",
     "noVpn": "Không dùng VPN",
     "advancedOptions": "Tùy chọn nâng cao",
-    "configureFingerprint": "Cấu hình vân tay (tùy chọn)"
+    "configureFingerprint": "Cấu hình vân tay (tùy chọn)",
+    "reportCookies": "Cookie",
+    "reportPasswords": "Mật khẩu",
+    "reportAutofill": "Phương thức thanh toán",
+    "reportExtensions": "Tiện ích mở rộng",
+    "reportHistory": "Lịch sử",
+    "reportBookmarks": "Dấu trang",
+    "reportLocalStorage": "Dữ liệu trang web",
+    "reportNothingCarried": "Không có dữ liệu đọc được nào được chuyển sang",
+    "reportUnrecoverable": "Không giải mã được: {{count}}",
+    "closeSourceBrowserHint": "Hãy đóng trình duyệt nguồn rồi thử lại để có bản sao đầy đủ, hoặc nhập ngay và chấp nhận rằng dữ liệu trang web có thể chưa đầy đủ.",
+    "importAnyway": "Vẫn nhập",
+    "warnings": {
+      "secretsNotMigrated": "Không mở khóa được cookie và mật khẩu, nên bạn sẽ phải đăng nhập lại.",
+      "appBoundEncrypted": "Chrome 127 trở lên trên Windows gắn cookie với chính trình duyệt; không ứng dụng nào khác có thể chuyển được.",
+      "storeTooOld": "Một cơ sở dữ liệu quá cũ để trình duyệt này mở nên đã bị bỏ qua.",
+      "storeTooNew": "Một cơ sở dữ liệu đến từ trình duyệt mới hơn nên đã bị bỏ qua.",
+      "sourceBrowserRunning": "Trình duyệt nguồn đang chạy nên dữ liệu trang web có thể chưa đầy đủ.",
+      "securePreferencesReset": "Các cài đặt được bảo vệ như trang chủ và công cụ tìm kiếm đã trở về mặc định.",
+      "extensionsPartial": "Một số tiện ích thuộc về trình duyệt nguồn nên không được chuyển sang.",
+      "storeUnreadable": "Một cơ sở dữ liệu không đọc được nên đã bị bỏ qua thay vì sao chép hỏng."
+    },
+    "legacyDonut": "Move from old Donut",
+    "legacyTitle": "Copy data from old Donut",
+    "legacyDescription": "Preview and selectively copy your local data into DON.",
+    "legacyScanning": "Checking for old Donut data...",
+    "legacyNotFound": "No old Donut data was found on this computer.",
+    "legacyCopyOnly": "DON only reads and copies the selected data. Your old Donut data is never changed, and account tokens, cloud login, update state, VPNs, and browser binaries are not copied.",
+    "legacyConflicts": "{{count}} existing item(s) will be safely skipped or linked to the matching DON item. Nothing will be overwritten.",
+    "legacyResult": "{{copied}} copied, {{skipped}} skipped, {{failed}} failed",
+    "legacyMigrateButton": "Copy selected data to DON",
+    "legacyCategories": {
+      "profiles": "Profiles and browsing data",
+      "proxies": "Local proxies",
+      "groups": "Profile groups",
+      "extensions": "Extensions and extension groups"
+    }
   },
   "syncTooltips": {
     "syncing": "Đang đồng bộ...",
@@ -1582,7 +1601,9 @@
       "description": "Bạn có chắc muốn xóa {{count}} nhóm? {{names}}. Profile sẽ được chuyển về Mặc định.",
       "description_one": "Bạn có chắc muốn xóa {{count}} nhóm? {{names}}. Profile sẽ được chuyển về Mặc định.",
       "confirmButton": "Xóa nhóm"
-    }
+    },
+    "profileCount_few": "{{count}} hồ sơ",
+    "profileCount_many": "{{count}} hồ sơ"
   },
   "proxyAssignment": {
     "title": "Gán proxy / VPN",
@@ -1601,7 +1622,9 @@
     "noneOption": "Không có",
     "noValidProfiles": "Chưa chọn profile hợp lệ nào.",
     "vpnGroupHeading": "VPN",
-    "failedFallback": "Gán proxy/VPN cho profile thất bại"
+    "failedFallback": "Gán proxy/VPN cho profile thất bại",
+    "description_few": "Gán proxy hoặc VPN cho {{count}} profile đã chọn.",
+    "description_many": "Gán proxy hoặc VPN cho {{count}} profile đã chọn."
   },
   "groupAssignment": {
     "title": "Gán nhóm",
@@ -1616,7 +1639,9 @@
     "selectedProfilesLabel": "Profile đã chọn:",
     "assignGroupLabel": "Gán vào nhóm:",
     "noValidProfiles": "Chưa chọn profile hợp lệ nào.",
-    "failedFallback": "Gán nhóm cho profile thất bại"
+    "failedFallback": "Gán nhóm cho profile thất bại",
+    "description_few": "Gán nhóm cho {{count}} profile đã chọn.",
+    "description_many": "Gán nhóm cho {{count}} profile đã chọn."
   },
   "profileSelector": {
     "title": "Chọn profile",
@@ -1757,7 +1782,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Cập nhật Donut Browser thất bại",
+      "updateFailed": "Cập nhật DON thất bại",
       "restartFailed": "Khởi động lại thất bại",
       "updateReady": "Bản cập nhật sẵn sàng, khởi động lại để áp dụng",
       "manualDownloadRequired": "Cần tải xuống thủ công",
@@ -1888,6 +1913,15 @@
     "vpnNotFound": "Không tìm thấy VPN",
     "extensionNotFound": "Không tìm thấy tiện ích",
     "extensionGroupNotFound": "Không tìm thấy nhóm tiện ích",
+    "extensionUnsupportedFileType": "Loại tệp này không được hỗ trợ. Tiện ích phải là tệp nén .crx hoặc .zip, hoặc một thư mục.",
+    "extensionDirNotFound": "Thư mục đó không còn tồn tại.",
+    "extensionNotADirectory": "Đường dẫn đó không phải là thư mục.",
+    "extensionManifestMissing": "Thư mục đó không có manifest.json. Hãy chọn thư mục chứa manifest.json của tiện ích.",
+    "extensionManifestInvalid": "Không đọc được manifest.json trong thư mục đó.",
+    "extensionDirTooLarge": "Thư mục đó quá lớn để sao chép vào Donut (giới hạn là 256 MB và 20.000 tệp). Hãy liên kết thư mục thay vì sao chép.",
+    "extensionPathHasComma": "Đường dẫn thư mục có dấu phẩy nên Chromium không tải được. Hãy đổi tên hoặc di chuyển thư mục.",
+    "extensionLinkRequiresDirectory": "Chỉ có thể tải tại chỗ một thư mục. Hãy tắt liên kết để thêm tệp nén.",
+    "extensionLinkedCannotSync": "Tiện ích này được tải từ một thư mục trên máy này nên không có gì để đồng bộ.",
     "cannotModifyCloudManagedProxy": "Không thể chỉnh sửa đồng bộ cho proxy được quản lý bởi đám mây",
     "syncLockedByProfile": "Không thể tắt đồng bộ khi đang được sử dụng bởi profile đã đồng bộ",
     "syncNotConfigured": "Chưa cấu hình đồng bộ. Đăng nhập hoặc cấu hình máy chủ tự lưu trữ trước.",
@@ -1989,7 +2023,11 @@
     },
     "camoufoxRemoved": "Camoufox không còn được hỗ trợ. Hãy tạo lại hồ sơ này bằng Wayfern.",
     "noE2ePasswordSet": "Chưa đặt mật khẩu mã hóa đầu cuối. Hãy đặt trước khi đồng bộ dữ liệu đã mã hóa.",
-    "fingerprintAuditFailed": "Kiểm tra dấu vân tay thất bại: {{detail}}"
+    "importSourceNotChromium": "Thư mục này không phải hồ sơ trình duyệt Chromium",
+    "importSourceNotChromiumNamed": "Không thể nhập hồ sơ {{family}}; chỉ hỗ trợ các trình duyệt nền Chromium",
+    "importSourceBrowserRunning": "Hãy đóng {{browser}} trước, hoặc chọn vẫn nhập",
+    "fingerprintAuditFailed": "Kiểm tra dấu vân tay thất bại: {{detail}}",
+    "legacyMigrationFailed": "Old Donut data could not be copied safely. Your old data was not changed."
   },
   "rail": {
     "profiles": "Profile",
@@ -2204,7 +2242,7 @@
   },
   "wayfernBlocked": {
     "title": "Tự động hóa trình duyệt đã tạm dừng",
-    "description": "Tài khoản của bạn tạm thời bị hạn chế các tính năng Pro của trình duyệt, thường do đăng nhập trên nhiều thiết bị cùng lúc. Hãy đăng xuất khỏi các thiết bị khác rồi khởi chạy lại profile để khôi phục."
+    "description": "Tự động hóa trình duyệt chỉ chạy trên một thiết bị tại một thời điểm và một thiết bị khác đang đăng nhập hiện đang sử dụng nó. Hãy đăng xuất trên thiết bị đó, rồi khởi chạy lại cấu hình."
   },
   "wayfernConfigDialog": {
     "titleView": "Xem cài đặt vân tay - {{name}} ({{browser}})",
@@ -2252,7 +2290,7 @@
     },
     "locked": {
       "title": "Cookie Bot",
-      "hint": "Cookie Bot làm ấm hồ sơ của bạn qua đêm trên máy từ xa, giúp chúng giữ được cookie và lịch sử mà không cần bật máy tính của bạn. Cần gói Pro hoặc Team."
+      "hint": "Cookie Bot làm ấm hồ sơ của bạn qua đêm trên máy từ xa, giúp chúng giữ được cookie và lịch sử mà không cần bật máy tính của bạn."
     },
     "empty": {
       "title": "Chưa có hồ sơ nào được đăng ký",
@@ -2264,7 +2302,9 @@
       "nextRun": "Lần chạy tới lúc {{time}}",
       "dueCount_one": "{{count}} hồ sơ đến hạn",
       "dueCount_other": "{{count}} hồ sơ đến hạn",
-      "nothingScheduled": "Chưa lên lịch gì"
+      "nothingScheduled": "Chưa lên lịch gì",
+      "dueCount_few": "{{count}} hồ sơ đến hạn",
+      "dueCount_many": "{{count}} hồ sơ đến hạn"
     },
     "lastDay": {
       "label": "24 giờ qua",
@@ -2274,7 +2314,13 @@
       "partial_one": "{{count}} một phần",
       "partial_other": "{{count}} một phần",
       "failed_one": "{{count}} thất bại",
-      "failed_other": "{{count}} thất bại"
+      "failed_other": "{{count}} thất bại",
+      "failed_few": "{{count}} thất bại",
+      "failed_many": "{{count}} thất bại",
+      "partial_few": "{{count}} một phần",
+      "partial_many": "{{count}} một phần",
+      "ran_few": "{{count}} đã chạy",
+      "ran_many": "{{count}} đã chạy"
     },
     "chart": {
       "machineTime": "Thời gian máy mỗi đêm",
@@ -2313,7 +2359,11 @@
       "unenrol": "Gỡ khỏi Cookie Bot",
       "unenrolTitle": "Gỡ {{name}} khỏi Cookie Bot?",
       "unenrolDescription": "Việc làm ấm sẽ dừng ngay đêm nay. Các lần chạy trước vẫn nằm trong tab Hoạt động.",
-      "unenrolled": "Đã gỡ khỏi Cookie Bot"
+      "unenrolled": "Đã gỡ khỏi Cookie Bot",
+      "crowded_few": "{{count}} hồ sơ khởi động cùng lúc",
+      "crowded_many": "{{count}} hồ sơ khởi động cùng lúc",
+      "quietHours_few": "{{count}} giờ trống",
+      "quietHours_many": "{{count}} giờ trống"
     },
     "status": {
       "provisioning": "Đang chuẩn bị máy",
@@ -2350,7 +2400,9 @@
       "consentUnknown": "Chưa có báo cáo về hộp thoại đồng ý",
       "billed": "Đã tính {{duration}}",
       "billedUnknown": "Chưa có báo cáo về thời gian tính phí",
-      "chunk": "Phần {{index}} trên {{total}}"
+      "chunk": "Phần {{index}} trên {{total}}",
+      "consentHandled_few": "Đã xử lý {{count}} hộp thoại đồng ý",
+      "consentHandled_many": "Đã xử lý {{count}} hộp thoại đồng ý"
     },
     "history": {
       "title": "Lần chạy",
@@ -2375,7 +2427,11 @@
       "sitesFailed_other": "Không truy cập được {{count}} trang",
       "consentHandled_one": "Đã xử lý {{count}} hộp thoại đồng ý",
       "consentHandled_other": "Đã xử lý {{count}} hộp thoại đồng ý",
-      "sitesUnknown": "Chưa có số liệu"
+      "sitesUnknown": "Chưa có số liệu",
+      "consentHandled_few": "Đã xử lý {{count}} hộp thoại đồng ý",
+      "consentHandled_many": "Đã xử lý {{count}} hộp thoại đồng ý",
+      "sitesFailed_few": "Không truy cập được {{count}} trang",
+      "sitesFailed_many": "Không truy cập được {{count}} trang"
     },
     "duration": {
       "hm": "{{hours}} giờ {{minutes}} phút",
@@ -2389,7 +2445,9 @@
       "noProfiles": "Không có hồ sơ nào khớp.",
       "alreadyEnrolled": "Đã đăng ký",
       "continue_one": "Tiếp tục với {{count}}",
-      "continue_other": "Tiếp tục với {{count}}"
+      "continue_other": "Tiếp tục với {{count}}",
+      "continue_few": "Tiếp tục với {{count}}",
+      "continue_many": "Tiếp tục với {{count}}"
     },
     "enrol": {
       "titleOne": "Đăng ký {{name}}",
@@ -2465,7 +2523,27 @@
       "listSites_other": "{{count}} trang",
       "summarySlots_one": "Chạy {{count}} lần mỗi tuần, tối đa {{minutes}} phút mỗi lần.",
       "summarySlots_other": "Chạy {{count}} lần mỗi tuần, tối đa {{minutes}} phút mỗi lần.",
-      "templateNameInvalidNoMax": "Không thể dùng tên đó cho danh sách đã lưu."
+      "templateNameInvalidNoMax": "Không thể dùng tên đó cho danh sách đã lưu.",
+      "cadenceCustom_few": "{{count}} đêm mỗi tuần",
+      "cadenceCustom_many": "{{count}} đêm mỗi tuần",
+      "confirmBulkButton_few": "Tiếp tục với {{count}} hồ sơ",
+      "confirmBulkButton_many": "Tiếp tục với {{count}} hồ sơ",
+      "confirmBulkDescription_few": "Việc này đặt trước {{count}} lần chạy đêm, trừ vào quỹ giờ từ xa dùng chung. Bạn sẽ chọn giờ và các trang ở bước tiếp theo.",
+      "confirmBulkDescription_many": "Việc này đặt trước {{count}} lần chạy đêm, trừ vào quỹ giờ từ xa dùng chung. Bạn sẽ chọn giờ và các trang ở bước tiếp theo.",
+      "confirmBulkTitle_few": "Đăng ký {{count}} hồ sơ vào Cookie Bot?",
+      "confirmBulkTitle_many": "Đăng ký {{count}} hồ sơ vào Cookie Bot?",
+      "enrolled_few": "Đã đăng ký {{count}} hồ sơ",
+      "enrolled_many": "Đã đăng ký {{count}} hồ sơ",
+      "listSites_few": "{{count}} trang",
+      "listSites_many": "{{count}} trang",
+      "sitesHint_few": "{{count}} trang. Chỉ những trang bạn liệt kê ở đây mới được truy cập.",
+      "sitesHint_many": "{{count}} trang. Chỉ những trang bạn liệt kê ở đây mới được truy cập.",
+      "summaryCustom_few": "Chạy {{count}} đêm mỗi tuần lúc {{time}}, tối đa {{minutes}} phút mỗi lần.",
+      "summaryCustom_many": "Chạy {{count}} đêm mỗi tuần lúc {{time}}, tối đa {{minutes}} phút mỗi lần.",
+      "summarySlots_few": "Chạy {{count}} lần mỗi tuần, tối đa {{minutes}} phút mỗi lần.",
+      "summarySlots_many": "Chạy {{count}} lần mỗi tuần, tối đa {{minutes}} phút mỗi lần.",
+      "titleCount_few": "Đăng ký {{count}} hồ sơ",
+      "titleCount_many": "Đăng ký {{count}} hồ sơ"
     },
     "preset": {
       "light": "Nhẹ",
@@ -2488,7 +2566,9 @@
       "fixEncrypted": "Mở cài đặt đồng bộ",
       "fixProxy": "Gán một proxy",
       "fixFailed": "Không áp dụng được cách khắc phục đó.",
-      "exitNodeHint": "Không có proxy hoặc VPN, lần chạy sẽ đi ra từ chính địa chỉ trung tâm dữ liệu của hệ thống máy. Nhiều giờ lưu lượng từ một mạng lưu trữ gây hại cho danh tính hồ sơ hơn cả việc không làm ấm."
+      "exitNodeHint": "Không có proxy hoặc VPN, lần chạy sẽ đi ra từ chính địa chỉ trung tâm dữ liệu của hệ thống máy. Nhiều giờ lưu lượng từ một mạng lưu trữ gây hại cho danh tính hồ sơ hơn cả việc không làm ấm.",
+      "ineligible_few": "{{count}} hồ sơ không chạy từ xa được",
+      "ineligible_many": "{{count}} hồ sơ không chạy từ xa được"
     },
     "conflict": {
       "title": "{{email}} đã làm ấm hồ sơ này lúc {{time}}",
@@ -2502,7 +2582,7 @@
     },
     "actionBar": {
       "enrol": "Đăng ký vào Cookie Bot",
-      "proRequired": "Cookie Bot cần gói Pro hoặc Team",
+      "proRequired": "Cookie Bot cần gói trả phí",
       "noneEligible": "Không hồ sơ nào đã chọn có thể làm ấm từ xa"
     },
     "actions": {
@@ -2534,7 +2614,9 @@
       "columnShare": "Tỷ lệ",
       "noActivity": "Không có phiên từ xa nào trong kỳ này.",
       "soloNote": "Hiện chỉ có mức dùng của bạn. Mời đồng đội để xem quỹ giờ chia theo từng thành viên.",
-      "runsFailed": "· {{n}} thất bại"
+      "runsFailed": "· {{n}} thất bại",
+      "pooled_few": "{{used}} trong {{total}} giờ dùng chung cho {{count}} chỗ",
+      "pooled_many": "{{used}} trong {{total}} giờ dùng chung cho {{count}} chỗ"
     },
     "closeReason": {
       "stoppedByUser": "Đã dừng thủ công",
@@ -2562,15 +2644,18 @@
     "titleBlocked": "Đã chặn khởi chạy",
     "titleWarning": "Trước khi khởi chạy",
     "intro": "Hãy xem lại các vấn đề của \"{{name}}\" trước khi khởi động trình duyệt.",
-    "fingerprintHeading": "Điểm ra của proxy không khớp với dấu vân tay",
-    "vpnExtensionHeading": "Đã phát hiện tiện ích VPN",
+    "fingerprintHeading": "Điểm ra đo được không khớp với dấu vân tay",
+    "vpnExtensionHeading": "Đã phát hiện tiện ích VPN hoặc proxy",
     "vpnExtensionIntro": "Các tiện ích trong hồ sơ này có thể định tuyến lại lưu lượng của trình duyệt:",
-    "vpnExtensionConfirmed": "Có thể thay đổi proxy",
-    "vpnExtensionLikely": "Có khả năng thay đổi proxy",
+    "vpnExtensionConfirmed": "Công cụ VPN hoặc proxy đã biết",
+    "vpnExtensionLikely": "Có vẻ là công cụ VPN hoặc proxy",
+    "vpnExtensionCapability": "Có quyền proxy",
     "vpnExtensionExplainer": "Nếu một trong số đó chuyển lưu lượng của bạn đi nơi khác, vị trí thực của trình duyệt sẽ không còn khớp với múi giờ, ngôn ngữ và vị trí địa lý mà hồ sơ này được tạo ra, và Donut không thể phát hiện điều đó từ bên ngoài.",
+    "proxyCapableHeading": "Các tiện ích có thể thay đổi proxy",
+    "proxyCapableIntro": "Chúng không giống VPN, nhưng có quyền proxy của Chromium, thứ mà trình quản lý tải xuống và công cụ gỡ lỗi cũng cần. Donut không thể biết liệu có tiện ích nào đang dùng quyền đó hay không:",
     "sourceDonut": "Do Donut quản lý",
     "sourceBrowser": "Đã cài trong hồ sơ",
-    "measurementUnreliable": "Vì tiện ích VPN có thể ghi đè proxy, kết quả kiểm tra điểm ra có thể không phản ánh tuyến đường mà trình duyệt thực sự dùng.",
+    "measurementUnreliable": "Một tiện ích trong hồ sơ này có quyền proxy, nên kết quả kiểm tra điểm ra có thể không phản ánh tuyến đường mà trình duyệt thực sự dùng.",
     "scanIncompleteEncrypted": "Hồ sơ này được mã hóa nên chỉ có thể kiểm tra các tiện ích do Donut quản lý.",
     "scanIncompleteEphemeral": "Hồ sơ này chưa có dữ liệu nên chỉ có thể kiểm tra các tiện ích do Donut quản lý.",
     "scanIncompletePartial": "Quá trình quét tiện ích bị ngắt giữa chừng nên có thể thiếu một số tiện ích.",
@@ -2580,9 +2665,64 @@
     "dontWarnExtensions": "Không cảnh báo lại về các tiện ích này",
     "applyToRemaining": "Áp dụng lựa chọn này cho các hồ sơ còn lại",
     "cancelledSummary": "Đã hủy {{cancelled}} trên {{total}} lượt khởi chạy",
-    "cancelled": "Đã hủy khởi chạy",
     "vpnExtensionEntry": " {{version}} — {{capability}}, {{source}}",
+    "vpnExtensionEntryNoVersion": " — {{capability}}, {{source}}",
     "scanIncompleteMissing": "Hồ sơ này chưa từng được khởi chạy nên chỉ có thể kiểm tra các tiện ích do Donut quản lý."
+  },
+  "fingerprintAudit": {
+    "open": "Kiểm tra dấu vân tay",
+    "title": "Kiểm tra dấu vân tay",
+    "description": "So sánh dấu vân tay đã lưu với những gì một trang Wayfern đang chạy có thể quan sát.",
+    "run": "Chạy kiểm tra",
+    "running": "Đang kiểm tra…",
+    "runAgain": "Chạy lại",
+    "export": "Xuất JSON",
+    "exportSuccess": "Đã xuất kiểm tra dấu vân tay",
+    "summary": "Tóm tắt",
+    "matches": "Khớp",
+    "mismatches": "Không khớp",
+    "unknown": "Không xác định",
+    "total": "Tổng số kiểm tra",
+    "noReport": "Chạy kiểm tra để thu thập quan sát từ trình duyệt.",
+    "mismatchNotice": "Một số giá trị thực tế khác với dấu vân tay đã lưu. Hãy xem lại trước khi thay đổi hồ sơ.",
+    "expected": "Mong đợi",
+    "actual": "Thực tế",
+    "statusMatch": "Match",
+    "statusMismatch": "Mismatch",
+    "statusUnknown": "Unknown",
+    "statusObserved": "Observed",
+    "statusCrossOriginFrame": "Cross-origin frame",
+    "statusFramePresent": "Frame present",
+    "details": "So sánh trường",
+    "observations": "Quan sát bổ sung",
+    "oopif": "Kiểm tra khung khác nguồn",
+    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
+    "frameCount": "Số khung",
+    "childDevicePixelRatio": "Child DPR",
+    "childScreenWidth": "Child screen width",
+    "notAvailable": "Không khả dụng",
+    "categories": {
+      "navigator": "Navigator",
+      "screen": "Màn hình",
+      "window": "Cửa sổ",
+      "timezone": "Múi giờ",
+      "webgl": "WebGL",
+      "media": "Tùy chọn phương tiện",
+      "color": "Màu và HDR",
+      "storage": "Bộ nhớ",
+      "battery": "Pin",
+      "fonts": "Phông chữ",
+      "browser": "Bộ sưu tập trình duyệt",
+      "network": "Mạng",
+      "performance": "Hiệu năng",
+      "observation": "Quan sát"
+    },
+    "observationLabels": {
+      "audioHash": "Mã băm âm thanh ngoại tuyến",
+      "mediaDevices": "Thiết bị phương tiện",
+      "webrtcCandidates": "Ứng viên WebRTC",
+      "webglParameters": "Quan sát WebGL"
+    }
   },
   "claudeWorkflow": {
     "quickTitle": "Tạo nhanh từ chuỗi proxy",

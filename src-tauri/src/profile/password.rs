@@ -285,10 +285,13 @@ pub async fn set_profile_password(profile_id: String, password: String) -> Resul
     );
   }
 
-  profile.password_protected = true;
-  profile.encryption_salt = Some(salt);
-  ProfileManager::instance()
-    .save_profile(&profile)
+  profile = ProfileManager::instance()
+    .mutate_profile(&id.to_string(), move |latest| {
+      latest.password_protected = true;
+      latest.encryption_salt = Some(salt);
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
     .map_err(err_internal)?;
 
   cache_key(id, key);
@@ -424,9 +427,12 @@ pub async fn change_profile_password(
   let new_key = derive_profile_key(&new_password, &new_salt).map_err(err_internal)?;
   rekey_profile_dir(&old_key, &new_key, &dir).map_err(err_internal)?;
 
-  profile.encryption_salt = Some(new_salt);
-  ProfileManager::instance()
-    .save_profile(&profile)
+  profile = ProfileManager::instance()
+    .mutate_profile(&id.to_string(), move |latest| {
+      latest.encryption_salt = Some(new_salt);
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
     .map_err(err_internal)?;
 
   drop_cached_key(&id);
@@ -493,10 +499,13 @@ pub async fn remove_profile_password(profile_id: String, password: String) -> Re
     );
   }
 
-  profile.password_protected = false;
-  profile.encryption_salt = None;
-  ProfileManager::instance()
-    .save_profile(&profile)
+  profile = ProfileManager::instance()
+    .mutate_profile(&id.to_string(), |latest| {
+      latest.password_protected = false;
+      latest.encryption_salt = None;
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
     .map_err(err_internal)?;
 
   drop_cached_key(&id);

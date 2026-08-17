@@ -1,7 +1,6 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import type { ClipboardEvent } from "react";
 import { useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "sonner";
@@ -24,6 +23,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { translateBackendError } from "@/lib/backend-errors";
+import { pickParsedProxy } from "@/lib/proxy-string";
 import type { ProxyParseResult, StoredProxy } from "@/types";
 import { RippleButton } from "./ui/ripple";
 
@@ -203,63 +203,47 @@ export function ProxyFormDialog({
     }
   }, [isSubmitting, onClose]);
 
-  // Paste a whole proxy string (host:port:user:pass, scheme://..., vless://...)
-  // into the host field and let the Rust parser fill the form. A string without
-  // a colon is a plain hostname and pastes normally.
-  const handleProxyStringPaste = useCallback(
-    (e: ClipboardEvent<HTMLInputElement>) => {
-      const text = e.clipboardData.getData("text").trim();
-      if (!text.includes(":")) {
+  // Proxies are copied around as one string — `socks5://user:pass@host:1080`,
+  // `host:1080:user:pass`, and a dozen variants of both — so a paste into any
+  // one field is almost never meant for that field alone. Hand the clipboard to
+  // the same Rust parser the import dialog uses and spread the result across
+  // the form. The default paste is left alone until the answer comes back, so a
+  // string that isn't a proxy (a hostname, a port) lands where it was dropped.
+  const handleProxyPaste = useCallback(
+    (event: React.ClipboardEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+      const content = event.clipboardData.getData("text").trim();
+      if (!content) {
         return;
       }
-      e.preventDefault();
-      void (async () => {
-        try {
-          const results = await invoke<ProxyParseResult[]>(
-            "parse_txt_proxies",
-            {
-              content: text,
-            },
-          );
-          const first = results[0];
-          if (!first || first.status === "invalid") {
-            setForm((prev) => ({ ...prev, host: text }));
+
+      // Captured before the browser applies the paste, so a proxy string
+      // dropped into the empty name field names the proxy after its endpoint
+      // instead of keeping the raw line.
+      const nameBeforePaste = form.name.trim();
+      const proxyTypeBeforePaste = form.proxy_type;
+
+      void invoke<ProxyParseResult[]>("parse_txt_proxies", { content })
+        .then((results) => {
+          const parsed = pickParsedProxy(results, proxyTypeBeforePaste);
+          if (!parsed) {
             return;
           }
-          if (first.status === "ambiguous") {
-            // Prefer host:port:user:pass over user:pass:host:port.
-            const parts = first.line.split(":");
-            if (parts.length !== 4) {
-              setForm((prev) => ({ ...prev, host: text }));
-              return;
-            }
-            setForm((prev) => ({
-              ...prev,
-              name: prev.name.trim() ? prev.name : parts[0],
-              host: parts[0],
-              port: Number.parseInt(parts[1], 10) || prev.port,
-              username: parts[2],
-              password: parts[3],
-            }));
-          } else {
-            setForm((prev) => ({
-              ...prev,
-              name: prev.name.trim() ? prev.name : first.host,
-              proxy_type: first.proxy_type,
-              host: first.host,
-              port: first.port,
-              username: first.username ?? "",
-              password: first.password ?? "",
-              vless_uri: first.vless_uri ?? prev.vless_uri,
-            }));
-          }
-          toast.success(t("proxies.form.pasteFilled"));
-        } catch {
-          setForm((prev) => ({ ...prev, host: text }));
-        }
-      })();
+          setForm((previous) => ({
+            ...previous,
+            name: nameBeforePaste || `${parsed.host}:${parsed.port}`,
+            proxy_type: parsed.proxy_type,
+            host: parsed.host,
+            port: parsed.port,
+            username: parsed.username ?? "",
+            password: parsed.password ?? "",
+            vless_uri: parsed.vless_uri ?? "",
+          }));
+        })
+        .catch((error: unknown) => {
+          console.error("Failed to parse pasted proxy:", error);
+        });
     },
-    [t],
+    [form.name, form.proxy_type],
   );
 
   const isVless = form.proxy_type === "vless";
@@ -319,6 +303,7 @@ export function ProxyFormDialog({
               onChange={(e) => {
                 setForm({ ...form, name: e.target.value });
               }}
+              onPaste={handleProxyPaste}
               placeholder={t("proxies.form.namePlaceholder")}
               disabled={isSubmitting}
             />
@@ -363,6 +348,7 @@ export function ProxyFormDialog({
                 onChange={(e) => {
                   setForm({ ...form, vless_uri: e.target.value });
                 }}
+                onPaste={handleProxyPaste}
                 placeholder={t("proxies.form.vlessUriPlaceholder")}
                 disabled={isSubmitting}
                 aria-invalid={hasInvalidVlessUri}
@@ -397,7 +383,7 @@ export function ProxyFormDialog({
                     onChange={(e) => {
                       setForm({ ...form, host: e.target.value });
                     }}
-                    onPaste={handleProxyStringPaste}
+                    onPaste={handleProxyPaste}
                     placeholder={t("proxies.form.hostPlaceholder")}
                     disabled={isSubmitting}
                   />
@@ -415,6 +401,7 @@ export function ProxyFormDialog({
                         port: Number.parseInt(e.target.value, 10) || 0,
                       });
                     }}
+                    onPaste={handleProxyPaste}
                     placeholder={t("proxies.form.portPlaceholder")}
                     min="1"
                     max="65535"

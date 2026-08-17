@@ -7,7 +7,7 @@ use crate::tag_manager::TAG_MANAGER;
 use axum::{
   extract::{
     ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
-    Path, Query, State,
+    DefaultBodyLimit, Path, Query, State,
   },
   http::{header, HeaderMap, Method, StatusCode},
   middleware::{self, Next},
@@ -41,6 +41,10 @@ pub struct ApiProfile {
   pub is_running: bool,
   pub proxy_bypass_rules: Vec<String>,
   pub vpn_id: Option<String>,
+  /// Extension group loaded into the browser at launch. Settable via
+  /// `PUT /v1/profiles/{id}`; exposed here so a caller can read back what it
+  /// set instead of having to go through the desktop app.
+  pub extension_group_id: Option<String>,
   pub clear_on_close: bool,
   /// Cloud sync mode: `"Disabled"`, `"Regular"` or `"Encrypted"`.
   /// Settable via `PUT /v1/profiles/{id}`; exposed here so a caller can read
@@ -56,6 +60,12 @@ pub struct ApiProfile {
   /// Such a profile cannot be launched locally, and must only ever run on a
   /// remote host of its own OS — Chromium profile state is OS-specific.
   pub is_cross_os: bool,
+  /// The fingerprint operating system set at creation via `wayfern_config.os`
+  /// (`"windows"`, `"macos"`, `"linux"`, `"android"` or `"ios"`), or `null`
+  /// when the fingerprint was generated for the host. This is what the browser
+  /// reports to sites; `host_os` is the machine the profile was created on and
+  /// is a different thing.
+  pub fingerprint_os: Option<String>,
 }
 
 impl From<&crate::profile::types::BrowserProfile> for ApiProfile {
@@ -78,11 +88,13 @@ impl From<&crate::profile::types::BrowserProfile> for ApiProfile {
       is_running: profile.process_id.is_some(),
       proxy_bypass_rules: profile.proxy_bypass_rules.clone(),
       vpn_id: profile.vpn_id.clone(),
+      extension_group_id: profile.extension_group_id.clone(),
       clear_on_close: profile.clear_on_close,
       sync_mode: format!("{:?}", profile.sync_mode),
       cloud_sync_enabled: profile.is_sync_enabled(),
       host_os: profile.resolved_os().map(|os| os.to_string()),
       is_cross_os: profile.is_cross_os(),
+      fingerprint_os: profile.wayfern_config.as_ref().and_then(|c| c.os.clone()),
     }
   }
 }
@@ -409,6 +421,59 @@ struct ImportCookiesResponse {
   errors: Vec<String>,
 }
 
+/// Add an extension from exactly one source: an uploaded payload
+/// (`file_name` together with `file_data_base64`), or `source_path` on the
+/// machine running Donut. Supplying both, or neither, is a 400.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateExtensionRequest {
+  /// Display name. Optional — the manifest's own name wins when it has one,
+  /// and a blank name is only rejected when the manifest has none either.
+  pub name: Option<String>,
+  /// Name of the uploaded file. Its suffix picks the type: `.crx` or `.zip`.
+  pub file_name: Option<String>,
+  /// Payload bytes, standard base64. Only meaningful with `file_name`.
+  pub file_data_base64: Option<String>,
+  /// Path on this machine: a `.crx`/`.zip`, or an unpacked extension
+  /// directory holding a top-level `manifest.json`.
+  pub source_path: Option<String>,
+  /// Load a `source_path` directory in place instead of copying it into the
+  /// store, so edits to the folder apply on the next browser start. Directory
+  /// sources only, and a linked extension never syncs.
+  pub link: Option<bool>,
+}
+
+/// Replace an extension's payload, rename it, or both. Every field is
+/// optional, but a request that carries neither a name nor a source has
+/// nothing to do and is a 400.
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateExtensionRequest {
+  /// New display name.
+  pub name: Option<String>,
+  /// Name of the replacement upload. Its suffix picks the type: `.crx` or `.zip`.
+  pub file_name: Option<String>,
+  /// Replacement payload bytes, standard base64. Only meaningful with `file_name`.
+  pub file_data_base64: Option<String>,
+  /// Path on this machine to re-import from: a `.crx`/`.zip`, or an unpacked
+  /// extension directory.
+  pub source_path: Option<String>,
+  /// Load a `source_path` directory in place instead of copying it in.
+  pub link: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct CreateExtensionGroupRequest {
+  pub name: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateExtensionGroupRequest {
+  /// New group name.
+  pub name: Option<String>,
+  /// Replaces the whole membership list. Omit to leave it untouched; use the
+  /// `/extensions/{extension_id}` sub-routes to add or remove one member.
+  pub extension_ids: Option<Vec<String>>,
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 struct BatchRunRequest {
   /// Profile IDs to launch.
@@ -554,9 +619,17 @@ struct ImportProxiesResponse {
     update_vpn,
     delete_vpn,
     get_extensions,
-    get_extension_groups,
+    create_extension_api,
+    get_extension_api,
+    update_extension_api,
     delete_extension_api,
+    get_extension_groups,
+    create_extension_group_api,
+    get_extension_group_api,
+    update_extension_group_api,
     delete_extension_group_api,
+    add_extension_to_group_api,
+    remove_extension_from_group_api,
     download_browser_api,
     get_browser_versions,
     check_browser_downloaded,
@@ -617,6 +690,12 @@ struct ImportProxiesResponse {
     OpenUrlRequest,
     ImportCookiesRequest,
     ImportCookiesResponse,
+    CreateExtensionRequest,
+    UpdateExtensionRequest,
+    CreateExtensionGroupRequest,
+    UpdateExtensionGroupRequest,
+    crate::extension_manager::Extension,
+    crate::extension_manager::ExtensionGroup,
     ProxySettings,
     DetectedProfilesResponse,
     ImportProfilesRequest,
@@ -627,6 +706,7 @@ struct ImportProxiesResponse {
     crate::profile_importer::DuplicateStrategy,
     crate::profile_importer::ProfileImportItemResult,
     crate::profile_importer::ProfileImportBatchResult,
+    crate::profile_import::report::ProfileImportReport,
   )),
   tags(
     (name = "profiles", description = "Profile management endpoints"),
@@ -830,15 +910,37 @@ fn build_v1_router() -> Router<ApiServerState> {
     .routes(routes!(import_vpn))
     .routes(routes!(export_vpn))
     .routes(routes!(get_vpn, update_vpn, delete_vpn))
-    .routes(routes!(get_extensions))
-    .routes(routes!(delete_extension_api))
-    .routes(routes!(get_extension_groups))
-    .routes(routes!(delete_extension_group_api))
+    .routes(routes!(get_extension_groups, create_extension_group_api))
+    .routes(routes!(
+      get_extension_group_api,
+      update_extension_group_api,
+      delete_extension_group_api
+    ))
+    .routes(routes!(
+      add_extension_to_group_api,
+      remove_extension_from_group_api
+    ))
     .routes(routes!(download_browser_api))
     .routes(routes!(get_browser_versions))
     .routes(routes!(check_browser_downloaded))
     .split_for_parts();
-  routes
+
+  // The two paths that carry an extension payload, kept apart so the raised
+  // body limit reaches them and nothing else. Axum's 2 MiB default is smaller
+  // than plenty of real `.crx` files, and a create that 413s before the
+  // handler runs is indistinguishable from a broken endpoint. The GET and
+  // DELETE on these paths ride along because a limit has to be attached per
+  // path, and neither reads a body.
+  let (extension_payload_routes, _) = OpenApiRouter::new()
+    .routes(routes!(get_extensions, create_extension_api))
+    .routes(routes!(
+      get_extension_api,
+      update_extension_api,
+      delete_extension_api
+    ))
+    .split_for_parts();
+
+  routes.merge(extension_payload_routes.layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
 }
 
 // Terms and Conditions check middleware
@@ -1132,6 +1234,11 @@ fn manager_error_response(err: impl std::fmt::Display) -> (StatusCode, String) {
     || lower.contains("not supported on your platform")
     || lower.contains("is not downloaded")
     || lower.contains("terms and conditions")
+    // Extension-group compatibility: a group holding a Firefox-only add-on,
+    // or a browser that takes no extensions at all. Both are a caller pairing
+    // two things that don't go together, not a fault of this machine.
+    || lower.contains("is not compatible with")
+    || lower.contains("not supported for browser")
   {
     StatusCode::BAD_REQUEST
   } else {
@@ -1227,15 +1334,19 @@ async fn get_profile(
 ///   locally (this endpoint does not download new versions); 400 if none is.
 /// - Omitting the matching `wayfern_config`, or passing an
 ///   empty object `{}`, generates a fresh fingerprint automatically.
+/// - `wayfern_config.os` picks the fingerprint OS (`"windows"`, `"macos"`,
+///   `"linux"`, `"android"`, `"ios"`). Omit it to match the host. Any other
+///   OS is cross-OS spoofing and needs an active Pro plan; 402 otherwise.
+///   A `wayfern_config` that fails to parse is a 400, never a silent default.
 #[utoipa::path(
   post,
   path = "/v1/profiles",
   request_body = CreateProfileRequest,
   responses(
     (status = 200, description = "Profile created successfully", body = ApiProfileResponse),
-    (status = 400, description = "Invalid browser, or no downloaded version available"),
+    (status = 400, description = "Invalid browser, invalid wayfern_config, or no downloaded version available"),
     (status = 401, description = "Unauthorized"),
-    (status = 402, description = "Selected proxy requires payment"),
+    (status = 402, description = "Selected proxy requires payment, or a cross-OS fingerprint requires Pro"),
     (status = 500, description = "Internal server error")
   ),
   security(
@@ -1291,12 +1402,32 @@ async fn create_profile(
     }
   };
 
-  // Parse wayfern config if provided
-  let wayfern_config = if let Some(config) = &request.wayfern_config {
-    serde_json::from_value(config.clone()).ok()
-  } else {
-    None
+  // Parse wayfern config if provided. A malformed config is a 400, never a
+  // silent fallback: swallowing it here produced a host-OS profile from a
+  // request that explicitly asked for another OS, with a 200 and no diagnostic.
+  let wayfern_config: Option<crate::wayfern_manager::WayfernConfig> = match &request.wayfern_config
+  {
+    Some(config) => Some(serde_json::from_value(config.clone()).map_err(|e| {
+      (
+        StatusCode::BAD_REQUEST,
+        format!("Invalid wayfern_config: {e}"),
+      )
+    })?),
+    None => None,
   };
+
+  // Cross-OS fingerprints are a paid capability. The Tauri command, the
+  // importer and MCP each check this; REST did not, so the restriction was
+  // bypassable through this endpoint alone.
+  if !crate::cloud_auth::CLOUD_AUTH
+    .is_fingerprint_os_allowed(wayfern_config.as_ref().and_then(|c| c.os.as_deref()))
+    .await
+  {
+    return Err((
+      StatusCode::PAYMENT_REQUIRED,
+      serde_json::json!({ "code": "FINGERPRINT_REQUIRES_PRO" }).to_string(),
+    ));
+  }
 
   // Reject a dead/unreachable proxy or VPN before creating the profile. A 402
   // (expired proxy subscription) maps to 402; anything else is a 400.
@@ -1477,6 +1608,27 @@ async fn update_profile(
     } else {
       Some(extension_group_id)
     };
+    // Assigning a group that does not exist, or one holding an extension this
+    // profile's browser cannot load, fails at launch instead of here unless it
+    // is checked now — which is what the Tauri and MCP paths already do.
+    if let Some(group_id) = ext_group.as_deref() {
+      let browser = {
+        let profiles = profile_manager
+          .list_profiles()
+          .map_err(manager_error_response)?;
+        profiles
+          .iter()
+          .find(|p| p.id.to_string() == id)
+          .map(|p| p.browser.clone())
+          .ok_or_else(|| {
+            (
+              StatusCode::NOT_FOUND,
+              format!("Profile with ID '{id}' not found"),
+            )
+          })?
+      };
+      with_extension_manager(|mgr| mgr.validate_group_compatibility(group_id, &browser))?;
+    }
     if let Err(e) = profile_manager.update_profile_extension_group(&id, ext_group) {
       return Err(manager_error_response(e));
     }
@@ -2223,44 +2375,214 @@ async fn delete_vpn(
 
 // Extension API endpoints
 
+/// Take the extension store once, in one place, so a poisoned lock answers 500
+/// instead of panicking the request thread, and every handler classifies the
+/// manager's `{"code": ...}` errors identically.
+fn with_extension_manager<T>(
+  action: impl FnOnce(
+    &crate::extension_manager::ExtensionManager,
+  ) -> Result<T, Box<dyn std::error::Error>>,
+) -> Result<T, (StatusCode, String)> {
+  let manager = crate::extension_manager::EXTENSION_MANAGER
+    .lock()
+    .map_err(|_| {
+      (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "extension manager unavailable".to_string(),
+      )
+    })?;
+  action(&manager).map_err(manager_error_response)
+}
+
+/// The payload an extension write carries, once the request body has been
+/// reduced to the single source it is allowed to name.
+#[derive(Debug)]
+enum ExtensionSource {
+  Upload {
+    file_name: String,
+    data: Vec<u8>,
+  },
+  LocalPath {
+    path: std::path::PathBuf,
+    link: bool,
+  },
+}
+
+fn extension_request_error(code: &str) -> (StatusCode, String) {
+  (
+    StatusCode::BAD_REQUEST,
+    serde_json::json!({ "code": code }).to_string(),
+  )
+}
+
+/// Reduce a create/update body to the one source it names. `Ok(None)` means it
+/// named none, which only an update (a plain rename) may do.
+fn resolve_extension_source(
+  file_name: Option<String>,
+  file_data_base64: Option<String>,
+  source_path: Option<String>,
+  link: Option<bool>,
+) -> Result<Option<ExtensionSource>, (StatusCode, String)> {
+  use base64::Engine as _;
+
+  let upload = match (file_name, file_data_base64) {
+    (Some(name), Some(encoded)) => Some((name, encoded)),
+    (None, None) => None,
+    // Half an upload is not a source: honouring it would mean storing an empty
+    // payload, or inventing a file name and with it a file type.
+    _ => return Err(extension_request_error("EXTENSION_SOURCE_REQUIRED")),
+  };
+  let path = source_path.filter(|p| !p.trim().is_empty());
+  let link = link.unwrap_or(false);
+
+  match (upload, path) {
+    // Two sources is as unanswerable as none: there is no rule for which one
+    // the caller meant, so neither is guessed at.
+    (Some(_), Some(_)) => Err(extension_request_error("EXTENSION_SOURCE_REQUIRED")),
+    (Some((file_name, encoded)), None) => {
+      if link {
+        // Linking means "keep loading the folder where it already is". An
+        // uploaded archive has no folder on this machine to point at.
+        return Err(extension_request_error("EXTENSION_LINK_REQUIRES_DIRECTORY"));
+      }
+      let data = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| extension_request_error("EXTENSION_INVALID_BASE64"))?;
+      Ok(Some(ExtensionSource::Upload { file_name, data }))
+    }
+    (None, Some(path)) => Ok(Some(ExtensionSource::LocalPath {
+      path: std::path::PathBuf::from(path),
+      link,
+    })),
+    (None, None) => Ok(None),
+  }
+}
+
 #[utoipa::path(
   get,
   path = "/v1/extensions",
   responses(
-    (status = 200, description = "List of extensions"),
+    (status = 200, description = "List of extensions", body = Vec<crate::extension_manager::Extension>),
     (status = 401, description = "Unauthorized"),
+    (status = 500, description = "Internal server error"),
   ),
   security(("bearer_auth" = [])),
   tag = "extensions"
 )]
 async fn get_extensions(
   State(_state): State<ApiServerState>,
-) -> Result<Json<Vec<crate::extension_manager::Extension>>, StatusCode> {
-  let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
-  mgr
-    .list_extensions()
-    .map(Json)
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+) -> Result<Json<Vec<crate::extension_manager::Extension>>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.list_extensions()).map(Json)
 }
 
+/// Add an extension.
+///
+/// The body names exactly one source:
+/// - `file_name` plus `file_data_base64` uploads a `.crx`/`.zip`.
+/// - `source_path` reads a `.crx`/`.zip`, or packs an unpacked extension
+///   directory, from the machine running Donut. `link: true` loads that
+///   directory in place instead, so edits apply on the next browser start;
+///   a linked extension is machine-local and never syncs.
+///
+/// `name` may be omitted: the manifest's own name is preferred anyway, and it
+/// is only an error when the manifest has none either.
 #[utoipa::path(
-  get,
-  path = "/v1/extension-groups",
+  post,
+  path = "/v1/extensions",
+  request_body = CreateExtensionRequest,
   responses(
-    (status = 200, description = "List of extension groups"),
+    (status = 201, description = "Extension added", body = crate::extension_manager::Extension),
+    (status = 400, description = "No source, two sources, undecodable payload, unsupported file type, or an unreadable unpacked directory"),
     (status = 401, description = "Unauthorized"),
+    (status = 404, description = "source_path does not exist"),
+    (status = 500, description = "Internal server error"),
   ),
   security(("bearer_auth" = [])),
   tag = "extensions"
 )]
-async fn get_extension_groups(
-  State(_state): State<ApiServerState>,
-) -> Result<Json<Vec<crate::extension_manager::ExtensionGroup>>, StatusCode> {
-  let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
-  mgr
-    .list_groups()
-    .map(Json)
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+async fn create_extension_api(
+  Json(request): Json<CreateExtensionRequest>,
+) -> Result<(StatusCode, Json<crate::extension_manager::Extension>), (StatusCode, String)> {
+  let source = resolve_extension_source(
+    request.file_name,
+    request.file_data_base64,
+    request.source_path,
+    request.link,
+  )?
+  .ok_or_else(|| extension_request_error("EXTENSION_SOURCE_REQUIRED"))?;
+  let name = request.name.unwrap_or_default();
+
+  let extension = with_extension_manager(|mgr| match source {
+    ExtensionSource::Upload { file_name, data } => mgr.add_extension(name, file_name, data),
+    ExtensionSource::LocalPath { path, link } => mgr.add_extension_from_path(name, &path, link),
+  })?;
+  Ok((StatusCode::CREATED, Json(extension)))
+}
+
+#[utoipa::path(
+  get,
+  path = "/v1/extensions/{id}",
+  params(("id" = String, Path, description = "Extension ID")),
+  responses(
+    (status = 200, description = "Extension", body = crate::extension_manager::Extension),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension not found"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn get_extension_api(
+  Path(id): Path<String>,
+) -> Result<Json<crate::extension_manager::Extension>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.get_extension(&id)).map(Json)
+}
+
+/// Replace an extension's payload, rename it, or both.
+///
+/// Sources are the same as on create, and every field is optional — but a body
+/// carrying neither a name nor a source asks for nothing and is refused rather
+/// than answered with an unchanged extension.
+#[utoipa::path(
+  put,
+  path = "/v1/extensions/{id}",
+  params(("id" = String, Path, description = "Extension ID")),
+  request_body = UpdateExtensionRequest,
+  responses(
+    (status = 200, description = "Extension updated", body = crate::extension_manager::Extension),
+    (status = 400, description = "Nothing to change, two sources, undecodable payload, unsupported file type, or an unreadable unpacked directory"),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension not found, or source_path does not exist"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn update_extension_api(
+  Path(id): Path<String>,
+  Json(request): Json<UpdateExtensionRequest>,
+) -> Result<Json<crate::extension_manager::Extension>, (StatusCode, String)> {
+  let name = request.name;
+  let source = resolve_extension_source(
+    request.file_name,
+    request.file_data_base64,
+    request.source_path,
+    request.link,
+  )?;
+  if name.is_none() && source.is_none() {
+    return Err(extension_request_error("EXTENSION_SOURCE_REQUIRED"));
+  }
+
+  with_extension_manager(|mgr| match source {
+    Some(ExtensionSource::Upload { file_name, data }) => {
+      mgr.update_extension(&id, name, Some(file_name), Some(data))
+    }
+    Some(ExtensionSource::LocalPath { path, link }) => {
+      mgr.update_extension_from_path(&id, name, &path, link)
+    }
+    None => mgr.update_extension(&id, name, None, None),
+  })
+  .map(Json)
 }
 
 #[utoipa::path(
@@ -2280,11 +2602,88 @@ async fn delete_extension_api(
   Path(id): Path<String>,
   State(state): State<ApiServerState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-  let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
-  mgr
-    .delete_extension(&state.app_handle, &id)
+  with_extension_manager(|mgr| mgr.delete_extension(&state.app_handle, &id))
     .map(|_| StatusCode::NO_CONTENT)
-    .map_err(manager_error_response)
+}
+
+#[utoipa::path(
+  get,
+  path = "/v1/extension-groups",
+  responses(
+    (status = 200, description = "List of extension groups", body = Vec<crate::extension_manager::ExtensionGroup>),
+    (status = 401, description = "Unauthorized"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn get_extension_groups(
+  State(_state): State<ApiServerState>,
+) -> Result<Json<Vec<crate::extension_manager::ExtensionGroup>>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.list_groups()).map(Json)
+}
+
+#[utoipa::path(
+  post,
+  path = "/v1/extension-groups",
+  request_body = CreateExtensionGroupRequest,
+  responses(
+    (status = 201, description = "Extension group created", body = crate::extension_manager::ExtensionGroup),
+    (status = 400, description = "Empty or duplicate name"),
+    (status = 401, description = "Unauthorized"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn create_extension_group_api(
+  Json(request): Json<CreateExtensionGroupRequest>,
+) -> Result<(StatusCode, Json<crate::extension_manager::ExtensionGroup>), (StatusCode, String)> {
+  let group = with_extension_manager(|mgr| mgr.create_group(request.name))?;
+  Ok((StatusCode::CREATED, Json(group)))
+}
+
+#[utoipa::path(
+  get,
+  path = "/v1/extension-groups/{id}",
+  params(("id" = String, Path, description = "Extension Group ID")),
+  responses(
+    (status = 200, description = "Extension group", body = crate::extension_manager::ExtensionGroup),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension group not found"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn get_extension_group_api(
+  Path(id): Path<String>,
+) -> Result<Json<crate::extension_manager::ExtensionGroup>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.get_group(&id)).map(Json)
+}
+
+/// Rename a group, replace its whole membership list, or both. `extension_ids`
+/// is a replacement, not an addition — omit it to leave membership alone.
+#[utoipa::path(
+  put,
+  path = "/v1/extension-groups/{id}",
+  params(("id" = String, Path, description = "Extension Group ID")),
+  request_body = UpdateExtensionGroupRequest,
+  responses(
+    (status = 200, description = "Extension group updated", body = crate::extension_manager::ExtensionGroup),
+    (status = 400, description = "Empty or duplicate name"),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension group not found"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn update_extension_group_api(
+  Path(id): Path<String>,
+  Json(request): Json<UpdateExtensionGroupRequest>,
+) -> Result<Json<crate::extension_manager::ExtensionGroup>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.update_group(&id, request.name, request.extension_ids)).map(Json)
 }
 
 #[utoipa::path(
@@ -2304,11 +2703,55 @@ async fn delete_extension_group_api(
   Path(id): Path<String>,
   State(state): State<ApiServerState>,
 ) -> Result<StatusCode, (StatusCode, String)> {
-  let mgr = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
-  mgr
-    .delete_group(&state.app_handle, &id)
+  with_extension_manager(|mgr| mgr.delete_group(&state.app_handle, &id))
     .map(|_| StatusCode::NO_CONTENT)
-    .map_err(manager_error_response)
+}
+
+/// Add one extension to a group. Adding a member it already has is a no-op,
+/// not an error, so a client re-running its setup converges.
+#[utoipa::path(
+  post,
+  path = "/v1/extension-groups/{id}/extensions/{extension_id}",
+  params(
+    ("id" = String, Path, description = "Extension Group ID"),
+    ("extension_id" = String, Path, description = "Extension ID to add"),
+  ),
+  responses(
+    (status = 200, description = "Extension group with the extension added", body = crate::extension_manager::ExtensionGroup),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension or extension group not found"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn add_extension_to_group_api(
+  Path((id, extension_id)): Path<(String, String)>,
+) -> Result<Json<crate::extension_manager::ExtensionGroup>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.add_extension_to_group(&id, &extension_id)).map(Json)
+}
+
+/// Remove one extension from a group. The extension itself is untouched.
+#[utoipa::path(
+  delete,
+  path = "/v1/extension-groups/{id}/extensions/{extension_id}",
+  params(
+    ("id" = String, Path, description = "Extension Group ID"),
+    ("extension_id" = String, Path, description = "Extension ID to remove"),
+  ),
+  responses(
+    (status = 200, description = "Extension group with the extension removed", body = crate::extension_manager::ExtensionGroup),
+    (status = 401, description = "Unauthorized"),
+    (status = 404, description = "Extension group not found"),
+    (status = 500, description = "Internal server error"),
+  ),
+  security(("bearer_auth" = [])),
+  tag = "extensions"
+)]
+async fn remove_extension_from_group_api(
+  Path((id, extension_id)): Path<(String, String)>,
+) -> Result<Json<crate::extension_manager::ExtensionGroup>, (StatusCode, String)> {
+  with_extension_manager(|mgr| mgr.remove_extension_from_group(&id, &extension_id)).map(Json)
 }
 
 // API Handler - Run Profile with Remote Debugging
@@ -3768,10 +4211,19 @@ async fn import_profiles_api(
   State(state): State<ApiServerState>,
   Json(request): Json<ImportProfilesRequest>,
 ) -> Result<Json<crate::profile_importer::ProfileImportBatchResult>, (StatusCode, String)> {
-  let wayfern_config: Option<crate::wayfern_manager::WayfernConfig> = request
-    .wayfern_config
-    .as_ref()
-    .and_then(|config| serde_json::from_value(config.clone()).ok());
+  // A malformed config is a 400. Dropping it silently also dropped the `os`
+  // it carried, which made `is_fingerprint_os_allowed(None)` return true and
+  // bypassed the Pro gate below while generating host-OS fingerprints.
+  let wayfern_config: Option<crate::wayfern_manager::WayfernConfig> =
+    match request.wayfern_config.as_ref() {
+      Some(config) => Some(serde_json::from_value(config.clone()).map_err(|e| {
+        (
+          StatusCode::BAD_REQUEST,
+          format!("Invalid wayfern_config: {e}"),
+        )
+      })?),
+      None => None,
+    };
 
   // The Pro gate for fingerprint OS spoofing lives inside import_profiles, so
   // every surface inherits it; manager_error_response maps the code to 402.
@@ -4148,6 +4600,55 @@ mod tests {
   }
 
   #[test]
+  fn wayfern_config_os_survives_the_untyped_request_field() {
+    // `wayfern_config` arrives as an untyped Value and is only turned into a
+    // WayfernConfig inside the handler. That second hop is where an `os` used
+    // to be lost, so assert it round-trips.
+    let json = r#"{"name": "p", "browser": "wayfern", "wayfern_config": {"os": "android"}}"#;
+    let parsed: CreateProfileRequest = serde_json::from_str(json).expect("body must parse");
+    let config: crate::wayfern_manager::WayfernConfig =
+      serde_json::from_value(parsed.wayfern_config.expect("config present"))
+        .expect("a well-formed config must parse");
+    assert_eq!(config.os.as_deref(), Some("android"));
+  }
+
+  #[test]
+  fn malformed_wayfern_config_is_an_error_not_a_default() {
+    // `fingerprint` is a JSON-encoded string, so passing an object fails to
+    // parse. The handler must surface that as a 400: previously `.ok()` threw
+    // the whole config away, dropping the caller's `os` with it and returning
+    // a host-OS profile with 200 and no diagnostic.
+    let json = r#"{"os": "android", "fingerprint": {"platform": "Linux armv81"}}"#;
+    let value: serde_json::Value = serde_json::from_str(json).expect("value parses");
+    let parsed = serde_json::from_value::<crate::wayfern_manager::WayfernConfig>(value);
+    assert!(
+      parsed.is_err(),
+      "an object fingerprint must not silently deserialize"
+    );
+  }
+
+  #[test]
+  fn api_profile_exposes_the_fingerprint_os_separately_from_host_os() {
+    // host_os is the machine; fingerprint_os is what the browser reports. A
+    // cross-OS profile has to be distinguishable through the API alone.
+    let spec = ApiDoc::openapi();
+    let spec = serde_json::to_value(&spec).expect("spec serializes");
+    let props = &spec["components"]["schemas"]["ApiProfile"]["properties"];
+    assert!(
+      props.get("fingerprint_os").is_some(),
+      "ApiProfile must publish fingerprint_os"
+    );
+    let required = spec["components"]["schemas"]["ApiProfile"]["required"]
+      .as_array()
+      .cloned()
+      .unwrap_or_default();
+    assert!(
+      !required.iter().any(|r| r == "fingerprint_os"),
+      "fingerprint_os is nullable and must stay optional"
+    );
+  }
+
+  #[test]
   fn create_profile_browser_validation_matches_supported_engines() {
     // The handler rejects anything that isn't a launchable engine; this is the
     // same predicate it uses, kept in lockstep with MCP's create_profile.
@@ -4214,6 +4715,21 @@ mod tests {
       (Method::GET, "/v1/remote-hours"),
       // A run id is required; the collection DELETE is not a route.
       (Method::DELETE, "/v1/cookie-bot/runs/"),
+      // Extension writes touch this machine's own store. They start no
+      // browser, so metering them would spend an automation client's quota on
+      // uploading a `.crx`.
+      (Method::POST, "/v1/extensions"),
+      (Method::PUT, "/v1/extensions/extension-id"),
+      (Method::DELETE, "/v1/extensions/extension-id"),
+      (Method::POST, "/v1/extension-groups"),
+      (
+        Method::POST,
+        "/v1/extension-groups/group-id/extensions/extension-id",
+      ),
+      (
+        Method::DELETE,
+        "/v1/extension-groups/group-id/extensions/extension-id",
+      ),
     ] {
       assert!(
         !is_automation_request(&method, path),
@@ -4445,12 +4961,28 @@ mod tests {
     }
 
     let import_item = schema_required(&spec, "ImportProfileItem");
-    for field in ["proxy_id", "vpn_id", "browser_type"] {
+    for field in ["proxy_id", "vpn_id", "browser_type", "allow_running"] {
       assert!(
         !import_item.iter().any(|f| f == field),
         "{field} must be optional on import items, required list: {import_item:?}"
       );
     }
+
+    // The per-item report only exists for items that actually imported.
+    let import_result = schema_required(&spec, "ProfileImportItemResult");
+    assert!(
+      !import_result.iter().any(|f| f == "report"),
+      "report must be optional on import results, required list: {import_result:?}"
+    );
+
+    // `ProfileImportItemResult` references it, so a missing registration would
+    // leave a dangling $ref in the served spec.
+    assert!(
+      spec
+        .pointer("/components/schemas/ProfileImportReport")
+        .is_some(),
+      "ProfileImportReport must be registered in ApiDoc components"
+    );
 
     // A remote launch with no URL just opens the browser; forcing generated
     // clients to send one would make the common case the awkward one.
@@ -4536,6 +5068,44 @@ mod tests {
         "{field} must be optional on the quota, required list: {quota:?}"
       );
     }
+
+    // An extension arrives either as an upload or as a path, and its name is
+    // usually read from the manifest. Marking any one of these required would
+    // make a generated client send a field that contradicts the source it
+    // actually has.
+    for request in ["CreateExtensionRequest", "UpdateExtensionRequest"] {
+      let fields = schema_required(&spec, request);
+      assert!(
+        fields.is_empty(),
+        "every field of {request} must be optional, required list: {fields:?}"
+      );
+    }
+
+    let update_extension_group = schema_required(&spec, "UpdateExtensionGroupRequest");
+    for field in ["name", "extension_ids"] {
+      assert!(
+        !update_extension_group.iter().any(|f| f == field),
+        "{field} must be optional on a group update, required list: {update_extension_group:?}"
+      );
+    }
+
+    // A group cannot be created without one.
+    let create_extension_group = schema_required(&spec, "CreateExtensionGroupRequest");
+    assert!(
+      create_extension_group.iter().any(|f| f == "name"),
+      "name is required to create a group, required list: {create_extension_group:?}"
+    );
+
+    // `linked_path` is only set for an extension loaded in place, and every
+    // extension stored before unpacked support has neither it nor a
+    // `source_kind`, so a required marking would break reading them back.
+    let extension = schema_required(&spec, "Extension");
+    for field in ["linked_path", "version", "description", "author"] {
+      assert!(
+        !extension.iter().any(|f| f == field),
+        "{field} must be optional on an extension, required list: {extension:?}"
+      );
+    }
   }
 
   #[test]
@@ -4549,6 +5119,7 @@ mod tests {
     assert!(parsed.group_id.is_none());
     assert!(parsed.duplicate_strategy.is_none());
     assert_eq!(parsed.items[0].browser_type, "chromium");
+    assert_eq!(parsed.items[0].allow_running, None);
   }
 
   // The served /openapi.json comes from the hand-maintained ApiDoc `paths(...)`
@@ -4577,6 +5148,174 @@ mod tests {
     let (status, _) =
       manager_error_response(serde_json::json!({ "code": "PROFILE_LOCK_UNAVAILABLE" }).to_string());
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+  }
+
+  #[test]
+  fn a_rejected_extension_upload_is_the_callers_problem_not_a_server_fault() {
+    // Every one of these is something about the request: the wrong file type, a
+    // folder with no readable manifest, a link asked for on a file. Answering
+    // 500 would tell a client to retry a body that can never be accepted.
+    for code in [
+      "EXTENSION_UNSUPPORTED_FILE_TYPE",
+      "EXTENSION_NOT_A_DIRECTORY",
+      "EXTENSION_MANIFEST_MISSING",
+      "EXTENSION_MANIFEST_INVALID",
+      "EXTENSION_DIR_TOO_LARGE",
+      "EXTENSION_PATH_HAS_COMMA",
+      "EXTENSION_LINK_REQUIRES_DIRECTORY",
+      "NAME_CANNOT_BE_EMPTY",
+    ] {
+      let (status, body) = manager_error_response(serde_json::json!({ "code": code }).to_string());
+      assert_eq!(status, StatusCode::BAD_REQUEST, "{code} must be a 400");
+      assert!(body.contains(code), "{code} must reach the caller");
+    }
+
+    // A path that is not there is the one refusal that names a missing thing.
+    let (status, _) =
+      manager_error_response(serde_json::json!({ "code": "EXTENSION_DIR_NOT_FOUND" }).to_string());
+    assert_eq!(status, StatusCode::NOT_FOUND);
+  }
+
+  #[test]
+  fn an_incompatible_extension_group_is_refused_rather_than_reported_as_broken() {
+    // `validate_group_compatibility` answers in prose, so both of its refusals
+    // fell through to 500 — which reads as "this server is broken" for what is
+    // really a group the caller cannot put on that profile.
+    for message in [
+      "Extension 'uBlock' (crx) is not compatible with gecko browsers",
+      "Extensions are not supported for browser 'firefox'",
+    ] {
+      let (status, body) = manager_error_response(message);
+      assert_eq!(status, StatusCode::BAD_REQUEST, "{message} must be a 400");
+      assert_eq!(body, message, "the diagnostic must reach the caller");
+    }
+
+    // A group that is simply absent stays a 404.
+    let (status, _) = manager_error_response("Extension group with id 'gone' not found");
+    assert_eq!(status, StatusCode::NOT_FOUND);
+  }
+
+  #[test]
+  fn an_extension_write_names_exactly_one_source() {
+    use base64::Engine as _;
+
+    let encoded = base64::engine::general_purpose::STANDARD.encode(b"PK\x03\x04");
+
+    // An upload decodes to the bytes the caller sent.
+    match resolve_extension_source(
+      Some("ublock.crx".to_string()),
+      Some(encoded.clone()),
+      None,
+      None,
+    ) {
+      Ok(Some(ExtensionSource::Upload { file_name, data })) => {
+        assert_eq!(file_name, "ublock.crx");
+        assert_eq!(data, b"PK\x03\x04");
+      }
+      other => panic!("an upload must resolve to its bytes: {other:?}"),
+    }
+
+    // A path is taken as-is, and `link` rides with it.
+    match resolve_extension_source(None, None, Some("/srv/ext".to_string()), Some(true)) {
+      Ok(Some(ExtensionSource::LocalPath { path, link })) => {
+        assert_eq!(path, std::path::PathBuf::from("/srv/ext"));
+        assert!(link);
+      }
+      other => panic!("a path must resolve to a path: {other:?}"),
+    }
+
+    // Naming both sources has no answer: neither one is guessed at.
+    let both = resolve_extension_source(
+      Some("ublock.crx".to_string()),
+      Some(encoded.clone()),
+      Some("/srv/ext".to_string()),
+      None,
+    );
+    assert_eq!(
+      both.expect_err("two sources must be refused"),
+      extension_request_error("EXTENSION_SOURCE_REQUIRED")
+    );
+
+    // Half an upload is not a source. Storing an empty payload, or inventing a
+    // file name, would both produce an extension that never loads.
+    for half in [
+      (Some("ublock.crx".to_string()), None),
+      (None, Some(encoded.clone())),
+    ] {
+      let (file_name, data) = half;
+      assert_eq!(
+        resolve_extension_source(file_name, data, None, None)
+          .expect_err("half an upload must be refused"),
+        extension_request_error("EXTENSION_SOURCE_REQUIRED")
+      );
+    }
+
+    // Linking means "load the folder where it is"; an upload has no folder.
+    assert_eq!(
+      resolve_extension_source(
+        Some("ublock.crx".to_string()),
+        Some(encoded),
+        None,
+        Some(true)
+      )
+      .expect_err("a linked upload must be refused"),
+      extension_request_error("EXTENSION_LINK_REQUIRES_DIRECTORY")
+    );
+
+    // Undecodable base64 is named as such rather than reaching the store as an
+    // empty or truncated archive.
+    assert_eq!(
+      resolve_extension_source(
+        Some("ublock.crx".to_string()),
+        Some("not base64!!".to_string()),
+        None,
+        None
+      )
+      .expect_err("undecodable base64 must be refused"),
+      extension_request_error("EXTENSION_INVALID_BASE64")
+    );
+
+    // No source at all is legal on the wire — it is a rename, and only the
+    // update handler accepts it.
+    assert!(resolve_extension_source(None, None, None, None)
+      .expect("naming no source is not an error here")
+      .is_none());
+
+    // An empty string is not a path.
+    assert!(
+      resolve_extension_source(None, None, Some("  ".to_string()), None)
+        .expect("a blank path is not an error here")
+        .is_none()
+    );
+  }
+
+  #[test]
+  fn an_extension_update_that_asks_for_nothing_is_refused() {
+    // Every field is optional, so an empty body parses. Answering 200 with an
+    // untouched extension would tell a client its rename landed.
+    let empty: UpdateExtensionRequest =
+      serde_json::from_str("{}").expect("an empty update body must deserialize");
+    assert!(empty.name.is_none());
+    assert!(resolve_extension_source(
+      empty.file_name,
+      empty.file_data_base64,
+      empty.source_path,
+      empty.link
+    )
+    .expect("no source is not an error on update")
+    .is_none());
+  }
+
+  #[test]
+  fn creating_an_extension_needs_neither_a_name_nor_a_link() {
+    // The manifest's own name is preferred, so a caller uploading a `.crx`
+    // sends two fields and nothing else.
+    let minimal: CreateExtensionRequest =
+      serde_json::from_str(r#"{"file_name": "ublock.crx", "file_data_base64": "UEsDBA=="}"#)
+        .expect("a minimal create body must deserialize");
+    assert!(minimal.name.is_none());
+    assert!(minimal.link.is_none());
+    assert_eq!(minimal.file_name.as_deref(), Some("ublock.crx"));
   }
 
   #[test]
@@ -4656,6 +5395,7 @@ mod tests {
       "/v1/extension-groups",
       "/v1/extensions/{id}",
       "/v1/extension-groups/{id}",
+      "/v1/extension-groups/{id}/extensions/{extension_id}",
       "/v1/profiles/import",
       "/v1/profiles/import/detect",
       "/v1/proxies/import",
@@ -4694,6 +5434,26 @@ mod tests {
       ("/v1/cookie-bot/runs", "get"),
       ("/v1/cookie-bot/runs", "post"),
       ("/v1/cookie-bot/runs/{run_id}", "delete"),
+      // The extension surface is five paths carrying eleven methods, so it is
+      // the densest place in the router for one `routes!` to swallow another.
+      ("/v1/extensions", "get"),
+      ("/v1/extensions", "post"),
+      ("/v1/extensions/{id}", "get"),
+      ("/v1/extensions/{id}", "put"),
+      ("/v1/extensions/{id}", "delete"),
+      ("/v1/extension-groups", "get"),
+      ("/v1/extension-groups", "post"),
+      ("/v1/extension-groups/{id}", "get"),
+      ("/v1/extension-groups/{id}", "put"),
+      ("/v1/extension-groups/{id}", "delete"),
+      (
+        "/v1/extension-groups/{id}/extensions/{extension_id}",
+        "post",
+      ),
+      (
+        "/v1/extension-groups/{id}/extensions/{extension_id}",
+        "delete",
+      ),
     ] {
       assert!(
         paths[path].get(method).is_some(),
@@ -4758,6 +5518,14 @@ mod tests {
       "RemoteHoursQuota",
       "RemoteHoursMember",
       "RemoteHoursBreakdown",
+      // Neither extension type was registered while only the list and delete
+      // routes existed, so every extension response resolved to nothing.
+      "Extension",
+      "ExtensionGroup",
+      "CreateExtensionRequest",
+      "UpdateExtensionRequest",
+      "CreateExtensionGroupRequest",
+      "UpdateExtensionGroupRequest",
     ] {
       assert!(
         spec["components"]["schemas"][schema]["properties"].is_object(),
@@ -4788,6 +5556,15 @@ mod tests {
         "RemoteSessionState",
       ),
       ("/v1/remote-hours", "get", "200", "RemoteHoursQuota"),
+      ("/v1/extensions", "post", "201", "Extension"),
+      ("/v1/extensions/{id}", "put", "200", "Extension"),
+      ("/v1/extension-groups", "post", "201", "ExtensionGroup"),
+      (
+        "/v1/extension-groups/{id}/extensions/{extension_id}",
+        "post",
+        "200",
+        "ExtensionGroup",
+      ),
     ] {
       let reference =
         &paths[path][method]["responses"][status]["content"]["application/json"]["schema"]["$ref"];
@@ -4795,6 +5572,23 @@ mod tests {
         reference.as_str(),
         Some(format!("#/components/schemas/{schema}").as_str()),
         "{method} {path} {status} does not reference {schema}: {reference:?}"
+      );
+    }
+
+    // Both extension lists declared a 200 with no body at all, so a generated
+    // client got a call that returns nothing from a route that returns
+    // everything. Each must be an array of the same component its single-item
+    // route resolves to.
+    for (path, schema) in [
+      ("/v1/extensions", "Extension"),
+      ("/v1/extension-groups", "ExtensionGroup"),
+    ] {
+      let item = &paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        ["items"]["$ref"];
+      assert_eq!(
+        item.as_str(),
+        Some(format!("#/components/schemas/{schema}").as_str()),
+        "get {path} 200 is not a list of {schema}: {item:?}"
       );
     }
 
@@ -4858,6 +5652,29 @@ mod tests {
           .get("429")
           .is_none(),
         "a schedule write must not declare a 429: {method}"
+      );
+    }
+
+    // Extension writes launch nothing and lease nothing, so the limiter never
+    // sees them. A declared 429 would be a status the server cannot produce.
+    for (path, method) in [
+      ("/v1/extensions", "post"),
+      ("/v1/extensions/{id}", "put"),
+      ("/v1/extensions/{id}", "delete"),
+      ("/v1/extension-groups", "post"),
+      ("/v1/extension-groups/{id}", "put"),
+      (
+        "/v1/extension-groups/{id}/extensions/{extension_id}",
+        "post",
+      ),
+      (
+        "/v1/extension-groups/{id}/extensions/{extension_id}",
+        "delete",
+      ),
+    ] {
+      assert!(
+        paths[path][method]["responses"].get("429").is_none(),
+        "an extension write must not declare a 429: {method} {path}"
       );
     }
   }

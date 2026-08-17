@@ -187,7 +187,7 @@
       "copyLogsDescription": "最近のログを編集したバンドル（最大 5 MB）をコピーします。編集ではすべての種類の個人データを識別できないため、共有前に内容を確認してください。"
     },
     "disableAutoUpdates": "アプリの自動更新を無効にする",
-    "disableAutoUpdatesDescription": "Donut Browserの自動更新確認・インストールを無効にします。ブラウザの更新には影響しません。",
+    "disableAutoUpdatesDescription": "DONの自動更新確認・インストールを無効にします。ブラウザの更新には影響しません。",
     "keepDecryptedProfilesInRam": "復号済みプロファイルをRAMに保持",
     "keepDecryptedProfilesInRamDescription": "起動を高速化するため、パスワード保護されたプロファイルの復号済みコピーをRAMに保持します。ディスク上のコピーは常に暗号化されたままです。",
     "privacy": {
@@ -432,7 +432,9 @@
       "newVpn": "新しいVPN",
       "protocolCol": "プロトコル",
       "hostPort": "ホスト : ポート",
-      "title": "プロキシと VPN"
+      "title": "プロキシと VPN",
+      "cannotDelete_few": "削除できません: {{count}} プロファイルで使用中",
+      "cannotDelete_many": "削除できません: {{count}} プロファイルで使用中"
     },
     "add": "プロキシを追加",
     "edit": "プロキシを編集",
@@ -628,6 +630,7 @@
       "connectionSuccess": "接続に成功しました!",
       "serverError": "サーバーがエラーで応答しました",
       "connectFailed": "サーバーへの接続に失敗しました",
+      "storageEndpoint": "ストレージ: {{endpoint}}",
       "settingsSaved": "同期設定を保存しました",
       "saveFailed": "設定の保存に失敗しました",
       "disconnected": "同期を切断しました",
@@ -833,7 +836,11 @@
       "failedMessage": "Cookie のコピーに失敗しました: {{error}}",
       "copyButton_one": "{{count}} 件の Cookie をコピー",
       "copyButton_other": "{{count}} 件の Cookie をコピー",
-      "copyButtonEmpty": "Cookie をコピー"
+      "copyButtonEmpty": "Cookie をコピー",
+      "copyButton_few": "{{count}} 件の Cookie をコピー",
+      "copyButton_many": "{{count}} 件の Cookie をコピー",
+      "dialogDescription_few": "ソースプロファイルから {{count}} 件の選択されたプロファイルへ Cookie をコピーします。",
+      "dialogDescription_many": "ソースプロファイルから {{count}} 件の選択されたプロファイルへ Cookie をコピーします。"
     },
     "success": "Cookieが正常にコピーされました",
     "error": "Cookieのコピーに失敗しました",
@@ -1114,61 +1121,6 @@
     "mimeTypesJson": "MIME タイプ (JSON 配列)",
     "voicesJson": "音声 (JSON 配列)"
   },
-  "fingerprintAudit": {
-    "open": "フィンガープリントを監査",
-    "title": "フィンガープリント監査",
-    "description": "保存されたフィンガープリントと、実行中の Wayfern ページから観測できる値を比較します。",
-    "run": "監査を実行",
-    "running": "監査を実行中…",
-    "runAgain": "再実行",
-    "export": "JSON をエクスポート",
-    "exportSuccess": "フィンガープリント監査をエクスポートしました",
-    "summary": "概要",
-    "matches": "一致",
-    "mismatches": "不一致",
-    "unknown": "不明",
-    "total": "チェック総数",
-    "noReport": "監査を実行してブラウザーの観測値を収集してください。",
-    "mismatchNotice": "実際の値の一部が保存されたフィンガープリントと異なります。プロファイルを変更する前に確認してください。",
-    "expected": "期待値",
-    "actual": "実測値",
-    "statusMatch": "Match",
-    "statusMismatch": "Mismatch",
-    "statusUnknown": "Unknown",
-    "statusObserved": "Observed",
-    "statusCrossOriginFrame": "Cross-origin frame",
-    "statusFramePresent": "Frame present",
-    "details": "フィールド比較",
-    "observations": "追加の観測値",
-    "oopif": "クロスオリジンフレーム検査",
-    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
-    "frameCount": "フレーム数",
-    "childDevicePixelRatio": "Child DPR",
-    "childScreenWidth": "Child screen width",
-    "notAvailable": "利用不可",
-    "categories": {
-      "navigator": "Navigator",
-      "screen": "画面",
-      "window": "ウィンドウ",
-      "timezone": "タイムゾーン",
-      "webgl": "WebGL",
-      "media": "メディア設定",
-      "color": "色と HDR",
-      "storage": "ストレージ",
-      "battery": "バッテリー",
-      "fonts": "フォント",
-      "browser": "ブラウザーコレクション",
-      "network": "ネットワーク",
-      "performance": "パフォーマンス",
-      "observation": "観測"
-    },
-    "observationLabels": {
-      "audioHash": "オフライン音声ハッシュ",
-      "mediaDevices": "メディアデバイス",
-      "webrtcCandidates": "WebRTC 候補",
-      "webglParameters": "WebGL 観測値"
-    }
-  },
   "warnings": {
     "windowResizeTitle": "カスタムウィンドウサイズ",
     "windowResizeDescription": "ブラウザウィンドウのサイズを変更すると、ブラウザ情報が偽装されていることをウェブサイトに検出される可能性が高くなります。",
@@ -1311,6 +1263,12 @@
       "syncing": "同期中",
       "synced": "同期済み",
       "error": "エラー"
+    },
+    "ephemeral": {
+      "cookiesUnavailable": "一時プロファイルはブラウザーを閉じると破棄されるため、ここで管理できる Cookie はありません。",
+      "extensionsUnavailable": "一時プロファイルはブラウザーを閉じると破棄されるため、拡張機能グループを割り当てられません。",
+      "syncUnavailable": "一時プロファイルはブラウザーを閉じると破棄されるため、クラウドに同期するものはありません。",
+      "hint": "データを保持したい場合は通常のプロファイルを作成してください。"
     }
   },
   "extensions": {
@@ -1346,7 +1304,7 @@
     "deleteConfirmDescription": "「{{name}}」を削除してもよろしいですか？この操作は元に戻せません。",
     "deleteGroupConfirmTitle": "拡張機能グループを削除",
     "deleteGroupConfirmDescription": "グループ「{{name}}」を削除してもよろしいですか？この操作は元に戻せません。",
-    "invalidFileType": "無効なファイルタイプです。.crx、.xpi、または .zip ファイルをアップロードしてください。",
+    "invalidFileType": "ファイル形式が正しくありません。.crx または .zip ファイルを選択してください。",
     "readError": "拡張機能ファイルの読み取りに失敗しました。",
     "assignTitle": "拡張機能グループの割り当て",
     "assignDescription": "選択した{{count}}件のプロファイルを拡張機能グループに割り当てます。",
@@ -1354,7 +1312,6 @@
     "assignSuccess": "拡張機能グループが正常に割り当てられました",
     "editExtension": "拡張機能を編集",
     "updateSuccess": "拡張機能が正常に更新されました",
-    "reupload": "再アップロード",
     "version": "バージョン",
     "author": "作者",
     "homepage": "ホームページ",
@@ -1362,10 +1319,26 @@
     "editGroupDescription": "グループ名を更新し、含まれる拡張機能を管理します。",
     "groupExtensions": "このグループの拡張機能",
     "noExtensionsInGroup": "拡張機能がまだ追加されていません",
-    "editExtensionDescription": "拡張機能の名前を更新、メタデータを表示、またはファイルを再アップロードします。",
+    "editExtensionDescription": "拡張機能の名前を変更したり、メタデータを確認したり、別のアーカイブやフォルダに置き換えたりできます。",
     "metadata": "メタデータ",
     "noMetadata": "マニフェストからのメタデータはありません。",
     "selectFile": "ファイルを選択",
+    "loadUnpacked": "フォルダから読み込む",
+    "loadUnpackedTooltip": "manifest.json を含むフォルダから拡張機能を読み込みます",
+    "selectFolderTitle": "拡張機能のフォルダを選択",
+    "selectedFolder": "選択したフォルダ",
+    "selectFolder": "フォルダを選択",
+    "linkFolder": "このフォルダから直接読み込む",
+    "linkFolderOff": "フォルダは Donut にコピーされます。拡張機能は持ち運べるようになり、他のデバイスにも同期されます。",
+    "linkFolderOn": "Donut は起動のたびにこのフォルダから直接拡張機能を読み込みます。編集内容は次回のブラウザ起動時に反映されますが、拡張機能はこの端末にのみ残り、同期されません。",
+    "replaceSource": "ソースを置き換える",
+    "linkedNoSync": "リンクした拡張機能はこの端末にのみ残るため、同期できません。",
+    "uploadFailed": "拡張機能を追加できませんでした",
+    "updateFailed": "拡張機能を更新できませんでした",
+    "deleteFailed": "拡張機能を削除できませんでした",
+    "groupCreateFailed": "拡張機能グループを作成できませんでした",
+    "groupUpdateFailed": "拡張機能グループを更新できませんでした",
+    "groupDeleteFailed": "拡張機能グループを削除できませんでした",
     "syncEnabled": "同期が有効",
     "syncDisabled": "同期が無効",
     "syncEnableTooltip": "同期を有効にする",
@@ -1378,6 +1351,14 @@
       "groupsTitle": "拡張機能グループを削除",
       "groupsDescription": "{{count}}件の拡張機能グループを削除しますか？ {{names}}",
       "confirmButton": "削除"
+    },
+    "source": {
+      "label": "ソース",
+      "archive": "アーカイブ",
+      "unpacked": "展開済みフォルダ",
+      "linked": "リンクされたフォルダ",
+      "folderLabel": "フォルダ",
+      "linkedTooltip": "{{path}} から直接読み込みます"
     }
   },
   "pro": {
@@ -1497,7 +1478,9 @@
       "deleteSuccess": "VPN を削除しました",
       "deleteFailed": "VPN の削除に失敗しました",
       "deleteTitle": "VPN を削除",
-      "deleteDescription": "この操作は取り消せません。VPN「{{name}}」は完全に削除されます。"
+      "deleteDescription": "この操作は取り消せません。VPN「{{name}}」は完全に削除されます。",
+      "cannotDelete_few": "削除できません: {{count}} プロファイルで使用中",
+      "cannotDelete_many": "削除できません: {{count}} プロファイルで使用中"
     }
   },
   "importProfile": {
@@ -1549,7 +1532,43 @@
     "vpnOptional": "VPN(任意)",
     "noVpn": "VPNなし",
     "advancedOptions": "詳細オプション",
-    "configureFingerprint": "フィンガープリントを設定(任意)"
+    "configureFingerprint": "フィンガープリントを設定(任意)",
+    "reportCookies": "Cookie",
+    "reportPasswords": "パスワード",
+    "reportAutofill": "お支払い方法",
+    "reportExtensions": "拡張機能",
+    "reportHistory": "履歴",
+    "reportBookmarks": "ブックマーク",
+    "reportLocalStorage": "サイトデータ",
+    "reportNothingCarried": "読み取り可能なデータは引き継がれませんでした",
+    "reportUnrecoverable": "復号できませんでした: {{count}}",
+    "closeSourceBrowserHint": "完全にコピーするには、元のブラウザーを閉じてからもう一度お試しください。サイトデータが不完全になることを承知のうえで、このままインポートすることもできます。",
+    "importAnyway": "このままインポート",
+    "warnings": {
+      "secretsNotMigrated": "Cookie とパスワードのロックを解除できなかったため、再度サインインが必要です。",
+      "appBoundEncrypted": "Windows の Chrome 127 以降は Cookie をブラウザー自体に紐付けるため、他のアプリからは移行できません。",
+      "storeTooOld": "このブラウザーでは開けない古いデータベースがあったため、スキップしました。",
+      "storeTooNew": "このブラウザーより新しいブラウザーのデータベースだったため、スキップしました。",
+      "sourceBrowserRunning": "元のブラウザーが実行中だったため、サイトデータが不完全な可能性があります。",
+      "securePreferencesReset": "ホームページや検索エンジンなど、保護された設定は既定値に戻りました。",
+      "extensionsPartial": "一部の拡張機能は元のブラウザー付属のもので、引き継がれませんでした。",
+      "storeUnreadable": "読み取れないデータベースがあったため、破損したままコピーせずスキップしました。"
+    },
+    "legacyDonut": "Move from old Donut",
+    "legacyTitle": "Copy data from old Donut",
+    "legacyDescription": "Preview and selectively copy your local data into DON.",
+    "legacyScanning": "Checking for old Donut data...",
+    "legacyNotFound": "No old Donut data was found on this computer.",
+    "legacyCopyOnly": "DON only reads and copies the selected data. Your old Donut data is never changed, and account tokens, cloud login, update state, VPNs, and browser binaries are not copied.",
+    "legacyConflicts": "{{count}} existing item(s) will be safely skipped or linked to the matching DON item. Nothing will be overwritten.",
+    "legacyResult": "{{copied}} copied, {{skipped}} skipped, {{failed}} failed",
+    "legacyMigrateButton": "Copy selected data to DON",
+    "legacyCategories": {
+      "profiles": "Profiles and browsing data",
+      "proxies": "Local proxies",
+      "groups": "Profile groups",
+      "extensions": "Extensions and extension groups"
+    }
   },
   "syncTooltips": {
     "syncing": "同期中...",
@@ -1582,7 +1601,9 @@
       "description": "{{count}} 個のグループを削除してもよろしいですか？{{names}}。プロファイルはデフォルトに移動されます。",
       "description_one": "{{count}} 個のグループを削除してもよろしいですか？{{names}}。プロファイルはデフォルトに移動されます。",
       "confirmButton": "グループを削除"
-    }
+    },
+    "profileCount_few": "{{count}} プロファイル",
+    "profileCount_many": "{{count}} プロファイル"
   },
   "proxyAssignment": {
     "title": "プロキシ / VPN を割り当てる",
@@ -1601,7 +1622,9 @@
     "noneOption": "なし",
     "noValidProfiles": "有効なプロファイルが選択されていません。",
     "vpnGroupHeading": "VPN",
-    "failedFallback": "プロファイルへのプロキシ/VPN の割り当てに失敗しました"
+    "failedFallback": "プロファイルへのプロキシ/VPN の割り当てに失敗しました",
+    "description_few": "{{count}} 件の選択されたプロファイルにプロキシまたは VPN を割り当てます。",
+    "description_many": "{{count}} 件の選択されたプロファイルにプロキシまたは VPN を割り当てます。"
   },
   "groupAssignment": {
     "title": "グループを割り当てる",
@@ -1616,7 +1639,9 @@
     "selectedProfilesLabel": "選択したプロファイル:",
     "assignGroupLabel": "グループに割り当てる:",
     "noValidProfiles": "有効なプロファイルが選択されていません。",
-    "failedFallback": "プロファイルへのグループの割り当てに失敗しました"
+    "failedFallback": "プロファイルへのグループの割り当てに失敗しました",
+    "description_few": "{{count}} 件の選択されたプロファイルにグループを割り当てます。",
+    "description_many": "{{count}} 件の選択されたプロファイルにグループを割り当てます。"
   },
   "profileSelector": {
     "title": "プロファイルを選択",
@@ -1757,7 +1782,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "Donut Browser の更新に失敗しました",
+      "updateFailed": "DON の更新に失敗しました",
       "restartFailed": "再起動に失敗しました",
       "updateReady": "アップデートの準備完了。再起動して適用",
       "manualDownloadRequired": "手動ダウンロードが必要です",
@@ -1888,6 +1913,15 @@
     "vpnNotFound": "VPNが見つかりません",
     "extensionNotFound": "拡張機能が見つかりません",
     "extensionGroupNotFound": "拡張機能グループが見つかりません",
+    "extensionUnsupportedFileType": "この形式には対応していません。拡張機能は .crx または .zip アーカイブ、あるいはフォルダである必要があります。",
+    "extensionDirNotFound": "そのフォルダは存在しません。",
+    "extensionNotADirectory": "そのパスはフォルダではありません。",
+    "extensionManifestMissing": "そのフォルダに manifest.json がありません。拡張機能の manifest.json があるフォルダを選択してください。",
+    "extensionManifestInvalid": "そのフォルダの manifest.json を読み取れませんでした。",
+    "extensionDirTooLarge": "そのフォルダは大きすぎて Donut にコピーできません（上限は 256 MB・20,000 ファイル）。代わりにリンクして読み込んでください。",
+    "extensionPathHasComma": "そのフォルダのパスにカンマが含まれており、Chromium が読み込めません。フォルダの名前を変更するか、移動してください。",
+    "extensionLinkRequiresDirectory": "その場で読み込めるのはフォルダのみです。アーカイブを追加するにはリンクをオフにしてください。",
+    "extensionLinkedCannotSync": "この拡張機能はこの端末のフォルダから読み込まれているため、同期する対象がありません。",
     "cannotModifyCloudManagedProxy": "クラウド管理のプロキシの同期は変更できません",
     "syncLockedByProfile": "同期済みプロファイルで使用中のため、同期を無効にできません",
     "syncNotConfigured": "同期が設定されていません。サインインするか、セルフホストサーバーを設定してください。",
@@ -1989,7 +2023,11 @@
     },
     "camoufoxRemoved": "Camoufoxはサポートされなくなりました。Wayfernでこのプロファイルを作り直してください。",
     "noE2ePasswordSet": "エンドツーエンド暗号化のパスワードが設定されていません。暗号化データを同期する前に設定してください。",
-    "fingerprintAuditFailed": "フィンガープリント監査に失敗しました: {{detail}}"
+    "importSourceNotChromium": "このフォルダーは Chromium ブラウザーのプロファイルではありません",
+    "importSourceNotChromiumNamed": "{{family}} のプロファイルはインポートできません。Chromium 系ブラウザーのみ対応しています",
+    "importSourceBrowserRunning": "先に {{browser}} を閉じるか、このままインポートを選択してください",
+    "fingerprintAuditFailed": "フィンガープリント監査に失敗しました: {{detail}}",
+    "legacyMigrationFailed": "Old Donut data could not be copied safely. Your old data was not changed."
   },
   "rail": {
     "profiles": "プロファイル",
@@ -2204,7 +2242,7 @@
   },
   "wayfernBlocked": {
     "title": "ブラウザの自動化が一時停止しました",
-    "description": "通常は複数のデバイスで同時にサインインしたことが原因で、アカウントのProブラウザ機能が一時的に制限されました。他のデバイスからサインアウトし、プロファイルを再起動すると復元されます。"
+    "description": "ブラウザの自動化は同時に1台のデバイスでのみ利用できます。現在、サインイン中の別のデバイスが使用しています。そのデバイスからサインアウトして、プロファイルを再起動してください。"
   },
   "wayfernConfigDialog": {
     "titleView": "フィンガープリント設定を表示 - {{name}} ({{browser}})",
@@ -2252,7 +2290,7 @@
     },
     "locked": {
       "title": "Cookie Bot",
-      "hint": "Cookie Bot はリモートマシンで夜間にプロファイルをウォームアップするため、お使いのコンピューターを起動していなくても Cookie と履歴が維持されます。Pro または Team プランが必要です。"
+      "hint": "Cookie Bot はリモートマシンで夜間にプロファイルをウォームアップするため、お使いのコンピューターを起動していなくても Cookie と履歴が維持されます。"
     },
     "empty": {
       "title": "登録されたプロファイルはありません",
@@ -2264,7 +2302,9 @@
       "nextRun": "次回の実行 {{time}}",
       "dueCount_one": "{{count}} 件のプロファイルが予定",
       "dueCount_other": "{{count}} 件のプロファイルが予定",
-      "nothingScheduled": "予定はありません"
+      "nothingScheduled": "予定はありません",
+      "dueCount_few": "{{count}} 件のプロファイルが予定",
+      "dueCount_many": "{{count}} 件のプロファイルが予定"
     },
     "lastDay": {
       "label": "過去 24 時間",
@@ -2274,7 +2314,13 @@
       "partial_one": "{{count}} 件が部分完了",
       "partial_other": "{{count}} 件が部分完了",
       "failed_one": "{{count}} 件が失敗",
-      "failed_other": "{{count}} 件が失敗"
+      "failed_other": "{{count}} 件が失敗",
+      "failed_few": "{{count}} 件が失敗",
+      "failed_many": "{{count}} 件が失敗",
+      "partial_few": "{{count}} 件が部分完了",
+      "partial_many": "{{count}} 件が部分完了",
+      "ran_few": "{{count}} 件実行",
+      "ran_many": "{{count}} 件実行"
     },
     "chart": {
       "machineTime": "1 晩あたりのマシン時間",
@@ -2313,7 +2359,11 @@
       "unenrol": "Cookie Bot から削除",
       "unenrolTitle": "{{name}} を Cookie Bot から削除しますか?",
       "unenrolDescription": "今夜からウォームアップを停止します。過去の実行はアクティビティに残ります。",
-      "unenrolled": "Cookie Bot から削除しました"
+      "unenrolled": "Cookie Bot から削除しました",
+      "crowded_few": "{{count}} 件のプロファイルが同時に開始",
+      "crowded_many": "{{count}} 件のプロファイルが同時に開始",
+      "quietHours_few": "空き時間 {{count}} 時間",
+      "quietHours_many": "空き時間 {{count}} 時間"
     },
     "status": {
       "provisioning": "マシンを準備中",
@@ -2350,7 +2400,9 @@
       "consentUnknown": "同意ダイアログはまだ報告されていません",
       "billed": "{{duration}} を課金",
       "billedUnknown": "課金時間はまだ報告されていません",
-      "chunk": "{{total}} 分割中 {{index}} 番目"
+      "chunk": "{{total}} 分割中 {{index}} 番目",
+      "consentHandled_few": "同意ダイアログを {{count}} 件処理",
+      "consentHandled_many": "同意ダイアログを {{count}} 件処理"
     },
     "history": {
       "title": "実行履歴",
@@ -2375,7 +2427,11 @@
       "sitesFailed_other": "{{count}} サイトに接続できませんでした",
       "consentHandled_one": "同意ダイアログを {{count}} 件処理",
       "consentHandled_other": "同意ダイアログを {{count}} 件処理",
-      "sitesUnknown": "未報告"
+      "sitesUnknown": "未報告",
+      "consentHandled_few": "同意ダイアログを {{count}} 件処理",
+      "consentHandled_many": "同意ダイアログを {{count}} 件処理",
+      "sitesFailed_few": "{{count}} サイトに接続できませんでした",
+      "sitesFailed_many": "{{count}} サイトに接続できませんでした"
     },
     "duration": {
       "hm": "{{hours}} 時間 {{minutes}} 分",
@@ -2389,7 +2445,9 @@
       "noProfiles": "一致するプロファイルはありません。",
       "alreadyEnrolled": "登録済み",
       "continue_one": "{{count}} 件で続行",
-      "continue_other": "{{count}} 件で続行"
+      "continue_other": "{{count}} 件で続行",
+      "continue_few": "{{count}} 件で続行",
+      "continue_many": "{{count}} 件で続行"
     },
     "enrol": {
       "titleOne": "{{name}} を登録",
@@ -2465,7 +2523,27 @@
       "listSites_other": "{{count}} サイト",
       "summarySlots_one": "週 {{count}} 回、1 回あたり最大 {{minutes}} 分実行します。",
       "summarySlots_other": "週 {{count}} 回、1 回あたり最大 {{minutes}} 分実行します。",
-      "templateNameInvalidNoMax": "その名前は保存済みリストには使用できません。"
+      "templateNameInvalidNoMax": "その名前は保存済みリストには使用できません。",
+      "cadenceCustom_few": "週 {{count}} 晩",
+      "cadenceCustom_many": "週 {{count}} 晩",
+      "confirmBulkButton_few": "{{count}} 件のプロファイルで続行",
+      "confirmBulkButton_many": "{{count}} 件のプロファイルで続行",
+      "confirmBulkDescription_few": "共有のリモート時間から夜間の実行を {{count}} 件予約します。時刻とサイトは次の画面で選びます。",
+      "confirmBulkDescription_many": "共有のリモート時間から夜間の実行を {{count}} 件予約します。時刻とサイトは次の画面で選びます。",
+      "confirmBulkTitle_few": "{{count}} 件のプロファイルを Cookie Bot に登録しますか?",
+      "confirmBulkTitle_many": "{{count}} 件のプロファイルを Cookie Bot に登録しますか?",
+      "enrolled_few": "{{count}} 件のプロファイルを登録しました",
+      "enrolled_many": "{{count}} 件のプロファイルを登録しました",
+      "listSites_few": "{{count}} サイト",
+      "listSites_many": "{{count}} サイト",
+      "sitesHint_few": "{{count}} サイト。ここに記載したページのみ閲覧します。",
+      "sitesHint_many": "{{count}} サイト。ここに記載したページのみ閲覧します。",
+      "summaryCustom_few": "週 {{count}} 晩、{{time}} に、1 回あたり最大 {{minutes}} 分実行します。",
+      "summaryCustom_many": "週 {{count}} 晩、{{time}} に、1 回あたり最大 {{minutes}} 分実行します。",
+      "summarySlots_few": "週 {{count}} 回、1 回あたり最大 {{minutes}} 分実行します。",
+      "summarySlots_many": "週 {{count}} 回、1 回あたり最大 {{minutes}} 分実行します。",
+      "titleCount_few": "{{count}} 件のプロファイルを登録",
+      "titleCount_many": "{{count}} 件のプロファイルを登録"
     },
     "preset": {
       "light": "軽め",
@@ -2488,7 +2566,9 @@
       "fixEncrypted": "同期設定を開く",
       "fixProxy": "プロキシを割り当てる",
       "fixFailed": "その修正を適用できませんでした。",
-      "exitNodeHint": "プロキシも VPN もない場合、通信はマシン群自身のデータセンターのアドレスから出ていきます。ホスティングネットワークからの長時間のトラフィックは、ウォームアップしない場合よりもプロファイルの信頼性を損ないます。"
+      "exitNodeHint": "プロキシも VPN もない場合、通信はマシン群自身のデータセンターのアドレスから出ていきます。ホスティングネットワークからの長時間のトラフィックは、ウォームアップしない場合よりもプロファイルの信頼性を損ないます。",
+      "ineligible_few": "{{count}} 件のプロファイルはリモートで実行できません",
+      "ineligible_many": "{{count}} 件のプロファイルはリモートで実行できません"
     },
     "conflict": {
       "title": "{{email}} がすでにこのプロファイルを {{time}} にウォームアップしています",
@@ -2502,7 +2582,7 @@
     },
     "actionBar": {
       "enrol": "Cookie Bot に登録",
-      "proRequired": "Cookie Bot には Pro または Team プランが必要です",
+      "proRequired": "Cookie Bot には有料プランが必要です",
       "noneEligible": "選択したプロファイルはいずれもリモートでウォームアップできません"
     },
     "actions": {
@@ -2534,7 +2614,9 @@
       "columnShare": "割合",
       "noActivity": "この期間にリモートセッションはありません。",
       "soloNote": "今のところ表示されるのはご自身の使用状況のみです。メンバーごとの内訳を見るにはチームメイトを招待してください。",
-      "runsFailed": "・失敗 {{n}} 件"
+      "runsFailed": "・失敗 {{n}} 件",
+      "pooled_few": "{{total}} 時間中 {{used}} 時間を {{count}} シートで共有",
+      "pooled_many": "{{total}} 時間中 {{used}} 時間を {{count}} シートで共有"
     },
     "closeReason": {
       "stoppedByUser": "手動で停止しました",
@@ -2562,15 +2644,18 @@
     "titleBlocked": "起動をブロックしました",
     "titleWarning": "起動する前に",
     "intro": "ブラウザーを起動する前に、「{{name}}」に関する次の問題を確認してください。",
-    "fingerprintHeading": "プロキシの出口がフィンガープリントと一致しません",
-    "vpnExtensionHeading": "VPN拡張機能を検出しました",
+    "fingerprintHeading": "測定した出口がフィンガープリントと一致しません",
+    "vpnExtensionHeading": "VPN・プロキシ拡張機能を検出しました",
     "vpnExtensionIntro": "このプロファイル内で、ブラウザーの通信を経路変更できる拡張機能:",
-    "vpnExtensionConfirmed": "プロキシを変更できます",
-    "vpnExtensionLikely": "プロキシを変更する可能性があります",
+    "vpnExtensionConfirmed": "既知のVPN・プロキシツール",
+    "vpnExtensionLikely": "VPN・プロキシツールと思われます",
+    "vpnExtensionCapability": "プロキシ権限を持っています",
     "vpnExtensionExplainer": "いずれかが通信を別の経路に変えると、ブラウザーの実際の所在地は、このプロファイルの作成時に設定されたタイムゾーン・言語・位置情報と一致しなくなります。Donutは外部からそれを検出できません。",
+    "proxyCapableHeading": "プロキシを変更できる拡張機能",
+    "proxyCapableIntro": "VPNには見えませんが、Chromiumのプロキシ権限を持っています。ダウンロードマネージャーやデバッグツールにも必要な権限で、実際に使っているかどうかをDonutは判別できません:",
     "sourceDonut": "Donutが管理",
     "sourceBrowser": "プロファイルにインストール済み",
-    "measurementUnreliable": "VPN拡張機能はプロキシを上書きできるため、出口の確認結果がブラウザーの実際の経路を表していない可能性があります。",
+    "measurementUnreliable": "このプロファイルの拡張機能がプロキシ権限を持っているため、出口の確認結果がブラウザーの実際の経路を表していない可能性があります。",
     "scanIncompleteEncrypted": "このプロファイルは暗号化されているため、Donutが管理する拡張機能のみ確認できました。",
     "scanIncompleteEphemeral": "このプロファイルにはまだデータがないため、Donutが管理する拡張機能のみ確認できました。",
     "scanIncompletePartial": "拡張機能のスキャンが途中で終了したため、一部が表示されていない可能性があります。",
@@ -2580,9 +2665,64 @@
     "dontWarnExtensions": "これらの拡張機能について今後警告しない",
     "applyToRemaining": "この選択を残りのプロファイルにも適用",
     "cancelledSummary": "{{total}}件中{{cancelled}}件の起動をキャンセルしました",
-    "cancelled": "起動をキャンセルしました",
     "vpnExtensionEntry": " {{version}}（{{capability}}、{{source}}）",
+    "vpnExtensionEntryNoVersion": "（{{capability}}、{{source}}）",
     "scanIncompleteMissing": "このプロファイルはまだ起動されていないため、Donutが管理する拡張機能のみ確認できました。"
+  },
+  "fingerprintAudit": {
+    "open": "フィンガープリントを監査",
+    "title": "フィンガープリント監査",
+    "description": "保存されたフィンガープリントと、実行中の Wayfern ページから観測できる値を比較します。",
+    "run": "監査を実行",
+    "running": "監査を実行中…",
+    "runAgain": "再実行",
+    "export": "JSON をエクスポート",
+    "exportSuccess": "フィンガープリント監査をエクスポートしました",
+    "summary": "概要",
+    "matches": "一致",
+    "mismatches": "不一致",
+    "unknown": "不明",
+    "total": "チェック総数",
+    "noReport": "監査を実行してブラウザーの観測値を収集してください。",
+    "mismatchNotice": "実際の値の一部が保存されたフィンガープリントと異なります。プロファイルを変更する前に確認してください。",
+    "expected": "期待値",
+    "actual": "実測値",
+    "statusMatch": "Match",
+    "statusMismatch": "Mismatch",
+    "statusUnknown": "Unknown",
+    "statusObserved": "Observed",
+    "statusCrossOriginFrame": "Cross-origin frame",
+    "statusFramePresent": "Frame present",
+    "details": "フィールド比較",
+    "observations": "追加の観測値",
+    "oopif": "クロスオリジンフレーム検査",
+    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
+    "frameCount": "フレーム数",
+    "childDevicePixelRatio": "Child DPR",
+    "childScreenWidth": "Child screen width",
+    "notAvailable": "利用不可",
+    "categories": {
+      "navigator": "Navigator",
+      "screen": "画面",
+      "window": "ウィンドウ",
+      "timezone": "タイムゾーン",
+      "webgl": "WebGL",
+      "media": "メディア設定",
+      "color": "色と HDR",
+      "storage": "ストレージ",
+      "battery": "バッテリー",
+      "fonts": "フォント",
+      "browser": "ブラウザーコレクション",
+      "network": "ネットワーク",
+      "performance": "パフォーマンス",
+      "observation": "観測"
+    },
+    "observationLabels": {
+      "audioHash": "オフライン音声ハッシュ",
+      "mediaDevices": "メディアデバイス",
+      "webrtcCandidates": "WebRTC 候補",
+      "webglParameters": "WebGL 観測値"
+    }
   },
   "claudeWorkflow": {
     "quickTitle": "プロキシ文字列からクイック作成",

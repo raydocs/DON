@@ -28,12 +28,13 @@ export function getEntitlements(
 }
 
 /**
- * Whether this user may enrol profiles in Cookie Bot. Every gate in the UI
- * goes through here so a plan change is one edit, and so the Pro badge and the
- * control it guards can never disagree.
+ * Whether this user may enrol profiles in Cookie Bot. DON removes the paid
+ * plan gate, but the bot still runs on the cloud service and needs a signed-in
+ * account. Keeping signed-out sessions idle avoids retrying cloud requests that
+ * cannot succeed.
  */
-export function canUseCookieBot(_user?: CloudUser | null | undefined): boolean {
-  return true;
+export function canUseCookieBot(user?: CloudUser | null | undefined): boolean {
+  return Boolean(user);
 }
 
 /**

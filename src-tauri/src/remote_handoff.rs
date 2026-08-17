@@ -77,14 +77,6 @@ type Store = HashMap<String, HandoffEntry>;
 
 static STORE: RwLock<Option<Store>> = RwLock::new(None);
 
-/// Serialises every test that touches the process-global [`STORE`].
-///
-/// `remote_handoff::tests` reset the store per test and `remote_session`'s
-/// index tests mutate it through `index_session` frames; two module-local
-/// locks would still let those suites interleave, so both take this one.
-#[cfg(test)]
-pub(crate) static HANDOFF_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 fn store_path() -> std::path::PathBuf {
   crate::app_dirs::settings_dir().join("remote_handoff.json")
 }
@@ -390,35 +382,52 @@ pub fn schedule_pull(app_handle: tauri::AppHandle, profile_id: String) {
   });
 }
 
+/// Serialises every test that can reach [`STORE`], wherever it lives.
+///
+/// `remote_session`'s tests drive session transitions through `note_running`
+/// and `note_ended`, so they mutate this module's global store too — with the
+/// same `p1`/`p2` fixture ids. Two mutexes meant the two groups could interleave
+/// and clobber each other, which showed up as an intermittent failure in the
+/// suite guarding a data-loss bug.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the store lock and start from an empty store. Callers must hold the
+/// returned guard for the whole test.
+#[cfg(test)]
+pub(crate) fn lock_for_test() -> std::sync::MutexGuard<'static, ()> {
+  let lock = TEST_LOCK
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  *STORE
+    .write()
+    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Store::new());
+  lock
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
   use std::collections::HashSet;
 
-  /// Serialises the tests.
-  ///
-  /// `TEST_DATA_DIR` is thread-local but [`STORE`] is process-global, so two
-  /// tests running at once would share one store while pointing at different
-  /// directories. That fails intermittently, which is the worst way for a test
-  /// guarding a data-loss bug to fail. The lock lives at module scope as
-  /// [`HANDOFF_TEST_LOCK`] because `remote_session`'s index tests feed frames
-  /// through `index_session`, which writes to the same store.
-  ///
   /// Point the store at a scratch directory and start it empty.
   ///
   /// Everything returned must outlive the test body: dropping the guard
   /// restores the real data directory, and a test that let it drop early would
-  /// write a gate file into the developer's own app data.
+  /// write a gate file into the developer's own app data. `TEST_DATA_DIR` is
+  /// thread-local but [`STORE`] is process-global, so [`lock_for_test`] is what
+  /// keeps two tests from sharing one store while pointing at different
+  /// directories.
   fn isolated() -> (
     tempfile::TempDir,
     crate::app_dirs::TestDirGuard,
     std::sync::MutexGuard<'static, ()>,
   ) {
-    let lock = HANDOFF_TEST_LOCK
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let lock = lock_for_test();
     let dir = tempfile::TempDir::new().expect("a scratch directory");
     let guard = crate::app_dirs::set_test_data_dir(dir.path().to_path_buf());
+    // Re-taken after the data dir is redirected, so nothing loads from the
+    // real one.
     *STORE
       .write()
       .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Store::new());

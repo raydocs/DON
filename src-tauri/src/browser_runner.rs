@@ -33,6 +33,32 @@ async fn lock_profile_launch(profile_id: &str) -> tokio::sync::OwnedMutexGuard<(
   lock.lock_owned().await
 }
 
+fn should_regenerate_fingerprint(
+  randomize_fingerprint_on_launch: Option<bool>,
+  stored_mismatch: Option<&str>,
+) -> bool {
+  randomize_fingerprint_on_launch == Some(true) || stored_mismatch.is_some()
+}
+
+fn load_profile_for_stop(
+  profile_manager: &ProfileManager,
+  requested_profile: &BrowserProfile,
+) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+  let profile_id = requested_profile.id;
+  profile_manager
+    .list_profiles()
+    .map_err(|error| std::io::Error::other(error.to_string()))?
+    .into_iter()
+    .find(|profile| profile.id == profile_id)
+    .ok_or_else(|| {
+      std::io::Error::new(
+        std::io::ErrorKind::NotFound,
+        format!("Profile {profile_id} no longer exists"),
+      )
+      .into()
+    })
+}
+
 pub struct BrowserRunner {
   pub profile_manager: &'static ProfileManager,
   pub downloaded_browsers_registry: &'static DownloadedBrowsersRegistry,
@@ -458,13 +484,35 @@ impl BrowserRunner {
         wayfern_config.proxy
       );
 
-      // Check if we need to generate a new fingerprint on every launch
+      // Explicit randomization generates on every launch. Static profiles are
+      // migrated once when their stored fingerprint cannot match this display.
       let mut updated_profile = profile.clone();
-      if wayfern_config.randomize_fingerprint_on_launch == Some(true) {
-        log::info!(
-          "Generating random fingerprint for Wayfern profile: {}",
+      let persisted_fingerprint_before_launch = profile
+        .wayfern_config
+        .as_ref()
+        .and_then(|config| config.fingerprint.clone());
+      let mut regenerated_geo_proxy_signature: Option<Option<String>> = None;
+      let stored_mismatch = self
+        .wayfern_manager
+        .stored_fingerprint_mismatch(&app_handle, &wayfern_config);
+      let randomize = wayfern_config.randomize_fingerprint_on_launch == Some(true);
+      if let Some(reason) = stored_mismatch.as_deref() {
+        log::warn!(
+          "Stored fingerprint mismatch for Wayfern profile {}: {reason}; generating a compatible replacement",
           profile.name
         );
+      }
+      let regenerate_fingerprint = should_regenerate_fingerprint(
+        wayfern_config.randomize_fingerprint_on_launch,
+        stored_mismatch.as_deref(),
+      );
+      if regenerate_fingerprint {
+        if randomize {
+          log::info!(
+            "Generating random fingerprint for Wayfern profile: {}",
+            profile.name
+          );
+        }
 
         // Create a config copy without the existing fingerprint to force generation of a new one
         let mut config_for_generation = wayfern_config.clone();
@@ -475,7 +523,7 @@ impl BrowserRunner {
           .wayfern_manager
           .generate_fingerprint_config(&app_handle, profile, &config_for_generation)
           .await
-          .map_err(|e| format!("Failed to generate random fingerprint: {e}"))?;
+          .map_err(|e| format!("Failed to generate compatible fingerprint: {e}"))?;
 
         log::info!(
           "New fingerprint generated, length: {} chars",
@@ -488,8 +536,10 @@ impl BrowserRunner {
         // Save the updated fingerprint to the profile so it persists.
         let mut updated_wayfern_config = updated_profile.wayfern_config.clone().unwrap_or_default();
         updated_wayfern_config.fingerprint = Some(new_fingerprint);
-        // Preserve the randomize flag so it persists across launches
-        updated_wayfern_config.randomize_fingerprint_on_launch = Some(true);
+        // An automatic compatibility migration must not turn a static profile
+        // into per-launch fingerprint rotation.
+        updated_wayfern_config.randomize_fingerprint_on_launch =
+          wayfern_config.randomize_fingerprint_on_launch;
         // Preserve the OS setting so it's used for future fingerprint generation
         if wayfern_config.os.is_some() {
           updated_wayfern_config.os = wayfern_config.os.clone();
@@ -507,6 +557,7 @@ impl BrowserRunner {
         } else {
           None
         };
+        regenerated_geo_proxy_signature = Some(updated_wayfern_config.geo_proxy_signature.clone());
         updated_profile.wayfern_config = Some(updated_wayfern_config.clone());
 
         log::info!(
@@ -515,14 +566,10 @@ impl BrowserRunner {
           updated_wayfern_config.fingerprint.as_ref().map(|f| f.len()).unwrap_or(0)
         );
       }
-      // A non-randomize profile keeps its configured fingerprint verbatim, even
-      // when its proxy/VPN routing has changed since the fingerprint was built.
-      // We deliberately do NOT silently rewrite its timezone/language to match
-      // the new exit: that hid every real fingerprint-vs-exit mismatch (a US
-      // fingerprint behind a German exit would be quietly relabelled German
-      // before the launch-time consistency check could see it). The check now
-      // surfaces the mismatch, and the user re-matches on demand via
-      // `match_profile_fingerprint_to_exit`.
+      // A compatible non-randomize profile keeps its fingerprint verbatim. A
+      // proxy/VPN routing change still does not silently rewrite its location:
+      // the consistency check surfaces that separately, and the user can
+      // re-match on demand via `match_profile_fingerprint_to_exit`.
 
       // Create ephemeral dir for ephemeral or password-protected profiles
       if profile.password_protected {
@@ -540,6 +587,25 @@ impl BrowserRunner {
       let profiles_dir = self.profile_manager.get_profiles_dir();
       let profile_data_path =
         crate::ephemeral_dirs::get_effective_profile_path(&updated_profile, &profiles_dir);
+
+      // Profiles imported by builds before the layout fix have their content at
+      // the user-data-dir root instead of under `Default/`, so the browser has
+      // never seen a byte of it. Move it into place now, while the profile is
+      // provably not running. Secrets stay unreadable — the source key was
+      // never captured and cannot be recovered after the fact — but history,
+      // bookmarks, extensions and site data come back.
+      match crate::profile_import::repair_legacy_layout(&profile_data_path) {
+        Ok(true) => log::info!(
+          "Repaired legacy import layout for profile: {}",
+          updated_profile.name
+        ),
+        Ok(false) => {}
+        Err(e) => log::warn!(
+          "Could not repair legacy import layout for {}: {e}",
+          updated_profile.name
+        ),
+      }
+
       let profile_path_str = profile_data_path.to_string_lossy().to_string();
 
       // Install extensions if an extension group is assigned
@@ -570,7 +636,9 @@ impl BrowserRunner {
         .wayfern_manager
         .launch_wayfern(
           &app_handle,
-          &updated_profile,
+          // Keep staged fingerprint changes out of profile persistence until
+          // Wayfern has applied and echoed the replacement successfully.
+          profile,
           &profile_path_str,
           &wayfern_config,
           url.as_deref(),
@@ -636,9 +704,8 @@ impl BrowserRunner {
 
       // Wayfern.setFingerprint echoes back the fingerprint the browser actually
       // applied, which may be UPGRADED from the stored one (e.g. when the
-      // stored fingerprint targets an older browser version). Persist it so the
-      // next launch starts from the upgraded value — saved below via
-      // save_process_info(&updated_profile).
+      // stored fingerprint targets an older browser version). Keep it for the
+      // guarded field-level persistence below.
       if let Some(used_fp) = wayfern_result.used_fingerprint.clone() {
         let mut cfg = updated_profile.wayfern_config.clone().unwrap_or_default();
         if cfg.fingerprint.as_deref() != Some(used_fp.as_str()) {
@@ -656,7 +723,36 @@ impl BrowserRunner {
       updated_profile.process_id = Some(process_id);
       updated_profile.last_launch = Some(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs());
 
-      // Save the updated profile
+      // Save only launch-owned fields against the latest metadata. If the user
+      // changed the fingerprint while this launch was in progress, leave that
+      // newer value in place so the launch cannot undo an explicit Apply.
+      let process_id = updated_profile.process_id;
+      let last_launch = updated_profile.last_launch;
+      let used_fingerprint = wayfern_result.used_fingerprint;
+      updated_profile = self
+        .profile_manager
+        .mutate_profile(&updated_profile.id.to_string(), move |latest| {
+          latest.process_id = process_id;
+          latest.last_launch = last_launch;
+          if let Some(applied) = used_fingerprint {
+            let latest_fingerprint = latest
+              .wayfern_config
+              .as_ref()
+              .and_then(|config| config.fingerprint.as_ref());
+            if latest_fingerprint == persisted_fingerprint_before_launch.as_ref() {
+              let config = latest.wayfern_config.get_or_insert_with(Default::default);
+              config.fingerprint = Some(applied);
+              if let Some(signature) = regenerated_geo_proxy_signature {
+                config.geo_proxy_signature = signature;
+              }
+            }
+          }
+          Ok(())
+        })
+        .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
+          std::io::Error::other(error.to_string()).into()
+        })?;
+
       log::info!(
         "Saving profile {} with wayfern_config fingerprint length: {}",
         updated_profile.name,
@@ -667,7 +763,6 @@ impl BrowserRunner {
           .map(|f| f.len())
           .unwrap_or(0)
       );
-      self.save_process_info(&updated_profile)?;
       let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
         let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
       });
@@ -882,11 +977,20 @@ impl BrowserRunner {
     &self,
     profile: &BrowserProfile,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Use the regular save_profile method which handles the UUID structure
-    self.profile_manager.save_profile(profile).map_err(|e| {
-      let error_string = e.to_string();
-      Box::new(std::io::Error::other(error_string)) as Box<dyn std::error::Error + Send + Sync>
-    })
+    let process_id = profile.process_id;
+    let last_launch = profile.last_launch;
+    self
+      .profile_manager
+      .mutate_profile(&profile.id.to_string(), move |latest| {
+        latest.process_id = process_id;
+        latest.last_launch = last_launch;
+        Ok(())
+      })
+      .map(|_| ())
+      .map_err(|e| {
+        let error_string = e.to_string();
+        Box::new(std::io::Error::other(error_string)) as Box<dyn std::error::Error + Send + Sync>
+      })
   }
 
   pub async fn check_browser_status(
@@ -906,18 +1010,27 @@ impl BrowserRunner {
     profile: &BrowserProfile,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let _profile_launch_guard = lock_profile_launch(&profile.id.to_string()).await;
+    // The frontend may still hold the profile object from before an Apply
+    // action updated its fingerprint/location on disk. Stopping with that
+    // stale clone and then clearing process_id used to save every old field
+    // over the freshly applied metadata. Reload under the profile lock so the
+    // stop path only mutates the latest persisted profile.
+    let current_profile = load_profile_for_stop(self.profile_manager, profile)?;
 
     // "Stop this profile" has to mean the browser that is actually running, and
     // for a profile on the leased fleet that browser is not on this machine.
     // Without this, stopping reported success, killed nothing, and left the
     // session running to its two-hour cap — billing the user for every minute
     // and holding their profile lock the whole time.
-    if self.stop_remote_session_for(&app_handle, profile).await? {
+    if self
+      .stop_remote_session_for(&app_handle, &current_profile)
+      .await?
+    {
       return Ok(());
     }
 
     self
-      .kill_browser_process_unlocked(app_handle, profile)
+      .kill_browser_process_unlocked(app_handle, &current_profile)
       .await
   }
 
@@ -1297,12 +1410,24 @@ impl BrowserRunner {
         // disk instead of the previous snapshot.
         crate::profile::password::complete_after_quit_and_wait(profile).await;
       } else if profile.ephemeral {
-        crate::ephemeral_dirs::remove_ephemeral_dir(&profile.id.to_string());
+        let id = profile.id.to_string();
+        crate::ephemeral_dirs::remove_ephemeral_dir(&id);
+        // The per-domain traffic tracker writes to the cache dir on real disk
+        // regardless of where the profile itself lives, so an "in memory only"
+        // session still left a full record of everywhere it connected.
+        crate::traffic_stats::delete_traffic_stats(&id);
       } else if profile.clear_on_close {
         // Awaited for the same reason as re-encryption above: a queued sync
         // must see the cleared dir, not the pre-clear snapshot.
         crate::profile::clear_on_close::clear_profile_browsing_data(profile).await;
       }
+
+      // The browser held these open for the life of the process; nothing reads
+      // them once it has exited, and they are plaintext extension code sitting
+      // on real disk even for an ephemeral profile.
+      crate::extension_manager::ExtensionManager::cleanup_unpacked_for_profile(
+        &profile.id.to_string(),
+      );
 
       log::info!(
         "Wayfern process cleanup completed for profile: {} (ID: {})",
@@ -1827,6 +1952,107 @@ pub async fn open_url_with_profile(
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tempfile::TempDir;
+
+  fn profile_with_timezone(timezone: &str) -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "timezone-stop-regression".to_string(),
+      browser: "wayfern".to_string(),
+      version: "1.0.0".to_string(),
+      process_id: Some(42),
+      wayfern_config: Some(WayfernConfig {
+        fingerprint: Some(
+          serde_json::json!({
+            "timezone": timezone,
+            "timezoneOffset": 420,
+          })
+          .to_string(),
+        ),
+        ..Default::default()
+      }),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn randomization_always_regenerates_fingerprint() {
+    assert!(should_regenerate_fingerprint(Some(true), None));
+  }
+
+  #[test]
+  fn incompatible_stored_fingerprint_regenerates_once() {
+    assert!(should_regenerate_fingerprint(
+      Some(false),
+      Some("devicePixelRatio mismatch")
+    ));
+  }
+
+  #[test]
+  fn compatible_static_fingerprint_remains_stable() {
+    assert!(!should_regenerate_fingerprint(Some(false), None));
+  }
+
+  #[test]
+  fn stopping_uses_latest_profile_metadata_from_disk() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+
+    let stale = profile_with_timezone("America/Denver");
+    let mut latest = profile_with_timezone("America/Los_Angeles");
+    latest.id = stale.id;
+    manager.save_profile(&latest).unwrap();
+
+    let loaded = load_profile_for_stop(manager, &stale).unwrap();
+    let fingerprint: serde_json::Value = serde_json::from_str(
+      loaded
+        .wayfern_config
+        .as_ref()
+        .and_then(|config| config.fingerprint.as_deref())
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(fingerprint["timezone"], "America/Los_Angeles");
+    assert_eq!(loaded.process_id, Some(42));
+  }
+
+  #[test]
+  fn saving_process_state_does_not_restore_stale_wayfern_settings() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let runner = BrowserRunner::instance();
+
+    let mut stale = profile_with_timezone("America/Denver");
+    stale.process_id = None;
+    manager.save_profile(&stale).unwrap();
+    manager
+      .mutate_profile(&stale.id.to_string(), |latest| {
+        latest.wayfern_config.as_mut().unwrap().webrtc_mode = Some("real".to_string());
+        Ok(())
+      })
+      .unwrap();
+
+    stale.process_id = Some(42);
+    runner.save_process_info(&stale).unwrap();
+
+    let persisted = manager
+      .list_profiles()
+      .unwrap()
+      .into_iter()
+      .find(|profile| profile.id == stale.id)
+      .unwrap();
+    assert_eq!(persisted.process_id, Some(42));
+    assert_eq!(
+      persisted
+        .wayfern_config
+        .as_ref()
+        .and_then(|config| config.webrtc_mode.as_deref()),
+      Some("real")
+    );
+  }
 
   #[tokio::test]
   async fn profile_launch_lock_serializes_only_the_same_profile() {

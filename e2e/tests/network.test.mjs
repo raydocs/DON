@@ -379,6 +379,16 @@ function literalHostCandidates(candidates) {
   });
 }
 
+function parseCloudflareTrace(value) {
+  return Object.fromEntries(
+    value
+      .trim()
+      .split(/\r?\n/)
+      .map((line) => line.split("=", 2))
+      .filter(([key, entry]) => key && entry !== undefined),
+  );
+}
+
 async function stopProfile(app, base, token, profileId, cdp) {
   cdp.close();
   const stopped = await request(`${base}/v1/profiles/${profileId}/kill`, {
@@ -768,7 +778,16 @@ test("VLESS Reality persists, imports, routes through Xray-core, records traffic
   }
 });
 
-test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions, and extension groups", async () => {
+const residentialProxyCredentialsAvailable = Boolean(
+  process.env.RESIDENTIAL_PROXY_URL_ONE_HTTP &&
+    process.env.RESIDENTIAL_PROXY_URL_ONE_SOCKS,
+);
+
+test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions, and extension groups", {
+  skip: residentialProxyCredentialsAvailable
+    ? false
+    : "real HTTP and SOCKS5 residential proxy URLs are not configured",
+}, async () => {
   const httpSettings = proxySettings(
     process.env.RESIDENTIAL_PROXY_URL_ONE_HTTP,
     "HTTP",
@@ -922,9 +941,165 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
     );
     await stopProfile(app, base, saved.api_token, profile.id, activeCdp);
     activeCdp = null;
+
+    await assignNetworkThroughUi(
+      app,
+      profile.name,
+      httpProxy.name,
+      socksProxy.name,
+    );
+    await app.waitFor(
+      async () =>
+        (await app.invoke("list_browser_profiles")).find(
+          (item) => item.id === profile.id,
+        )?.proxy_id === socksProxy.id,
+      { description: "SOCKS5 proxy assignment persisted" },
+    );
+
+    const socksLaunch = await runProfile(
+      app,
+      base,
+      saved.api_token,
+      profile.id,
+      "https://api.ipify.org/",
+    );
+    activeCdp = socksLaunch.cdp;
+    const socksBrowserExitIp = await activeCdp.waitFor(
+      `(() => {
+        const value = document.body?.innerText?.trim() ?? "";
+        return /^[0-9a-f:.]+$/i.test(value) ? value : false;
+      })()`,
+      { timeoutMs: 30_000, description: "Wayfern SOCKS5 exit IP" },
+    );
+    assert.equal(
+      socksBrowserExitIp,
+      socksCheck.ip,
+      "Wayfern did not use the checked SOCKS5 exit",
+    );
+
+    await activeCdp.command("Page.navigate", {
+      url: "https://cloudflare.com/cdn-cgi/trace",
+    });
+    const traceText = await activeCdp.waitFor(
+      `(() => {
+        const value = document.body?.innerText ?? "";
+        return value.includes("ip=") && value.includes("http=") ? value : false;
+      })()`,
+      { timeoutMs: 30_000, description: "Cloudflare transport trace" },
+    );
+    const trace = parseCloudflareTrace(traceText);
+    assert.equal(
+      trace.ip,
+      socksBrowserExitIp,
+      "HTTP/3 or its TCP fallback bypassed the SOCKS5 exit",
+    );
+    assert.ok(
+      ["http/1.1", "http/2", "http/3"].includes(trace.http),
+      `Unexpected proxied transport: ${trace.http}`,
+    );
+    const socksIceCandidates = await collectWebRtcCandidates(activeCdp);
+    assert.deepEqual(
+      literalHostCandidates(socksIceCandidates),
+      [],
+      `SOCKS5 WebRTC emitted a literal host IP: ${JSON.stringify(socksIceCandidates)}`,
+    );
+    await stopProfile(app, base, saved.api_token, profile.id, activeCdp);
+    activeCdp = null;
+
+    const routedDomains = await app.waitFor(
+      async () => {
+        const stats = await app.invoke("get_traffic_stats_for_period", {
+          profileId: profile.id,
+          seconds: 3600,
+        });
+        const domains = Object.keys(stats?.domains ?? {});
+        return domains.includes("api.ipify.org") &&
+          domains.some(
+            (domain) =>
+              domain === "cloudflare.com" || domain.endsWith(".cloudflare.com"),
+          )
+          ? domains
+          : false;
+      },
+      {
+        timeoutMs: 10_000,
+        description: "SOCKS5 remote-DNS domain accounting",
+      },
+    );
+    assert.ok(routedDomains.includes("api.ipify.org"));
+
+    if (!(await app.invoke("is_geoip_database_available"))) {
+      await app.invoke("download_geoip_database");
+    }
+    await app.invoke("match_profile_fingerprint_to_exit", {
+      profileId: profile.id,
+      exitIp: socksBrowserExitIp,
+    });
+    const matchedProfile = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    const matchedFingerprint = JSON.parse(
+      matchedProfile.wayfern_config.fingerprint,
+    );
+    assert.ok(matchedFingerprint.timezone);
+    assert.equal(typeof matchedFingerprint.timezoneOffset, "number");
+
+    await app.restart();
+    const persistedProfile = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    const persistedFingerprint = JSON.parse(
+      persistedProfile.wayfern_config.fingerprint,
+    );
+    assert.equal(persistedProfile.proxy_id, socksProxy.id);
+    assert.equal(persistedFingerprint.timezone, matchedFingerprint.timezone);
+    assert.equal(
+      persistedFingerprint.timezoneOffset,
+      matchedFingerprint.timezoneOffset,
+    );
+    apiPort = await app.waitFor(() => app.invoke("get_api_server_status"), {
+      timeoutMs: 20_000,
+      description: "API server after app restart",
+    });
+    const restartedBase = `http://127.0.0.1:${apiPort}`;
+    const socksRelaunch = await runProfile(
+      app,
+      restartedBase,
+      saved.api_token,
+      profile.id,
+      "https://api.ipify.org/",
+    );
+    activeCdp = socksRelaunch.cdp;
+    const relaunchedExitIp = await activeCdp.waitFor(
+      `(() => {
+        const value = document.body?.innerText?.trim() ?? "";
+        return /^[0-9a-f:.]+$/i.test(value) ? value : false;
+      })()`,
+      { timeoutMs: 30_000, description: "restarted Wayfern SOCKS5 exit IP" },
+    );
+    assert.equal(relaunchedExitIp, socksBrowserExitIp);
+    assert.deepEqual(
+      await activeCdp.evaluate(`({
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezoneOffset: new Date().getTimezoneOffset(),
+      })`),
+      {
+        timezone: matchedFingerprint.timezone,
+        timezoneOffset: matchedFingerprint.timezoneOffset,
+      },
+      "matched SOCKS5 timezone was not applied after restart",
+    );
+    await stopProfile(
+      app,
+      restartedBase,
+      saved.api_token,
+      profile.id,
+      activeCdp,
+    );
+    activeCdp = null;
     await assertProxyWorkerLogsRedacted(app, [httpSettings, socksSettings]);
 
-    await assignNetworkThroughUi(app, profile.name, httpProxy.name, vpn.name);
+    await assignNetworkThroughUi(app, profile.name, socksProxy.name, vpn.name);
     await app.waitFor(
       async () =>
         (await app.invoke("list_browser_profiles")).find(
@@ -937,7 +1112,7 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
     if (realWireGuardConfig) {
       const tunneled = await runProfile(
         app,
-        base,
+        restartedBase,
         saved.api_token,
         profile.id,
         process.env.DONUT_E2E_WIREGUARD_TARGET_URL,
@@ -947,7 +1122,13 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
         timeoutMs: 30_000,
         description: "Wayfern GET through local WireGuard peer",
       });
-      await stopProfile(app, base, saved.api_token, profile.id, activeCdp);
+      await stopProfile(
+        app,
+        restartedBase,
+        saved.api_token,
+        profile.id,
+        activeCdp,
+      );
       activeCdp = null;
     }
   } catch (error) {

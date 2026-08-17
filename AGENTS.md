@@ -61,6 +61,7 @@ donutbrowser/
 │   │   ├── settings_manager.rs     # App settings persistence
 │   │   ├── cookie_manager.rs       # Cookie import/export
 │   │   ├── profile_importer.rs     # Bulk profile import (Chromium-family detection, ZIP, batch)
+│   │   ├── legacy_migration.rs     # Copy-only migration from the old Donut data directory
 │   │   ├── fingerprint_consistency.rs # Launch-time proxy exit vs fingerprint timezone/language check
 │   │   ├── dns_blocklist.rs         # Hagezi DNS blocklists + user custom lists/allowlist
 │   │   ├── traffic_stats.rs         # Per-profile traffic stats + secure history erase

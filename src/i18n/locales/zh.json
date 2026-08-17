@@ -187,7 +187,7 @@
       "copyLogsDescription": "复制经过脱敏的近期日志包（最多 5 MB）。脱敏无法识别所有类型的个人数据，请在分享前检查内容。"
     },
     "disableAutoUpdates": "禁用应用自动更新",
-    "disableAutoUpdatesDescription": "阻止应用程序自动检查和安装 Donut Browser 更新。浏览器更新不受影响。",
+    "disableAutoUpdatesDescription": "阻止应用程序自动检查和安装 DON 更新。浏览器更新不受影响。",
     "keepDecryptedProfilesInRam": "在内存中保留已解密的配置文件",
     "keepDecryptedProfilesInRamDescription": "在启动之间保留密码保护配置文件的已解密内存副本,以便更快地启动。无论如何磁盘上的副本始终保持加密。",
     "privacy": {
@@ -432,7 +432,9 @@
       "newVpn": "新建 VPN",
       "protocolCol": "协议",
       "hostPort": "主机 : 端口",
-      "title": "代理和 VPN"
+      "title": "代理和 VPN",
+      "cannotDelete_few": "无法删除: 被 {{count}} 个配置文件使用",
+      "cannotDelete_many": "无法删除: 被 {{count}} 个配置文件使用"
     },
     "add": "添加代理",
     "edit": "编辑代理",
@@ -628,6 +630,7 @@
       "connectionSuccess": "连接成功!",
       "serverError": "服务器返回了错误",
       "connectFailed": "连接服务器失败",
+      "storageEndpoint": "存储: {{endpoint}}",
       "settingsSaved": "同步设置已保存",
       "saveFailed": "保存设置失败",
       "disconnected": "已断开同步",
@@ -833,7 +836,11 @@
       "failedMessage": "复制 Cookie 失败: {{error}}",
       "copyButton_one": "复制 {{count}} 个 Cookie",
       "copyButton_other": "复制 {{count}} 个 Cookie",
-      "copyButtonEmpty": "复制 Cookies"
+      "copyButtonEmpty": "复制 Cookies",
+      "copyButton_few": "复制 {{count}} 个 Cookie",
+      "copyButton_many": "复制 {{count}} 个 Cookie",
+      "dialogDescription_few": "从源配置文件复制 Cookie 到 {{count}} 个选定的配置文件。",
+      "dialogDescription_many": "从源配置文件复制 Cookie 到 {{count}} 个选定的配置文件。"
     },
     "success": "Cookies 复制成功",
     "error": "复制 cookies 失败",
@@ -1114,61 +1121,6 @@
     "mimeTypesJson": "MIME 类型 (JSON 数组)",
     "voicesJson": "语音 (JSON 数组)"
   },
-  "fingerprintAudit": {
-    "open": "审计指纹",
-    "title": "指纹审计",
-    "description": "将保存的指纹与运行中的 Wayfern 页面可观察到的值进行比较。",
-    "run": "运行审计",
-    "running": "正在运行审计…",
-    "runAgain": "再次运行",
-    "export": "导出 JSON",
-    "exportSuccess": "指纹审计已导出",
-    "summary": "摘要",
-    "matches": "匹配",
-    "mismatches": "不匹配",
-    "unknown": "未知",
-    "total": "检查总数",
-    "noReport": "运行审计以收集浏览器观测值。",
-    "mismatchNotice": "部分实时值与保存的指纹不同。修改配置前请先检查。",
-    "expected": "预期",
-    "actual": "实际",
-    "statusMatch": "Match",
-    "statusMismatch": "Mismatch",
-    "statusUnknown": "Unknown",
-    "statusObserved": "Observed",
-    "statusCrossOriginFrame": "Cross-origin frame",
-    "statusFramePresent": "Frame present",
-    "details": "字段比较",
-    "observations": "其他观测值",
-    "oopif": "跨源框架检查",
-    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
-    "frameCount": "框架数量",
-    "childDevicePixelRatio": "Child DPR",
-    "childScreenWidth": "Child screen width",
-    "notAvailable": "不可用",
-    "categories": {
-      "navigator": "Navigator",
-      "screen": "屏幕",
-      "window": "窗口",
-      "timezone": "时区",
-      "webgl": "WebGL",
-      "media": "媒体偏好",
-      "color": "色彩与 HDR",
-      "storage": "存储",
-      "battery": "电池",
-      "fonts": "字体",
-      "browser": "浏览器集合",
-      "network": "网络",
-      "performance": "性能",
-      "observation": "观测"
-    },
-    "observationLabels": {
-      "audioHash": "离线音频哈希",
-      "mediaDevices": "媒体设备",
-      "webrtcCandidates": "WebRTC 候选",
-      "webglParameters": "WebGL 观测值"
-    }
-  },
   "warnings": {
     "windowResizeTitle": "自定义窗口尺寸",
     "windowResizeDescription": "更改浏览器窗口尺寸可能会增加网站检测到浏览器信息被伪装的概率。",
@@ -1311,6 +1263,12 @@
       "syncing": "同步中",
       "synced": "已同步",
       "error": "错误"
+    },
+    "ephemeral": {
+      "cookiesUnavailable": "临时配置在浏览器关闭时会被丢弃，因此这里没有可管理的 Cookie。",
+      "extensionsUnavailable": "临时配置在浏览器关闭时会被丢弃，因此无法为其分配扩展分组。",
+      "syncUnavailable": "临时配置在浏览器关闭时会被丢弃，因此没有可同步到云端的内容。",
+      "hint": "如果需要保留这些数据，请创建普通配置。"
     }
   },
   "extensions": {
@@ -1346,7 +1304,7 @@
     "deleteConfirmDescription": "确定要删除「{{name}}」吗？此操作无法撤消。",
     "deleteGroupConfirmTitle": "删除扩展程序组",
     "deleteGroupConfirmDescription": "确定要删除分组「{{name}}」吗？此操作无法撤消。",
-    "invalidFileType": "无效的文件类型。请上传 .crx、.xpi 或 .zip 文件。",
+    "invalidFileType": "文件类型无效。请选择 .crx 或 .zip 文件。",
     "readError": "读取扩展程序文件失败。",
     "assignTitle": "分配扩展程序组",
     "assignDescription": "将 {{count}} 个选定的配置文件分配到扩展程序组。",
@@ -1354,7 +1312,6 @@
     "assignSuccess": "扩展程序组分配成功",
     "editExtension": "编辑扩展",
     "updateSuccess": "扩展更新成功",
-    "reupload": "重新上传",
     "version": "版本",
     "author": "作者",
     "homepage": "主页",
@@ -1362,10 +1319,26 @@
     "editGroupDescription": "更新分组名称并管理包含的扩展。",
     "groupExtensions": "此分组中的扩展",
     "noExtensionsInGroup": "尚未添加扩展",
-    "editExtensionDescription": "更新扩展名称、查看元数据或重新上传扩展文件。",
+    "editExtensionDescription": "修改扩展名称、查看元数据，或用其他压缩包或文件夹替换它。",
     "metadata": "元数据",
     "noMetadata": "清单中没有可用的元数据。",
     "selectFile": "选择文件",
+    "loadUnpacked": "加载文件夹",
+    "loadUnpackedTooltip": "从包含 manifest.json 的文件夹加载扩展",
+    "selectFolderTitle": "选择扩展文件夹",
+    "selectedFolder": "已选文件夹",
+    "selectFolder": "选择文件夹",
+    "linkFolder": "直接从该文件夹加载",
+    "linkFolderOff": "文件夹会复制到 Donut，扩展可随身携带并同步到你的其他设备。",
+    "linkFolderOn": "Donut 每次启动都直接从该文件夹加载扩展。你的修改会在下次启动浏览器时生效，但扩展只保留在本机，不会同步。",
+    "replaceSource": "替换来源",
+    "linkedNoSync": "已链接的扩展只保留在本机，无法同步。",
+    "uploadFailed": "添加扩展失败",
+    "updateFailed": "更新扩展失败",
+    "deleteFailed": "删除扩展失败",
+    "groupCreateFailed": "创建扩展组失败",
+    "groupUpdateFailed": "更新扩展组失败",
+    "groupDeleteFailed": "删除扩展组失败",
     "syncEnabled": "同步已启用",
     "syncDisabled": "同步已禁用",
     "syncEnableTooltip": "启用同步",
@@ -1378,6 +1351,14 @@
       "groupsTitle": "删除扩展组",
       "groupsDescription": "删除 {{count}} 个扩展组？{{names}}",
       "confirmButton": "删除"
+    },
+    "source": {
+      "label": "来源",
+      "archive": "压缩包",
+      "unpacked": "解压文件夹",
+      "linked": "链接文件夹",
+      "folderLabel": "文件夹",
+      "linkedTooltip": "直接从 {{path}} 加载"
     }
   },
   "pro": {
@@ -1497,7 +1478,9 @@
       "deleteSuccess": "VPN 删除成功",
       "deleteFailed": "删除 VPN 失败",
       "deleteTitle": "删除 VPN",
-      "deleteDescription": "此操作无法撤消。VPN「{{name}}」将被永久删除。"
+      "deleteDescription": "此操作无法撤消。VPN「{{name}}」将被永久删除。",
+      "cannotDelete_few": "无法删除: 被 {{count}} 个配置文件使用",
+      "cannotDelete_many": "无法删除: 被 {{count}} 个配置文件使用"
     }
   },
   "importProfile": {
@@ -1549,7 +1532,43 @@
     "vpnOptional": "VPN(可选)",
     "noVpn": "不使用 VPN",
     "advancedOptions": "高级选项",
-    "configureFingerprint": "配置指纹(可选)"
+    "configureFingerprint": "配置指纹(可选)",
+    "reportCookies": "Cookie",
+    "reportPasswords": "密码",
+    "reportAutofill": "付款方式",
+    "reportExtensions": "扩展程序",
+    "reportHistory": "历史记录",
+    "reportBookmarks": "书签",
+    "reportLocalStorage": "网站数据",
+    "reportNothingCarried": "没有可读取的数据被迁移",
+    "reportUnrecoverable": "无法解密：{{count}}",
+    "closeSourceBrowserHint": "关闭源浏览器后重试可获得完整副本；也可以现在导入，但网站数据可能不完整。",
+    "importAnyway": "仍要导入",
+    "warnings": {
+      "secretsNotMigrated": "无法解锁 Cookie 和密码，你需要重新登录。",
+      "appBoundEncrypted": "Windows 上的 Chrome 127+ 会把 Cookie 绑定到浏览器本身，其他任何应用都无法迁移。",
+      "storeTooOld": "某个数据库过旧，此浏览器无法打开，已跳过。",
+      "storeTooNew": "某个数据库来自更新版本的浏览器，已跳过。",
+      "sourceBrowserRunning": "源浏览器正在运行，网站数据可能不完整。",
+      "securePreferencesReset": "主页、搜索引擎等受保护的设置已恢复为默认值。",
+      "extensionsPartial": "部分扩展属于源浏览器，未被迁移。",
+      "storeUnreadable": "某个数据库无法读取，已跳过而不是复制损坏的副本。"
+    },
+    "legacyDonut": "从旧 Donut 迁移",
+    "legacyTitle": "复制旧 Donut 数据",
+    "legacyDescription": "先预览，再选择性地把本地数据复制到 DON。",
+    "legacyScanning": "正在检查旧 Donut 数据…",
+    "legacyNotFound": "这台电脑上没有找到旧 Donut 数据。",
+    "legacyCopyOnly": "DON 只会读取并复制您选择的数据，不会修改旧 Donut。账户令牌、云端登录、更新状态、VPN 和浏览器程序不会被复制。",
+    "legacyConflicts": "有 {{count}} 个现有项目会被安全跳过，或关联到 DON 中的同一项目；不会覆盖任何数据。",
+    "legacyResult": "已复制 {{copied}} 个，跳过 {{skipped}} 个，失败 {{failed}} 个",
+    "legacyMigrateButton": "把所选数据复制到 DON",
+    "legacyCategories": {
+      "profiles": "配置文件和浏览数据",
+      "proxies": "本地代理",
+      "groups": "配置文件分组",
+      "extensions": "扩展程序和扩展分组"
+    }
   },
   "syncTooltips": {
     "syncing": "同步中...",
@@ -1582,7 +1601,9 @@
       "description": "确定要删除 {{count}} 个分组吗？{{names}}。配置文件将被移至默认分组。",
       "description_one": "确定要删除 {{count}} 个分组吗？{{names}}。配置文件将被移至默认分组。",
       "confirmButton": "删除分组"
-    }
+    },
+    "profileCount_few": "{{count}} 个配置文件",
+    "profileCount_many": "{{count}} 个配置文件"
   },
   "proxyAssignment": {
     "title": "分配代理 / VPN",
@@ -1601,7 +1622,9 @@
     "noneOption": "无",
     "noValidProfiles": "未选择有效的配置文件。",
     "vpnGroupHeading": "VPN",
-    "failedFallback": "为配置文件分配代理/VPN 失败"
+    "failedFallback": "为配置文件分配代理/VPN 失败",
+    "description_few": "为 {{count}} 个选定的配置文件分配代理或 VPN。",
+    "description_many": "为 {{count}} 个选定的配置文件分配代理或 VPN。"
   },
   "groupAssignment": {
     "title": "分配分组",
@@ -1616,7 +1639,9 @@
     "selectedProfilesLabel": "选定的配置文件:",
     "assignGroupLabel": "分配到分组:",
     "noValidProfiles": "未选择有效的配置文件。",
-    "failedFallback": "为配置文件分配分组失败"
+    "failedFallback": "为配置文件分配分组失败",
+    "description_few": "为 {{count}} 个选定的配置文件分配分组。",
+    "description_many": "为 {{count}} 个选定的配置文件分配分组。"
   },
   "profileSelector": {
     "title": "选择配置文件",
@@ -1757,7 +1782,7 @@
   },
   "appUpdate": {
     "toast": {
-      "updateFailed": "更新 Donut Browser 失败",
+      "updateFailed": "更新 DON 失败",
       "restartFailed": "重启失败",
       "updateReady": "更新就绪，请重启以应用",
       "manualDownloadRequired": "需要手动下载",
@@ -1888,6 +1913,15 @@
     "vpnNotFound": "未找到 VPN",
     "extensionNotFound": "未找到扩展",
     "extensionGroupNotFound": "未找到扩展分组",
+    "extensionUnsupportedFileType": "不支持该文件类型。扩展必须是 .crx 或 .zip 压缩包，或者一个文件夹。",
+    "extensionDirNotFound": "该文件夹已不存在。",
+    "extensionNotADirectory": "该路径不是文件夹。",
+    "extensionManifestMissing": "该文件夹中没有 manifest.json。请选择包含扩展 manifest.json 的文件夹。",
+    "extensionManifestInvalid": "无法读取该文件夹中的 manifest.json。",
+    "extensionDirTooLarge": "该文件夹过大，无法复制到 Donut（上限为 256 MB、20,000 个文件）。请改用链接方式加载。",
+    "extensionPathHasComma": "该文件夹路径中包含逗号，Chromium 无法加载。请重命名或移动该文件夹。",
+    "extensionLinkRequiresDirectory": "只有文件夹才能就地加载。要添加压缩包，请关闭链接选项。",
+    "extensionLinkedCannotSync": "该扩展是从本机文件夹加载的，没有需要同步的内容。",
     "cannotModifyCloudManagedProxy": "无法修改云管理代理的同步",
     "syncLockedByProfile": "在被已同步的配置文件使用时无法禁用同步",
     "syncNotConfigured": "同步未配置。请先登录或配置自托管服务器。",
@@ -1989,7 +2023,11 @@
     },
     "camoufoxRemoved": "Camoufox 已不再受支持。请使用 Wayfern 重新创建此配置文件。",
     "noE2ePasswordSet": "尚未设置端到端加密密码。请先设置后再同步加密数据。",
-    "fingerprintAuditFailed": "指纹审计失败：{{detail}}"
+    "importSourceNotChromium": "该文件夹不是 Chromium 浏览器配置文件",
+    "importSourceNotChromiumNamed": "无法导入 {{family}} 配置文件；仅支持基于 Chromium 的浏览器",
+    "importSourceBrowserRunning": "请先关闭 {{browser}}，或选择仍要导入",
+    "fingerprintAuditFailed": "指纹审计失败：{{detail}}",
+    "legacyMigrationFailed": "无法安全复制旧 Donut 数据。您的旧数据没有被修改。"
   },
   "rail": {
     "profiles": "配置文件",
@@ -2204,7 +2242,7 @@
   },
   "wayfernBlocked": {
     "title": "浏览器自动化已暂停",
-    "description": "您的账户暂时被限制使用 Pro 浏览器功能，通常是因为同时在多台设备上登录。请退出其他设备的登录，然后重新启动配置文件即可恢复。"
+    "description": "浏览器自动化一次只能在一台设备上运行，目前有另一台已登录的设备正在使用。请在该设备上退出登录，然后重新启动此配置文件。"
   },
   "wayfernConfigDialog": {
     "titleView": "查看指纹设置 - {{name}} ({{browser}})",
@@ -2252,7 +2290,7 @@
     },
     "locked": {
       "title": "Cookie Bot",
-      "hint": "Cookie Bot 在远程机器上通宵养号，无需开着你的电脑也能保住 Cookie 和历史记录。需要 Pro 或 Team 套餐。"
+      "hint": "Cookie Bot 在远程机器上通宵养号，无需开着你的电脑也能保住 Cookie 和历史记录。"
     },
     "empty": {
       "title": "尚未加入任何配置文件",
@@ -2264,7 +2302,9 @@
       "nextRun": "下次运行 {{time}}",
       "dueCount_one": "{{count}} 个配置文件待运行",
       "dueCount_other": "{{count}} 个配置文件待运行",
-      "nothingScheduled": "没有安排"
+      "nothingScheduled": "没有安排",
+      "dueCount_few": "{{count}} 个配置文件待运行",
+      "dueCount_many": "{{count}} 个配置文件待运行"
     },
     "lastDay": {
       "label": "最近 24 小时",
@@ -2274,7 +2314,13 @@
       "partial_one": "{{count}} 次部分完成",
       "partial_other": "{{count}} 次部分完成",
       "failed_one": "{{count}} 次失败",
-      "failed_other": "{{count}} 次失败"
+      "failed_other": "{{count}} 次失败",
+      "failed_few": "{{count}} 次失败",
+      "failed_many": "{{count}} 次失败",
+      "partial_few": "{{count}} 次部分完成",
+      "partial_many": "{{count}} 次部分完成",
+      "ran_few": "{{count}} 次运行",
+      "ran_many": "{{count}} 次运行"
     },
     "chart": {
       "machineTime": "每晚机器时长",
@@ -2313,7 +2359,11 @@
       "unenrol": "从 Cookie Bot 移除",
       "unenrolTitle": "将 {{name}} 从 Cookie Bot 移除？",
       "unenrolDescription": "今晚起停止养号。以往的运行记录仍保留在“活动”中。",
-      "unenrolled": "已从 Cookie Bot 移除"
+      "unenrolled": "已从 Cookie Bot 移除",
+      "crowded_few": "{{count}} 个配置文件同时开始",
+      "crowded_many": "{{count}} 个配置文件同时开始",
+      "quietHours_few": "{{count}} 个空闲小时",
+      "quietHours_many": "{{count}} 个空闲小时"
     },
     "status": {
       "provisioning": "正在准备机器",
@@ -2350,7 +2400,9 @@
       "consentUnknown": "尚未报告同意提示",
       "billed": "已计费 {{duration}}",
       "billedUnknown": "尚未报告计费时长",
-      "chunk": "第 {{index}} 段，共 {{total}} 段"
+      "chunk": "第 {{index}} 段，共 {{total}} 段",
+      "consentHandled_few": "已处理 {{count}} 个同意提示",
+      "consentHandled_many": "已处理 {{count}} 个同意提示"
     },
     "history": {
       "title": "运行记录",
@@ -2375,7 +2427,11 @@
       "sitesFailed_other": "{{count}} 个网站无法访问",
       "consentHandled_one": "已处理 {{count}} 个同意提示",
       "consentHandled_other": "已处理 {{count}} 个同意提示",
-      "sitesUnknown": "暂无数据"
+      "sitesUnknown": "暂无数据",
+      "consentHandled_few": "已处理 {{count}} 个同意提示",
+      "consentHandled_many": "已处理 {{count}} 个同意提示",
+      "sitesFailed_few": "{{count}} 个网站无法访问",
+      "sitesFailed_many": "{{count}} 个网站无法访问"
     },
     "duration": {
       "hm": "{{hours}} 小时 {{minutes}} 分",
@@ -2389,7 +2445,9 @@
       "noProfiles": "没有匹配的配置文件。",
       "alreadyEnrolled": "已加入",
       "continue_one": "继续（{{count}} 个）",
-      "continue_other": "继续（{{count}} 个）"
+      "continue_other": "继续（{{count}} 个）",
+      "continue_few": "继续（{{count}} 个）",
+      "continue_many": "继续（{{count}} 个）"
     },
     "enrol": {
       "titleOne": "加入 {{name}}",
@@ -2465,7 +2523,27 @@
       "listSites_other": "{{count}} 个网站",
       "summarySlots_one": "每周运行 {{count}} 次，每次最多 {{minutes}} 分钟。",
       "summarySlots_other": "每周运行 {{count}} 次，每次最多 {{minutes}} 分钟。",
-      "templateNameInvalidNoMax": "该名称不能用于已保存的列表。"
+      "templateNameInvalidNoMax": "该名称不能用于已保存的列表。",
+      "cadenceCustom_few": "每周 {{count}} 晚",
+      "cadenceCustom_many": "每周 {{count}} 晚",
+      "confirmBulkButton_few": "继续（{{count}} 个配置文件）",
+      "confirmBulkButton_many": "继续（{{count}} 个配置文件）",
+      "confirmBulkDescription_few": "这会占用共享远程时长预订 {{count}} 次夜间运行。时间和网站将在下一步选择。",
+      "confirmBulkDescription_many": "这会占用共享远程时长预订 {{count}} 次夜间运行。时间和网站将在下一步选择。",
+      "confirmBulkTitle_few": "将 {{count}} 个配置文件加入 Cookie Bot？",
+      "confirmBulkTitle_many": "将 {{count}} 个配置文件加入 Cookie Bot？",
+      "enrolled_few": "已加入 {{count}} 个配置文件",
+      "enrolled_many": "已加入 {{count}} 个配置文件",
+      "listSites_few": "{{count}} 个网站",
+      "listSites_many": "{{count}} 个网站",
+      "sitesHint_few": "{{count}} 个网站。只会访问你在这里列出的页面。",
+      "sitesHint_many": "{{count}} 个网站。只会访问你在这里列出的页面。",
+      "summaryCustom_few": "每周 {{count}} 晚，于 {{time}} 运行，每次最多 {{minutes}} 分钟。",
+      "summaryCustom_many": "每周 {{count}} 晚，于 {{time}} 运行，每次最多 {{minutes}} 分钟。",
+      "summarySlots_few": "每周运行 {{count}} 次，每次最多 {{minutes}} 分钟。",
+      "summarySlots_many": "每周运行 {{count}} 次，每次最多 {{minutes}} 分钟。",
+      "titleCount_few": "加入 {{count}} 个配置文件",
+      "titleCount_many": "加入 {{count}} 个配置文件"
     },
     "preset": {
       "light": "轻度",
@@ -2488,7 +2566,9 @@
       "fixEncrypted": "打开同步设置",
       "fixProxy": "绑定代理",
       "fixFailed": "无法应用该修复。",
-      "exitNodeHint": "没有代理或 VPN 时，流量会从机器集群自己的数据中心地址发出。来自托管网络的长时间流量对配置文件身份的损害，比完全不养号还要大。"
+      "exitNodeHint": "没有代理或 VPN 时，流量会从机器集群自己的数据中心地址发出。来自托管网络的长时间流量对配置文件身份的损害，比完全不养号还要大。",
+      "ineligible_few": "{{count}} 个配置文件无法远程运行",
+      "ineligible_many": "{{count}} 个配置文件无法远程运行"
     },
     "conflict": {
       "title": "{{email}} 已在 {{time}} 养这个配置文件",
@@ -2502,7 +2582,7 @@
     },
     "actionBar": {
       "enrol": "加入 Cookie Bot",
-      "proRequired": "Cookie Bot 需要 Pro 或 Team 套餐",
+      "proRequired": "Cookie Bot 需要付费套餐",
       "noneEligible": "所选配置文件都无法远程养号"
     },
     "actions": {
@@ -2534,7 +2614,9 @@
       "columnShare": "占比",
       "noActivity": "此期间没有远程会话。",
       "soloNote": "目前只显示你自己的用量。邀请队友后可按成员查看时长分配。",
-      "runsFailed": "· {{n}} 次失败"
+      "runsFailed": "· {{n}} 次失败",
+      "pooled_few": "{{total}} 小时中已用 {{used}} 小时，由 {{count}} 个席位共享",
+      "pooled_many": "{{total}} 小时中已用 {{used}} 小时，由 {{count}} 个席位共享"
     },
     "closeReason": {
       "stoppedByUser": "已手动停止",
@@ -2562,15 +2644,18 @@
     "titleBlocked": "启动已阻止",
     "titleWarning": "启动前请注意",
     "intro": "启动浏览器前，请检查“{{name}}”的以下问题。",
-    "fingerprintHeading": "代理出口与指纹不匹配",
-    "vpnExtensionHeading": "检测到 VPN 扩展",
+    "fingerprintHeading": "测得的出口与指纹不匹配",
+    "vpnExtensionHeading": "检测到 VPN 或代理扩展",
     "vpnExtensionIntro": "此配置文件中可能改变浏览器流量路径的扩展：",
-    "vpnExtensionConfirmed": "可以更改代理",
-    "vpnExtensionLikely": "可能会更改代理",
+    "vpnExtensionConfirmed": "已知的 VPN 或代理工具",
+    "vpnExtensionLikely": "疑似 VPN 或代理工具",
+    "vpnExtensionCapability": "拥有代理权限",
     "vpnExtensionExplainer": "如果其中之一将流量转发到别处，浏览器的真实位置将不再与创建此配置文件时使用的时区、语言和地理位置一致，而 Donut 无法从外部察觉。",
+    "proxyCapableHeading": "可以更改代理的扩展",
+    "proxyCapableIntro": "它们看起来不是 VPN，但拥有 Chromium 的代理权限，下载管理器和调试工具同样需要该权限。Donut 无法判断它们是否在使用它：",
     "sourceDonut": "由 Donut 管理",
     "sourceBrowser": "已安装在配置文件中",
-    "measurementUnreliable": "由于 VPN 扩展可以覆盖代理设置，出口检测结果可能并非浏览器实际使用的线路。",
+    "measurementUnreliable": "此配置文件中有扩展拥有代理权限，因此出口检测结果可能并非浏览器实际使用的线路。",
     "scanIncompleteEncrypted": "此配置文件已加密，因此只能检查由 Donut 管理的扩展。",
     "scanIncompleteEphemeral": "此配置文件尚无数据，因此只能检查由 Donut 管理的扩展。",
     "scanIncompletePartial": "扩展扫描被中断，可能有部分扩展未列出。",
@@ -2580,9 +2665,64 @@
     "dontWarnExtensions": "不再就这些扩展发出警告",
     "applyToRemaining": "将此选择应用于其余配置文件",
     "cancelledSummary": "已取消 {{total}} 次启动中的 {{cancelled}} 次",
-    "cancelled": "已取消启动",
     "vpnExtensionEntry": " {{version}} — {{capability}}、{{source}}",
+    "vpnExtensionEntryNoVersion": " — {{capability}}、{{source}}",
     "scanIncompleteMissing": "此配置文件尚未启动过，因此只能检查由 Donut 管理的扩展。"
+  },
+  "fingerprintAudit": {
+    "open": "审计指纹",
+    "title": "指纹审计",
+    "description": "将保存的指纹与运行中的 Wayfern 页面可观察到的值进行比较。",
+    "run": "运行审计",
+    "running": "正在运行审计…",
+    "runAgain": "再次运行",
+    "export": "导出 JSON",
+    "exportSuccess": "指纹审计已导出",
+    "summary": "摘要",
+    "matches": "匹配",
+    "mismatches": "不匹配",
+    "unknown": "未知",
+    "total": "检查总数",
+    "noReport": "运行审计以收集浏览器观测值。",
+    "mismatchNotice": "部分实时值与保存的指纹不同。修改配置前请先检查。",
+    "expected": "预期",
+    "actual": "实际",
+    "statusMatch": "Match",
+    "statusMismatch": "Mismatch",
+    "statusUnknown": "Unknown",
+    "statusObserved": "Observed",
+    "statusCrossOriginFrame": "Cross-origin frame",
+    "statusFramePresent": "Frame present",
+    "details": "字段比较",
+    "observations": "其他观测值",
+    "oopif": "跨源框架检查",
+    "oopifDescription": "The probe creates a hidden cross-origin frame and checks whether Chromium exposes a separate OOPIF target.",
+    "frameCount": "框架数量",
+    "childDevicePixelRatio": "Child DPR",
+    "childScreenWidth": "Child screen width",
+    "notAvailable": "不可用",
+    "categories": {
+      "navigator": "Navigator",
+      "screen": "屏幕",
+      "window": "窗口",
+      "timezone": "时区",
+      "webgl": "WebGL",
+      "media": "媒体偏好",
+      "color": "色彩与 HDR",
+      "storage": "存储",
+      "battery": "电池",
+      "fonts": "字体",
+      "browser": "浏览器集合",
+      "network": "网络",
+      "performance": "性能",
+      "observation": "观测"
+    },
+    "observationLabels": {
+      "audioHash": "离线音频哈希",
+      "mediaDevices": "媒体设备",
+      "webrtcCandidates": "WebRTC 候选",
+      "webglParameters": "WebGL 观测值"
+    }
   },
   "claudeWorkflow": {
     "title": "Claude 隔离工作流",

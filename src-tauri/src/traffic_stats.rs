@@ -508,9 +508,9 @@ fn merge_traffic_stats(dest: &mut TrafficStats, src: &TrafficStats) {
 ///
 /// Removes the session snapshot and any temp orphans alongside the main file.
 /// The snapshot is what a running worker writes every second, and
-/// `get_all_traffic_snapshots_realtime` rebuilds an entry straight from it when
-/// no main file exists — so clearing only `{id}.json` resurrects the very
-/// totals the user asked to erase, and leaves the snapshot's copy on disk.
+/// readers rebuild an entry straight from it when no main file exists — so
+/// clearing only `{id}.json` resurrects the very totals the user asked to erase,
+/// and leaves the snapshot's copy on disk.
 pub fn delete_traffic_stats(id: &str) -> bool {
   let storage_dir = get_traffic_stats_dir();
   let mut removed = false;
@@ -530,38 +530,10 @@ pub fn delete_traffic_stats(id: &str) -> bool {
   removed
 }
 
-/// Best-effort secure erase: overwrite the file's bytes with zeros and flush
-/// before unlinking, so the traffic history isn't trivially recoverable from
-/// the freed blocks. On copy-on-write / SSD storage the OS may still retain
-/// old blocks — this is a best-effort mitigation, not a guarantee.
-fn secure_remove_file(path: &std::path::Path) -> std::io::Result<()> {
-  use std::io::Write;
-  if let Ok(meta) = fs::metadata(path) {
-    let len = meta.len();
-    if len > 0 {
-      if let Ok(mut f) = fs::OpenOptions::new().write(true).open(path) {
-        let zeros = vec![0u8; 8192];
-        let mut remaining = len;
-        // The overwrite is best-effort and must never gate the unlink: a write
-        // failure part-way (ENOSPC on a copy-on-write volume, EIO) would
-        // otherwise leave the file both un-wiped and un-deleted, which is
-        // strictly worse than the plain remove this replaced — and the caller
-        // reports success either way, so the history would silently survive a
-        // clear.
-        while remaining > 0 {
-          let chunk = remaining.min(zeros.len() as u64) as usize;
-          if f.write_all(&zeros[..chunk]).is_err() {
-            break;
-          }
-          remaining -= chunk as u64;
-        }
-        let _ = f.flush();
-        let _ = f.sync_all();
-      }
-    }
-  }
-  fs::remove_file(path)
-}
+/// Best-effort secure erase. Shared with the ephemeral-profile teardown, which
+/// needs exactly the same "zero then unlink, never let the overwrite gate the
+/// unlink" behaviour; see `crate::fs_secure` for the caveats.
+use crate::fs_secure::secure_remove_file;
 
 /// Clear all traffic stats (used when clearing cache), securely erasing each
 /// file first.
@@ -1104,97 +1076,68 @@ fn load_session_snapshot(profile_id: &str) -> Option<SessionSnapshot> {
   serde_json::from_str::<SessionSnapshot>(&content).ok()
 }
 
-/// Get all traffic snapshots with real-time data merged
-/// This provides near real-time updates by merging session snapshots with disk data
-pub fn get_all_traffic_snapshots_realtime() -> Vec<TrafficSnapshot> {
-  use std::collections::HashMap;
+/// Get real-time snapshots for a known set of running profiles without
+/// enumerating every historical stats file on every UI poll.
+pub fn get_traffic_snapshots_for_profiles(profile_ids: &[String]) -> Vec<TrafficSnapshot> {
+  let active = get_traffic_tracker()
+    .map(|tracker| (tracker.profile_id.clone(), tracker.to_realtime_snapshot()));
+  let mut seen = std::collections::HashSet::new();
+  let mut snapshots = Vec::with_capacity(profile_ids.len());
 
-  // Start with disk-stored stats, keeping last_flush_timestamp per key so the
-  // session-snapshot merge below doesn't need to re-read the files
-  let mut snapshots: HashMap<String, TrafficSnapshot> = HashMap::new();
-  let mut last_flush_by_key: HashMap<String, u64> = HashMap::new();
-  for (key, s) in collect_traffic_stats() {
-    last_flush_by_key.insert(key.clone(), s.last_flush_timestamp);
-    snapshots.insert(key, s.to_snapshot());
-  }
-
-  // Try to merge in real-time data from active tracker (if in same process)
-  if let Some(tracker) = get_traffic_tracker() {
-    let key = tracker
-      .profile_id
-      .clone()
-      .unwrap_or_else(|| tracker.proxy_id.clone());
-    let realtime_snapshot = tracker.to_realtime_snapshot();
-    snapshots.insert(key, realtime_snapshot);
-  }
-
-  // Also merge session snapshots from proxy worker processes
-  let storage_dir = get_traffic_stats_dir();
-  if let Ok(entries) = fs::read_dir(&storage_dir) {
-    for entry in entries.flatten() {
-      let path = entry.path();
-      if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-        if file_name.ends_with(".session.json") {
-          if let Some(profile_id) = file_name.strip_suffix(".session.json") {
-            if let Some(session) = load_session_snapshot(profile_id) {
-              // Merge session data with disk snapshot
-              if let Some(snapshot) = snapshots.get_mut(profile_id) {
-                // Only merge session data if it's newer than the last flush
-                // Session snapshots written before the last flush contain bytes already
-                // included in disk totals, so merging them would cause double-counting
-                let last_flush = last_flush_by_key.get(profile_id).copied().unwrap_or(0);
-
-                if session.timestamp > last_flush {
-                  // Session data contains in-memory counters not yet flushed to disk
-                  // Disk snapshot contains cumulative totals already flushed
-                  // We need to ADD them, not take the max, to get the true total
-                  snapshot.total_bytes_sent =
-                    snapshot.total_bytes_sent.saturating_add(session.bytes_sent);
-                  snapshot.total_bytes_received = snapshot
-                    .total_bytes_received
-                    .saturating_add(session.bytes_received);
-                  snapshot.total_requests =
-                    snapshot.total_requests.saturating_add(session.requests);
-                  snapshot.current_bytes_sent = session.bytes_sent;
-                  snapshot.current_bytes_received = session.bytes_received;
-                  snapshot.last_update = session.timestamp;
-                } else {
-                  // Session snapshot is stale (written before last flush)
-                  // Use current values from disk snapshot, but update timestamp if session is newer
-                  if session.timestamp > snapshot.last_update {
-                    snapshot.last_update = session.timestamp;
-                  }
-                }
-              } else {
-                // Create new snapshot from session data
-                snapshots.insert(
-                  profile_id.to_string(),
-                  TrafficSnapshot {
-                    profile_id: session.profile_id,
-                    session_start: current_timestamp().saturating_sub(60),
-                    last_update: session.timestamp,
-                    total_bytes_sent: session.bytes_sent,
-                    total_bytes_received: session.bytes_received,
-                    total_requests: session.requests,
-                    current_bytes_sent: session.bytes_sent,
-                    current_bytes_received: session.bytes_received,
-                    recent_bandwidth: vec![],
-                  },
-                );
-              }
-            }
-          }
-        }
+  for profile_id in profile_ids {
+    if !seen.insert(profile_id.as_str()) {
+      continue;
+    }
+    if let Some((Some(active_id), snapshot)) = active.as_ref() {
+      if active_id == profile_id {
+        snapshots.push(snapshot.clone());
+        continue;
       }
+    }
+
+    let stats = load_traffic_stats(profile_id);
+    let last_flush = stats.as_ref().map(|s| s.last_flush_timestamp).unwrap_or(0);
+    let mut snapshot = stats.map(|s| s.to_snapshot());
+    if let Some(session) = load_session_snapshot(profile_id) {
+      if session.timestamp > last_flush {
+        if let Some(existing) = snapshot.as_mut() {
+          existing.total_bytes_sent = existing.total_bytes_sent.saturating_add(session.bytes_sent);
+          existing.total_bytes_received = existing
+            .total_bytes_received
+            .saturating_add(session.bytes_received);
+          existing.total_requests = existing.total_requests.saturating_add(session.requests);
+          existing.current_bytes_sent = session.bytes_sent;
+          existing.current_bytes_received = session.bytes_received;
+          existing.last_update = session.timestamp;
+        } else {
+          snapshot = Some(TrafficSnapshot {
+            profile_id: session.profile_id,
+            session_start: current_timestamp().saturating_sub(60),
+            last_update: session.timestamp,
+            total_bytes_sent: session.bytes_sent,
+            total_bytes_received: session.bytes_received,
+            total_requests: session.requests,
+            current_bytes_sent: session.bytes_sent,
+            current_bytes_received: session.bytes_received,
+            recent_bandwidth: vec![],
+          });
+        }
+      } else if let Some(existing) = snapshot.as_mut() {
+        existing.last_update = existing.last_update.max(session.timestamp);
+      }
+    }
+    if let Some(snapshot) = snapshot {
+      snapshots.push(snapshot);
     }
   }
 
-  snapshots.into_values().collect()
+  snapshots
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use tempfile::TempDir;
 
   #[test]
   fn test_traffic_stats_creation() {
@@ -1245,5 +1188,47 @@ mod tests {
     stats.record_ip("10.0.0.1");
 
     assert_eq!(stats.unique_ips.len(), 2);
+  }
+
+  #[test]
+  fn targeted_snapshots_read_and_merge_only_requested_profiles() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_cache_dir(temp.path().to_path_buf());
+    let mut requested = TrafficStats::new(
+      "proxy-requested".to_string(),
+      Some("profile-requested".to_string()),
+    );
+    requested.total_bytes_sent = 100;
+    requested.total_bytes_received = 200;
+    requested.total_requests = 3;
+    requested.last_flush_timestamp = 10;
+    save_traffic_stats(&requested).unwrap();
+
+    let unrelated = TrafficStats::new(
+      "proxy-unrelated".to_string(),
+      Some("profile-unrelated".to_string()),
+    );
+    save_traffic_stats(&unrelated).unwrap();
+    let session = SessionSnapshot {
+      proxy_id: "proxy-requested".to_string(),
+      profile_id: Some("profile-requested".to_string()),
+      bytes_sent: 7,
+      bytes_received: 11,
+      requests: 2,
+      timestamp: 20,
+    };
+    fs::write(
+      get_traffic_stats_dir().join("profile-requested.session.json"),
+      serde_json::to_vec(&session).unwrap(),
+    )
+    .unwrap();
+
+    let snapshots = get_traffic_snapshots_for_profiles(&["profile-requested".to_string()]);
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = &snapshots[0];
+    assert_eq!(snapshot.profile_id.as_deref(), Some("profile-requested"));
+    assert_eq!(snapshot.total_bytes_sent, 107);
+    assert_eq!(snapshot.total_bytes_received, 211);
+    assert_eq!(snapshot.total_requests, 5);
   }
 }

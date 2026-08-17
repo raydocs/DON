@@ -1,19 +1,21 @@
 # DON — AGPL fork of Donut Browser
 
-**Version:** 0.0.1  
-**Upstream:** [zhom/donutbrowser](https://github.com/zhom/donutbrowser) (AGPL-3.0)  
+**Version:** 0.0.2
+
+**Upstream:** [zhom/donutbrowser](https://github.com/zhom/donutbrowser) (AGPL-3.0)
+
 **This fork is not affiliated with Donut Browser / donutbrowser.com.**
 
 ## What changed vs upstream
 
-| Area | Upstream | DON 0.0.1 |
+| Area | Upstream | DON 0.0.2 |
 |------|----------|-----------|
 | App name / id | Donut / `com.donutbrowser` | **DON** / `com.donbrowser` |
 | Data directory | `DonutBrowser` | **`DON`** (`DONDev` in debug) |
-| Version | 0.28.x | **0.0.1** |
+| Version | 0.29.x | **0.0.2** |
 | Paid gates | Pro subscription required for fingerprint edit, automation, etc. | **All local capabilities unlocked** |
 | Commercial trial modal | 14-day commercial use trial | **Removed** (module, commands, modal, settings section, locale keys) |
-| Official auto-update | Pulls `github.com/zhom/donutbrowser` releases | **Permanently disabled** |
+| App auto-update | Pulls `zhom/donutbrowser` releases | **Authenticated private releases from `raydocs/DON` only** |
 | Built-in extensions | None | **Session Key for Claude** (CWS `dlpmgafmpolffcmjedpdphdnejmfljnb`) auto-downloaded at first launch; reserved **DON Default** group attached to every new profile and to existing group-less profiles (one-time migration) |
 | Proxy add form | Manual field entry only | **Paste `host:port:user:pass` / `scheme://…`** into the host field to auto-fill |
 | Quick create | — | Claude panel: **paste proxy → create profile → post-create exit check** (exit IP/country/timezone vs fingerprint timezone/language, WebRTC + DPR/screen/UA summary, "Match to proxy" fix) |
@@ -31,8 +33,9 @@ This project remains under **GNU Affero General Public License v3.0**.
 ## Why separate branding and version
 
 - Avoid overwriting or mixing official install data (`%LOCALAPPDATA%\DonutBrowser`).
-- Avoid pulling official updates that would replace this fork.
-- Version **0.0.1** marks a clean break from upstream release numbers.
+- Avoid pulling official updates that would replace this fork; Mac and Windows
+  use the same private DON release stream.
+- Version **0.0.x** marks a clean break from upstream release numbers.
 
 ## Build (Windows sketch)
 

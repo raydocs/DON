@@ -18,9 +18,9 @@ env:
 
 jobs:
   security-scan:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     name: Security Vulnerability Scan
-    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@9a498708959aeaef5ef730655706c5a1df1edbc2" # v2.3.8
+    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8deb546fdb875b9996d27d4950be7312dac076a1" # v2.5.0
     with:
       scan-args: |-
         -r
@@ -34,21 +34,21 @@ jobs:
       actions: read
 
   lint-js:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     name: Lint JavaScript/TypeScript
     uses: ./.github/workflows/lint-js.yml
     permissions:
       contents: read
 
   lint-rust:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     name: Lint Rust
     uses: ./.github/workflows/lint-rs.yml
     permissions:
       contents: read
 
   codeql:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     name: CodeQL
     uses: ./.github/workflows/codeql.yml
     permissions:
@@ -58,14 +58,14 @@ jobs:
       actions: read
 
   spellcheck:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     name: Spell Check
     uses: ./.github/workflows/spellcheck.yml
     permissions:
       contents: read
 
   release:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     needs: [security-scan, lint-js, lint-rust, codeql, spellcheck]
     permissions:
       contents: write
@@ -104,7 +104,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 #v7.0.1
 
       - name: Setup pnpm
-        uses: pnpm/action-setup@0ebf47130e4866e96fce0953f49152a61190b271 #v6.0.9
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 #v6.0.10
         with:
           run_install: false
 
@@ -127,7 +127,7 @@ jobs:
           sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev pkg-config unzip xdg-utils
 
       - name: Rust cache
-        uses: swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 #v2.9.1
+        uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 #v2.9.2
         with:
           workdir: ./src-tauri
 
@@ -181,6 +181,10 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_KEY: ${{ secrets.APPLE_CERTIFICATE_KEY }}
         run: |
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_KEY" ]]; then
+            echo "Apple signing certificate is not configured; building an unsigned self-use package"
+            exit 0
+          fi
           CERT_PATH=$RUNNER_TEMP/cert.cer
           KEY_PATH=$RUNNER_TEMP/cert.key
           PEM_PATH=$RUNNER_TEMP/cert.pem
@@ -227,7 +231,7 @@ jobs:
         with:
           projectPath: ./src-tauri
           tagName: ${{ github.ref_name }}
-          releaseName: "Donut Browser ${{ github.ref_name }}"
+          releaseName: "DON ${{ github.ref_name }}"
           releaseBody: "See the assets to download this version and install."
           releaseDraft: false
           prerelease: false
@@ -240,11 +244,11 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
-          PORTABLE_DIR="Donut-Portable"
+          PORTABLE_DIR="Don-Portable"
           mkdir -p "$PORTABLE_DIR"
 
           # Copy main executable
-          cp "src-tauri/target/${{ matrix.target }}/release/donutbrowser.exe" "$PORTABLE_DIR/Donut.exe"
+          cp "src-tauri/target/${{ matrix.target }}/release/donutbrowser.exe" "$PORTABLE_DIR/Don.exe"
 
           # Copy sidecar binaries
           cp "src-tauri/target/${{ matrix.target }}/release/donut-proxy.exe" "$PORTABLE_DIR/"
@@ -267,7 +271,7 @@ jobs:
           touch "$PORTABLE_DIR/.portable"
 
           # Create ZIP
-          7z a "Donut_${VERSION}_x64-portable.zip" "$PORTABLE_DIR"
+          7z a "Don_${VERSION}_x64-portable.zip" "$PORTABLE_DIR"
 
       - name: Upload portable ZIP to release
         if: matrix.platform == 'windows-latest'
@@ -277,7 +281,7 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           VERSION="${TAG#v}"
-          gh release upload "$TAG" "Donut_${VERSION}_x64-portable.zip" --clobber
+          gh release upload "$TAG" "Don_${VERSION}_x64-portable.zip" --clobber
 
       - name: Clean up Apple certificate
         if: matrix.platform == 'macos-latest' && always()
@@ -289,7 +293,7 @@ jobs:
   # sums cover the complete, final asset set. The app self-updater refuses to
   # install a release it cannot verify against this file.
   checksums:
-    if: github.repository == 'zhom/donutbrowser'
+    if: github.repository == 'raydocs/DON'
     needs: [release]
     runs-on: ubuntu-latest
     permissions:
@@ -304,7 +308,7 @@ jobs:
           mkdir -p "$ASSETS_DIR"
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$ASSETS_DIR"
           cd "$ASSETS_DIR"
-          sha256sum Donut* > SHA256SUMS.txt
+          sha256sum Don* > SHA256SUMS.txt
           cat SHA256SUMS.txt
           gh release upload "$TAG" SHA256SUMS.txt --clobber --repo "$GITHUB_REPOSITORY"
 

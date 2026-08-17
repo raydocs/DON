@@ -51,11 +51,92 @@ import type {
   ArchiveScanResult,
   DetectedProfile,
   ImportProfileItem,
+  LegacyMigrationPreview,
+  LegacyMigrationResult,
+  LegacyMigrationSelection,
   ProfileImportBatchResult,
   ProfileImportProgress,
+  ProfileImportReport,
   WayfernConfig,
 } from "@/types";
 import { RippleButton } from "./ui/ripple";
+
+/**
+ * What an import actually carried, and what it could not.
+ *
+ * The counts matter more than they look: an import that reports zero of
+ * everything is the exact symptom of the bug where copied data landed where
+ * the browser never reads it, and it used to be indistinguishable from success.
+ */
+function ImportReportSummary({ report }: { report: ProfileImportReport }) {
+  const { t } = useTranslation();
+
+  // Label-then-value rather than "{{count}} cookies": it keeps the row scannable
+  // and sidesteps needing correct plural forms in ten languages.
+  const carried = (
+    [
+      ["importProfile.reportCookies", report.cookies_migrated],
+      ["importProfile.reportPasswords", report.passwords_migrated],
+      ["importProfile.reportAutofill", report.payment_methods_migrated],
+      ["importProfile.reportExtensions", report.extensions_migrated],
+      ["importProfile.reportHistory", report.history_entries],
+      ["importProfile.reportBookmarks", report.bookmarks],
+      ["importProfile.reportLocalStorage", report.local_storage_origins],
+    ] as const
+  )
+    .filter(([, count]) => count > 0)
+    .map(([key, count]) => `${t(key)} ${count.toLocaleString()}`);
+
+  const unrecoverable =
+    report.cookies_unrecoverable +
+    report.passwords_unrecoverable +
+    report.payment_methods_unrecoverable;
+
+  return (
+    <div className="mt-0.5 space-y-0.5 pl-1 text-xs text-muted-foreground">
+      <p>
+        {carried.length > 0
+          ? carried.join(" · ")
+          : t("importProfile.reportNothingCarried")}
+      </p>
+      {unrecoverable > 0 && (
+        <p>
+          {t("importProfile.reportUnrecoverable", { count: unrecoverable })}
+        </p>
+      )}
+      {report.warnings.map((code) => (
+        <p key={code} className="text-warning-text">
+          {t(`importProfile.warnings.${code}`)}
+        </p>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Fold a retry's results back into the batch it came from.
+ *
+ * A retry only resubmits the items that failed, so the previous batch is still
+ * authoritative for every other row. Replacing it wholesale would make the
+ * successful imports disappear from the summary.
+ */
+function mergeImportResults(
+  previous: ProfileImportBatchResult,
+  retry: ProfileImportBatchResult,
+): ProfileImportBatchResult {
+  const byPath = new Map(retry.results.map((item) => [item.source_path, item]));
+  const results = previous.results.map(
+    (item) => byPath.get(item.source_path) ?? item,
+  );
+  const count = (status: string) =>
+    results.filter((item) => item.status === status).length;
+  return {
+    imported_count: count("imported"),
+    skipped_count: count("skipped"),
+    failed_count: count("failed"),
+    results,
+  };
+}
 
 interface ImportProfileDialogProps {
   isOpen: boolean;
@@ -65,8 +146,14 @@ interface ImportProfileDialogProps {
 }
 
 type Step = "select" | "configure" | "importing";
-type ImportMode = "auto-detect" | "manual";
+type ImportMode = "auto-detect" | "manual" | "legacy-donut";
 type DuplicateStrategy = "rename" | "skip";
+const LEGACY_CATEGORIES = [
+  "profiles",
+  "proxies",
+  "groups",
+  "extensions",
+] as const;
 
 export function ImportProfileDialog({
   isOpen,
@@ -108,6 +195,19 @@ export function ImportProfileDialog({
   const [isImporting, setIsImporting] = useState(false);
   const [progress, setProgress] = useState<ProfileImportProgress | null>(null);
   const [result, setResult] = useState<ProfileImportBatchResult | null>(null);
+  const [legacyPreview, setLegacyPreview] =
+    useState<LegacyMigrationPreview | null>(null);
+  const [legacySelection, setLegacySelection] =
+    useState<LegacyMigrationSelection>({
+      profiles: true,
+      proxies: true,
+      groups: true,
+      extensions: true,
+    });
+  const [legacyResult, setLegacyResult] =
+    useState<LegacyMigrationResult | null>(null);
+  const [isLegacyLoading, setIsLegacyLoading] = useState(false);
+  const [isLegacyMigrating, setIsLegacyMigrating] = useState(false);
 
   const { storedProxies } = useProxyEvents();
   const { groups } = useGroupEvents();
@@ -151,6 +251,20 @@ export function ImportProfileDialog({
       setIsLoading(false);
     }
   }, [t, registerProfileNames]);
+
+  const loadLegacyPreview = useCallback(async () => {
+    setIsLegacyLoading(true);
+    try {
+      setLegacyPreview(
+        await invoke<LegacyMigrationPreview>("preview_legacy_donut_migration"),
+      );
+    } catch (error) {
+      console.error("Failed to preview legacy Donut migration:", error);
+      toast.error(translateBackendError(t, error));
+    } finally {
+      setIsLegacyLoading(false);
+    }
+  }, [t]);
 
   const cleanupExtractedDir = useCallback(async (dir: string | null) => {
     if (!dir) return;
@@ -283,69 +397,126 @@ export function ImportProfileDialog({
     }
   };
 
-  const handleImport = useCallback(async () => {
-    if (selectedProfiles.length === 0) {
-      toast.error(t("importProfile.selectAtLeastOne"));
-      return;
-    }
-    if (
-      selectedProfiles.some((p) => !(profileNames[p.path] ?? p.name).trim())
-    ) {
-      toast.error(t("importProfile.emptyNames"));
-      return;
-    }
+  const handleImport = useCallback(
+    async (allowRunning = false, retryPaths?: ReadonlySet<string>) => {
+      if (selectedProfiles.length === 0) {
+        toast.error(t("importProfile.selectAtLeastOne"));
+        return;
+      }
+      if (
+        selectedProfiles.some((p) => !(profileNames[p.path] ?? p.name).trim())
+      ) {
+        toast.error(t("importProfile.emptyNames"));
+        return;
+      }
 
-    const items: ImportProfileItem[] = selectedProfiles.map((p, index) => ({
-      source_path: p.path,
-      browser_type: p.browser,
-      new_profile_name: (profileNames[p.path] ?? p.name).trim(),
-      proxy_id: proxyIdForIndex(index),
-      vpn_id: vpnAssignment === "none" ? null : vpnAssignment,
-    }));
+      // Filter AFTER the map, so a retry keeps the proxy each profile was
+      // originally assigned by the index-based round-robin.
+      const items: ImportProfileItem[] = selectedProfiles
+        .map((p, index) => ({
+          source_path: p.path,
+          browser_type: p.browser,
+          new_profile_name: (profileNames[p.path] ?? p.name).trim(),
+          proxy_id: proxyIdForIndex(index),
+          vpn_id: vpnAssignment === "none" ? null : vpnAssignment,
+          allow_running: allowRunning,
+        }))
+        .filter((item) => !retryPaths || retryPaths.has(item.source_path));
 
-    setCurrentStep("importing");
-    setIsImporting(true);
-    setProgress(null);
-    setResult(null);
+      if (items.length === 0) {
+        return;
+      }
+
+      setCurrentStep("importing");
+      setIsImporting(true);
+      setProgress(null);
+      // A retry covers only the failed subset, so the earlier results are still
+      // the truth for everything else and must not be thrown away.
+      const previous = retryPaths ? result : null;
+      setResult(null);
+      try {
+        const batchResult = await invoke<ProfileImportBatchResult>(
+          "import_browser_profiles",
+          {
+            items,
+            groupId: selectedGroupId === "none" ? null : selectedGroupId,
+            duplicateStrategy: duplicateStrategy,
+            wayfernConfig,
+          },
+        );
+        setResult(
+          previous ? mergeImportResults(previous, batchResult) : batchResult,
+        );
+        toast.success(
+          t("importProfile.resultsSummary", {
+            imported: batchResult.imported_count,
+            skipped: batchResult.skipped_count,
+            failed: batchResult.failed_count,
+          }),
+        );
+        if (batchResult.imported_count > 0 && !reducedMotion) {
+          fireSprinkleConfetti();
+        }
+      } catch (error) {
+        console.error("Failed to import profiles:", error);
+        toast.error(translateBackendError(t, error));
+        setCurrentStep("configure");
+      } finally {
+        setIsImporting(false);
+      }
+    },
+    [
+      selectedProfiles,
+      profileNames,
+      proxyIdForIndex,
+      vpnAssignment,
+      selectedGroupId,
+      duplicateStrategy,
+      wayfernConfig,
+      reducedMotion,
+      result,
+      t,
+    ],
+  );
+
+  const handleLegacyMigration = useCallback(async () => {
+    setIsLegacyMigrating(true);
     try {
-      const batchResult = await invoke<ProfileImportBatchResult>(
-        "import_browser_profiles",
-        {
-          items,
-          groupId: selectedGroupId === "none" ? null : selectedGroupId,
-          duplicateStrategy: duplicateStrategy,
-          wayfernConfig,
-        },
+      const migrationResult = await invoke<LegacyMigrationResult>(
+        "migrate_legacy_donut_data",
+        { selection: legacySelection },
       );
-      setResult(batchResult);
+      setLegacyResult(migrationResult);
       toast.success(
-        t("importProfile.resultsSummary", {
-          imported: batchResult.imported_count,
-          skipped: batchResult.skipped_count,
-          failed: batchResult.failed_count,
+        t("importProfile.legacyResult", {
+          copied: migrationResult.copied,
+          skipped: migrationResult.skipped,
+          failed: migrationResult.failed,
         }),
       );
-      if (batchResult.imported_count > 0 && !reducedMotion) {
+      if (migrationResult.copied > 0 && !reducedMotion) {
         fireSprinkleConfetti();
       }
+      await loadLegacyPreview();
     } catch (error) {
-      console.error("Failed to import profiles:", error);
+      console.error("Failed to migrate legacy Donut data:", error);
       toast.error(translateBackendError(t, error));
-      setCurrentStep("configure");
     } finally {
-      setIsImporting(false);
+      setIsLegacyMigrating(false);
     }
-  }, [
-    selectedProfiles,
-    profileNames,
-    proxyIdForIndex,
-    vpnAssignment,
-    selectedGroupId,
-    duplicateStrategy,
-    wayfernConfig,
-    reducedMotion,
-    t,
-  ]);
+  }, [legacySelection, loadLegacyPreview, reducedMotion, t]);
+
+  // A source browser that is still running is the one failure the user can fix
+  // without starting over, so offer the override right where it happened.
+  const hasRunningBrowserFailure = useMemo(
+    () =>
+      (result?.results ?? []).some(
+        (item) =>
+          item.status === "failed" &&
+          item.error?.includes("IMPORT_SOURCE_BROWSER_RUNNING"),
+      ),
+    [result],
+  );
 
   const handleClose = () => {
     void cleanupExtractedDir(extractedDir);
@@ -367,14 +538,22 @@ export function ImportProfileDialog({
     setShowAdvanced(false);
     setProgress(null);
     setResult(null);
+    setLegacyResult(null);
+    setLegacySelection({
+      profiles: true,
+      proxies: true,
+      groups: true,
+      extensions: true,
+    });
     onClose();
   };
 
   useEffect(() => {
     if (isOpen) {
       void loadDetectedProfiles();
+      void loadLegacyPreview();
     }
-  }, [isOpen, loadDetectedProfiles]);
+  }, [isOpen, loadDetectedProfiles, loadLegacyPreview]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -475,6 +654,12 @@ export function ImportProfileDialog({
                   <AnimatedTabsTrigger value="manual" disabled={isLoading}>
                     {t("importProfile.manualImport")}
                   </AnimatedTabsTrigger>
+                  <AnimatedTabsTrigger
+                    value="legacy-donut"
+                    disabled={isLegacyLoading}
+                  >
+                    {t("importProfile.legacyDonut")}
+                  </AnimatedTabsTrigger>
                 </AnimatedTabsList>
 
                 <AnimatedTabsContent value="auto-detect">
@@ -567,6 +752,102 @@ export function ImportProfileDialog({
 
                     {scannedProfiles.length > 0 &&
                       renderProfileList(scannedProfiles)}
+                  </div>
+                </AnimatedTabsContent>
+
+                <AnimatedTabsContent value="legacy-donut">
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-medium">
+                        {t("importProfile.legacyTitle")}
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {t("importProfile.legacyDescription")}
+                      </p>
+                    </div>
+
+                    {isLegacyLoading || !legacyPreview ? (
+                      <p className="py-8 text-center text-muted-foreground">
+                        {t("importProfile.legacyScanning")}
+                      </p>
+                    ) : !legacyPreview.available ? (
+                      <Alert>
+                        <AlertDescription>
+                          {t("importProfile.legacyNotFound")}
+                        </AlertDescription>
+                      </Alert>
+                    ) : (
+                      <>
+                        <Alert>
+                          <AlertDescription>
+                            {t("importProfile.legacyCopyOnly")}
+                          </AlertDescription>
+                        </Alert>
+                        <p className="break-all text-xs text-muted-foreground">
+                          {legacyPreview.source_path}
+                        </p>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          {LEGACY_CATEGORIES.map((category) => {
+                            const checkboxId = `legacy-migration-${category}`;
+                            return (
+                              <label
+                                key={category}
+                                htmlFor={checkboxId}
+                                className="flex cursor-pointer items-center justify-between rounded-lg border border-border p-3"
+                              >
+                                <span className="flex items-center gap-2 text-sm">
+                                  <Checkbox
+                                    id={checkboxId}
+                                    checked={legacySelection[category]}
+                                    onCheckedChange={(checked) => {
+                                      setLegacySelection((current) => ({
+                                        ...current,
+                                        [category]: checked === true,
+                                      }));
+                                    }}
+                                  />
+                                  {t(
+                                    `importProfile.legacyCategories.${category}`,
+                                  )}
+                                </span>
+                                <span className="text-sm tabular-nums text-muted-foreground">
+                                  {legacyPreview.counts[category]}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                        {legacyPreview.conflicts.length > 0 && (
+                          <p className="text-xs text-muted-foreground">
+                            {t("importProfile.legacyConflicts", {
+                              count: legacyPreview.conflicts.length,
+                            })}
+                          </p>
+                        )}
+                        {legacyResult && (
+                          <Alert>
+                            <AlertDescription>
+                              {t("importProfile.legacyResult", {
+                                copied: legacyResult.copied,
+                                skipped: legacyResult.skipped,
+                                failed: legacyResult.failed,
+                              })}
+                            </AlertDescription>
+                          </Alert>
+                        )}
+                        <LoadingButton
+                          isLoading={isLegacyMigrating}
+                          disabled={
+                            !LEGACY_CATEGORIES.some(
+                              (category) => legacySelection[category],
+                            )
+                          }
+                          onClick={() => void handleLegacyMigration()}
+                        >
+                          {t("importProfile.legacyMigrateButton")}
+                        </LoadingButton>
+                      </>
+                    )}
                   </div>
                 </AnimatedTabsContent>
               </AnimatedTabs>
@@ -840,38 +1121,74 @@ export function ImportProfileDialog({
                     </h3>
                     <div className="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-border p-2">
                       {result.results.map((item) => (
-                        <div
-                          key={item.source_path}
-                          className="flex items-center gap-2 p-1 text-sm"
-                        >
-                          <span
-                            className={cn(
-                              "shrink-0 text-xs font-medium",
-                              item.status === "imported" && "text-success-text",
-                              item.status === "skipped" &&
-                                "text-muted-foreground",
-                              item.status === "failed" &&
-                                "text-destructive-text",
-                            )}
-                          >
-                            {item.status === "imported" &&
-                              t("importProfile.statusImported")}
-                            {item.status === "skipped" &&
-                              t("importProfile.statusSkipped")}
-                            {item.status === "failed" &&
-                              t("importProfile.statusFailed")}
-                          </span>
-                          <span className="min-w-0 flex-1 truncate">
-                            {item.name || item.source_path}
-                          </span>
-                          {item.error && (
-                            <span className="min-w-0 flex-1 truncate text-xs text-destructive-text">
-                              {translateBackendError(t, new Error(item.error))}
+                        <div key={item.source_path} className="p-1 text-sm">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={cn(
+                                "shrink-0 text-xs font-medium",
+                                item.status === "imported" &&
+                                  "text-success-text",
+                                item.status === "skipped" &&
+                                  "text-muted-foreground",
+                                item.status === "failed" &&
+                                  "text-destructive-text",
+                              )}
+                            >
+                              {item.status === "imported" &&
+                                t("importProfile.statusImported")}
+                              {item.status === "skipped" &&
+                                t("importProfile.statusSkipped")}
+                              {item.status === "failed" &&
+                                t("importProfile.statusFailed")}
                             </span>
+                            <span className="min-w-0 flex-1 truncate">
+                              {item.name || item.source_path}
+                            </span>
+                            {item.error && (
+                              <span className="min-w-0 flex-1 truncate text-xs text-destructive-text">
+                                {translateBackendError(
+                                  t,
+                                  new Error(item.error),
+                                )}
+                              </span>
+                            )}
+                          </div>
+                          {item.report && (
+                            <ImportReportSummary report={item.report} />
                           )}
                         </div>
                       ))}
                     </div>
+
+                    {hasRunningBrowserFailure && (
+                      <Alert>
+                        <AlertDescription className="space-y-2">
+                          <p>{t("importProfile.closeSourceBrowserHint")}</p>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => {
+                              void handleImport(
+                                true,
+                                new Set(
+                                  result.results
+                                    .filter(
+                                      (item) =>
+                                        item.status === "failed" &&
+                                        item.error?.includes(
+                                          "IMPORT_SOURCE_BROWSER_RUNNING",
+                                        ),
+                                    )
+                                    .map((item) => item.source_path),
+                                ),
+                              );
+                            }}
+                          >
+                            {t("importProfile.importAnyway")}
+                          </Button>
+                        </AlertDescription>
+                      </Alert>
+                    )}
                   </div>
                 )}
               </div>
@@ -894,14 +1211,16 @@ export function ImportProfileDialog({
                   {t("common.buttons.cancel")}
                 </RippleButton>
               )}
-              <RippleButton
-                disabled={selectedPaths.size === 0}
-                onClick={() => {
-                  setCurrentStep("configure");
-                }}
-              >
-                {t("importProfile.nextButton")}
-              </RippleButton>
+              {importMode !== "legacy-donut" && (
+                <RippleButton
+                  disabled={selectedPaths.size === 0}
+                  onClick={() => {
+                    setCurrentStep("configure");
+                  }}
+                >
+                  {t("importProfile.nextButton")}
+                </RippleButton>
+              )}
             </>
           )}
           {currentStep === "configure" && (

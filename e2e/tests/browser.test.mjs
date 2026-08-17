@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -11,6 +11,7 @@ import {
   defaultWayfernPath,
   inspectWayfern,
   prepareWayfern,
+  writeUnpackedExtension,
 } from "../lib/fixtures.mjs";
 
 const fixtureUrl = process.env.DONUT_E2E_FIXTURE_URL;
@@ -113,7 +114,13 @@ async function snapshotFile(file) {
   }
 }
 
-async function createRealProfile(app, version, name, fingerprint = null) {
+async function createRealProfile(
+  app,
+  version,
+  name,
+  fingerprint = null,
+  generationConstraints = {},
+) {
   return app.invoke("create_browser_profile_new", {
     name,
     browserStr: "wayfern",
@@ -125,6 +132,7 @@ async function createRealProfile(app, version, name, fingerprint = null) {
       fingerprint,
       randomize_fingerprint_on_launch: false,
       geoip: false,
+      ...generationConstraints,
     },
     groupId: null,
     ephemeral: false,
@@ -211,26 +219,54 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       /No active download/,
     );
 
+    const display = await app.execute(`
+      return {
+        devicePixelRatio: window.devicePixelRatio,
+        screenWidth: window.screen.width,
+        screenHeight: window.screen.height,
+        screenAvailWidth: window.screen.availWidth,
+        screenAvailHeight: window.screen.availHeight,
+      };
+    `);
+    const generationConstraints = {
+      expected_device_pixel_ratio: display.devicePixelRatio,
+      screen_max_width: display.screenWidth,
+      screen_max_height: display.screenHeight,
+    };
+
     const sample = await app.invoke("generate_sample_fingerprint", {
       browser: "wayfern",
       version: prepared.version,
-      configJson: JSON.stringify({ geoip: false }),
+      configJson: JSON.stringify({ geoip: false, ...generationConstraints }),
     });
     const fingerprint = JSON.parse(sample);
     assert.ok(
       Object.keys(fingerprint).length >= 10,
       "Wayfern returned an incomplete fingerprint",
     );
+    assert.equal(fingerprint.devicePixelRatio, display.devicePixelRatio);
+    assert.ok(fingerprint.screenWidth <= display.screenWidth);
+    assert.ok(fingerprint.screenHeight <= display.screenHeight);
+    assert.ok(fingerprint.screenAvailWidth <= display.screenAvailWidth);
+    assert.ok(fingerprint.screenAvailHeight <= display.screenAvailHeight);
+    assert.ok(fingerprint.windowOuterWidth <= fingerprint.screenAvailWidth);
+    assert.ok(fingerprint.windowOuterHeight <= fingerprint.screenAvailHeight);
+    assert.ok(fingerprint.windowInnerWidth <= fingerprint.windowOuterWidth);
+    assert.ok(fingerprint.windowInnerHeight <= fingerprint.windowOuterHeight);
 
     const profile = await createRealProfile(
       app,
       prepared.version,
       `Real Wayfern (${prepared.source})`,
+      null,
+      generationConstraints,
     );
     assert.ok(profile.wayfern_config.fingerprint);
-    assert.ok(
-      Object.keys(JSON.parse(profile.wayfern_config.fingerprint)).length >= 10,
-    );
+    const profileFingerprint = JSON.parse(profile.wayfern_config.fingerprint);
+    assert.ok(Object.keys(profileFingerprint).length >= 10);
+    assert.equal(profileFingerprint.devicePixelRatio, display.devicePixelRatio);
+    assert.ok(profileFingerprint.screenWidth <= display.screenWidth);
+    assert.ok(profileFingerprint.screenHeight <= display.screenHeight);
     assert.equal(await app.invoke("check_missing_geoip_database"), true);
     assert.equal(await app.invoke("is_geoip_database_available"), false);
     await app.invoke("download_geoip_database");
@@ -270,6 +306,78 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       "a consent token is only minted when a cached mismatch is blocking",
     );
 
+    // Extension detection, against manifests written where Chromium puts
+    // them. The three cases are the whole point of the classifier: a real VPN
+    // is named as one, a known VPN with an unrevealing name is caught by its
+    // id, and a download manager holding the same `proxy` permission is
+    // reported as a capability and never as a VPN.
+    // `DONUTBROWSER_DATA_ROOT` puts the data dir at <dataRoot>/data, so this
+    // is app_dirs::profiles_dir() plus the layout Chromium itself uses.
+    const extensionsDir = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      profile.id,
+      "profile",
+      "Default",
+      "Extensions",
+    );
+    const seedExtension = async (id, version, manifest) => {
+      const dir = path.join(extensionsDir, id, `${version}_0`);
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        path.join(dir, "manifest.json"),
+        JSON.stringify(manifest),
+      );
+    };
+    const IDM_ID = "ngpampappnmepgilojfohadhhmbhlaek";
+    const HOTSPOT_SHIELD_ID = "nlbejmccbhkncgokjcmghpfloaajcffj";
+    const NAMED_VPN_ID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    await seedExtension(IDM_ID, "6.43.1", {
+      name: "IDM Integration Module",
+      version: "6.43.1",
+      description: "Download files with Internet Download Manager",
+      permissions: ["downloads", "storage", "proxy", "nativeMessaging"],
+    });
+    await seedExtension(HOTSPOT_SHIELD_ID, "10.0.0", {
+      name: "Hotspot Shield",
+      version: "10.0.0",
+      permissions: ["proxy"],
+    });
+    await seedExtension(NAMED_VPN_ID, "1.0.0", {
+      name: "Turbo VPN Free",
+      version: "1.0.0",
+      permissions: ["proxy"],
+    });
+
+    const withExtensions = await app.invoke("get_profile_pre_launch_checks", {
+      profileId: profile.id,
+    });
+    const detected = new Map(
+      withExtensions.vpn_extensions.map((item) => [item.key, item]),
+    );
+    assert.equal(detected.size, 3, "every seeded extension must be reported");
+    assert.equal(detected.get(`crx:${NAMED_VPN_ID}`).confidence, "confirmed");
+    assert.equal(
+      detected.get(`crx:${HOTSPOT_SHIELD_ID}`).confidence,
+      "confirmed",
+      "a known VPN id must be named even when its name gives nothing away",
+    );
+    assert.equal(
+      detected.get(`crx:${IDM_ID}`).confidence,
+      "capability",
+      "a download manager holding the proxy permission is not a VPN",
+    );
+    assert.ok(
+      detected.get(`crx:${IDM_ID}`).proxy_control,
+      "it does still hold the permission, which is why it is listed at all",
+    );
+    assert.equal(
+      withExtensions.exit_measurement_unreliable,
+      true,
+      "a proxy-capable extension makes the exit measurement a caveat",
+    );
+
     // Acknowledgements are per-profile and must be accepted for both kinds.
     await app.invoke("ack_launch_gate", {
       profileId: profile.id,
@@ -279,8 +387,16 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     await app.invoke("ack_launch_gate", {
       profileId: profile.id,
       ackFingerprint: true,
-      ackExtensionKeys: [],
+      ackExtensionKeys: [`crx:${IDM_ID}`],
     });
+    const afterAck = await app.invoke("get_profile_pre_launch_checks", {
+      profileId: profile.id,
+    });
+    assert.deepEqual(
+      afterAck.vpn_extensions.map((item) => item.key).sort(),
+      [`crx:${HOTSPOT_SHIELD_ID}`, `crx:${NAMED_VPN_ID}`].sort(),
+      "an acknowledged extension stops being reported, the others do not",
+    );
     assert.match(
       await app.invokeError("get_profile_pre_launch_checks", {
         profileId: "00000000-0000-0000-0000-000000000000",
@@ -302,6 +418,34 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       /PROFILE_NOT_FOUND/,
     );
 
+    const profileBeforeMigration = (
+      await app.invoke("list_browser_profiles")
+    ).find((item) => item.id === profile.id);
+    const profileDataPath = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      profile.id,
+      "profile",
+    );
+    const migrationSentinel = path.join(
+      profileDataPath,
+      "migration-sentinel.txt",
+    );
+    await writeFile(migrationSentinel, "profile-data-must-survive", "utf8");
+    const incompatibleFingerprint = {
+      ...JSON.parse(profileBeforeMigration.wayfern_config.fingerprint),
+      devicePixelRatio: display.devicePixelRatio === 1 ? 2 : 1,
+    };
+    await app.invoke("update_wayfern_config", {
+      profileId: profile.id,
+      config: {
+        ...profileBeforeMigration.wayfern_config,
+        fingerprint: JSON.stringify(incompatibleFingerprint),
+        randomize_fingerprint_on_launch: false,
+      },
+    });
+
     const directProfile = (await app.invoke("list_browser_profiles")).find(
       (item) => item.id === profile.id,
     );
@@ -310,6 +454,26 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       url: `${fixtureUrl}/direct-command`,
     });
     assert.ok(directLaunch.process_id);
+    const migratedProfile = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    const migratedFingerprint = JSON.parse(
+      migratedProfile.wayfern_config.fingerprint,
+    );
+    assert.equal(
+      migratedFingerprint.devicePixelRatio,
+      display.devicePixelRatio,
+    );
+    assert.ok(migratedFingerprint.screenWidth <= display.screenWidth);
+    assert.ok(migratedFingerprint.screenHeight <= display.screenHeight);
+    assert.equal(
+      migratedProfile.wayfern_config.randomize_fingerprint_on_launch,
+      false,
+    );
+    assert.equal(
+      await readFile(migrationSentinel, "utf8"),
+      "profile-data-must-survive",
+    );
     await app.invoke("open_url_with_profile", {
       profileId: profile.id,
       url: `${fixtureUrl}/direct-open`,
@@ -332,7 +496,7 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     const launched = await request(`${base}/v1/profiles/${profile.id}/run`, {
       method: "POST",
       token: saved.api_token,
-      body: { url: `${fixtureUrl}/wayfern`, headless: true },
+      body: { url: `${fixtureUrl}/stripe-checkout`, headless: true },
     });
     assert.equal(launched.response.status, 200, JSON.stringify(launched.value));
     assert.equal(launched.value.headless, true);
@@ -343,7 +507,34 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     });
     assert.equal(
       await cdp.evaluate("document.querySelector('#path').textContent"),
-      "/wayfern",
+      "/stripe-checkout",
+    );
+    const topLevelMetrics = await cdp.evaluate(`({
+      devicePixelRatio: window.devicePixelRatio,
+      screenWidth: window.screen.width,
+      screenHeight: window.screen.height,
+      visualViewportScale: window.visualViewport?.scale ?? 1,
+    })`);
+    const stripeFrameMetrics = await cdp.waitFor(
+      "window.__stripeFrameMetrics",
+      { description: "cross-origin payment iframe metrics" },
+    );
+    for (const metrics of [topLevelMetrics, stripeFrameMetrics]) {
+      assert.equal(
+        metrics.devicePixelRatio,
+        migratedFingerprint.devicePixelRatio,
+      );
+      assert.equal(metrics.screenWidth, migratedFingerprint.screenWidth);
+      assert.equal(metrics.screenHeight, migratedFingerprint.screenHeight);
+      assert.equal(metrics.visualViewportScale, 1);
+    }
+    const stableProfile = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    assert.equal(
+      stableProfile.wayfern_config.fingerprint,
+      migratedProfile.wayfern_config.fingerprint,
+      "a compatible static fingerprint changed on the second launch",
     );
     assert.equal(
       await cdp.evaluate(
@@ -646,6 +837,185 @@ test("a proxy worker dies with its browser, with and without the app running", a
           process.kill(pid, "SIGKILL");
         } catch {
           // Already gone.
+        }
+      }
+    }
+    await app.close();
+  }
+});
+
+// Two things nothing else covers. First, that an assigned extension group
+// actually reaches Wayfern: a loaded MV3 extension registers a
+// `chrome-extension://<id>/background.js` service-worker target, so CDP can see
+// it from outside. Second, that staging is per profile. It used to be one
+// shared `extensions/unpacked` directory wiped on every launch, and because
+// Chromium records the absolute staging path and reads those files lazily for
+// the life of the process instead of copying them into the profile, launching a
+// second profile broke the extension in every browser already running.
+test("an assigned extension group reaches Wayfern and each profile stages its own copy", async () => {
+  assert.ok(process.env.WAYFERN_TEST_TOKEN, "WAYFERN_TEST_TOKEN is required");
+  const localWayfernPath = defaultWayfernPath(
+    process.env.DONUT_E2E_PROJECT_ROOT,
+  );
+  const localWayfernVersion = existsSync(localWayfernPath)
+    ? inspectWayfern(localWayfernPath).version
+    : null;
+  const app = appFromEnvironment("browser-extensions", {
+    seedVersionCache: localWayfernVersion ?? false,
+    wayfernTermsAccepted: false,
+  });
+  const launched = [];
+  try {
+    const prepared = await prepareWayfern(
+      app,
+      process.env.DONUT_E2E_PROJECT_ROOT,
+    );
+    if (!app.session) await app.start();
+    if (!(await app.invoke("check_wayfern_terms_accepted"))) {
+      await app.invoke("accept_wayfern_terms");
+    }
+
+    const extension = await app.invoke("add_unpacked_extension", {
+      name: "Donut Launch Fixture",
+      path: await writeUnpackedExtension(
+        path.join(app.root, "fixtures", "loaded-extension"),
+        { name: "Donut Launch Fixture", version: "1.0.0" },
+      ),
+      link: false,
+    });
+    const group = await app.invoke("create_extension_group", {
+      name: "Launch Extensions",
+    });
+    await app.invoke("add_extension_to_group", {
+      groupId: group.id,
+      extensionId: extension.id,
+    });
+
+    const settings = await app.invoke("get_app_settings");
+    const saved = await app.invoke("save_app_settings", {
+      settings: {
+        ...settings,
+        api_enabled: true,
+        api_port: 0,
+        api_token: null,
+        onboarding_completed: true,
+      },
+    });
+    const base = `http://127.0.0.1:${await app.invoke("start_api_server", { port: 0 })}`;
+
+    const stagedManifest = (profileId) =>
+      path.join(
+        app.dataRoot,
+        "data",
+        "extensions",
+        "unpacked",
+        profileId,
+        extension.id,
+        "manifest.json",
+      );
+    const extensionWorkers = async (debuggingPort) => {
+      const targets = await fetch(
+        `http://127.0.0.1:${debuggingPort}/json`,
+      ).then((response) => response.json());
+      return targets.filter(
+        (target) =>
+          target.type === "service_worker" &&
+          String(target.url).startsWith("chrome-extension://"),
+      );
+    };
+    const launchWithExtension = async (name) => {
+      const profile = await createRealProfile(app, prepared.version, name);
+      assert.equal(
+        (
+          await app.invoke("assign_extension_group_to_profile", {
+            profileId: profile.id,
+            extensionGroupId: group.id,
+          })
+        ).extension_group_id,
+        group.id,
+      );
+      const run = await request(`${base}/v1/profiles/${profile.id}/run`, {
+        method: "POST",
+        token: saved.api_token,
+        body: { url: `${fixtureUrl}/extension-launch`, headless: true },
+      });
+      assert.equal(run.response.status, 200, JSON.stringify(run.value));
+      const record = {
+        profile,
+        debuggingPort: run.value.remote_debugging_port,
+      };
+      launched.push(record);
+      const workers = await app.waitFor(
+        async () => {
+          const found = await extensionWorkers(record.debuggingPort);
+          return found.length > 0 ? found : null;
+        },
+        {
+          timeoutMs: 60_000,
+          description: `the extension's service worker in ${name}`,
+        },
+      );
+      assert.match(
+        workers[0].url,
+        /^chrome-extension:\/\/\w+\/background\.js$/,
+      );
+      return record;
+    };
+
+    const first = await launchWithExtension("Extension Launch One");
+    assert.ok(
+      existsSync(stagedManifest(first.profile.id)),
+      "the first profile must stage the extension under its own id",
+    );
+    if (process.platform !== "win32") {
+      // The staged path is what Chromium was handed, and it is per profile.
+      const running = (await app.invoke("list_browser_profiles")).find(
+        (item) => item.id === first.profile.id,
+      );
+      const command = execFileSync(
+        "ps",
+        ["-ww", "-o", "command=", "-p", String(running.process_id)],
+        { encoding: "utf8" },
+      );
+      assert.ok(
+        command.includes(
+          `--load-extension=${path.dirname(stagedManifest(first.profile.id))}`,
+        ),
+        "Wayfern must be pointed at this profile's own staged copy",
+      );
+    }
+    await launchWithExtension("Extension Launch Two");
+
+    // The regression itself: the second launch must not have taken the first
+    // profile's files with it. The staged manifest is what its running browser
+    // is still reading from.
+    for (const { profile } of launched) {
+      assert.ok(
+        existsSync(stagedManifest(profile.id)),
+        `${profile.name} lost its staged extension to another profile's launch`,
+      );
+    }
+
+    for (const { profile } of launched) {
+      const running = (await app.invoke("list_browser_profiles")).find(
+        (item) => item.id === profile.id,
+      );
+      await app.invoke("kill_browser_profile", { profile: running });
+      await waitForProcessExit(app, running.process_id);
+    }
+    await app.invoke("stop_api_server");
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    if (app.session) {
+      const running = await app.invoke("list_browser_profiles").catch(() => []);
+      for (const { profile } of launched) {
+        const record = running.find((item) => item.id === profile.id);
+        if (record?.process_id && processExists(record.process_id)) {
+          await app
+            .invoke("kill_browser_profile", { profile: record })
+            .catch(() => {});
         }
       }
     }

@@ -73,6 +73,7 @@ export class AppSession {
     extraEnv = {},
     args = [],
     seedVersionCache = true,
+    seedDownloadedBrowser = false,
     onboardingCompleted = true,
     wayfernTermsAccepted = true,
   }) {
@@ -85,6 +86,7 @@ export class AppSession {
     this.extraEnv = extraEnv;
     this.args = args;
     this.seedVersionCache = seedVersionCache;
+    this.seedDownloadedBrowser = seedDownloadedBrowser;
     this.onboardingCompleted = onboardingCompleted;
     this.wayfernTermsAccepted = wayfernTermsAccepted;
     this.session = null;
@@ -188,6 +190,54 @@ export class AppSession {
         }
       });
     }
+    if (this.seedDownloadedBrowser) {
+      // Registers a Wayfern version as "downloaded" without installing a
+      // binary. Profile import derives its version from this registry and
+      // fails with BROWSER_NOT_DOWNLOADED otherwise, so suites that exercise
+      // import but never launch a browser need the entry and nothing else.
+      const seededVersion =
+        typeof this.seedDownloadedBrowser === "string"
+          ? this.seedDownloadedBrowser
+          : "150.0.7871.100";
+      const installDir = path.join(
+        this.dataRoot,
+        "data",
+        "binaries",
+        "wayfern",
+        seededVersion,
+      );
+      await mkdir(installDir, { recursive: true });
+      const registryPath = path.join(
+        this.dataRoot,
+        "data",
+        "data",
+        "downloaded_browsers.json",
+      );
+      await mkdir(path.dirname(registryPath), { recursive: true });
+      await writeFile(
+        registryPath,
+        `${JSON.stringify(
+          {
+            browsers: {
+              wayfern: {
+                [seededVersion]: {
+                  browser: "wayfern",
+                  version: seededVersion,
+                  file_path: installDir,
+                },
+              },
+            },
+          },
+          null,
+          2,
+        )}\n`,
+        { flag: "wx" },
+      ).catch((error) => {
+        if (error.code !== "EEXIST") {
+          throw error;
+        }
+      });
+    }
     const env = isolatedEnvironment(this.root, {
       DONUT_E2E_DISABLE_STARTUP_NETWORK: "1",
       ...(process.env.DONUT_E2E_FIXTURE_URL
@@ -223,7 +273,40 @@ export class AppSession {
         timeoutMs: 60_000,
       },
     );
+    await this.dismissStartupPermissionDialog();
     return this;
+  }
+
+  async dismissStartupPermissionDialog() {
+    if (process.platform !== "darwin" || !this.onboardingCompleted) {
+      return;
+    }
+
+    const [microphoneGranted, cameraGranted] = await Promise.all([
+      this.invoke("plugin:macos-permissions|check_microphone_permission"),
+      this.invoke("plugin:macos-permissions|check_camera_permission"),
+    ]);
+    if (microphoneGranted && cameraGranted) {
+      return;
+    }
+
+    const cancelButton = await this.waitFor(
+      () =>
+        this.execute(`
+          const dialogs = [...document.querySelectorAll("[role='dialog']")];
+          const permissionDialog = dialogs.find((dialog) =>
+            dialog.querySelector("[data-slot='dialog-footer'] button[aria-busy]")
+          );
+          return permissionDialog?.querySelector(
+            "[data-slot='dialog-footer'] button:not([aria-busy])"
+          ) ?? null;
+        `),
+      { description: "startup macOS permission dialog" },
+    );
+    await this.clickElement(
+      cancelButton,
+      "startup permission dialog Cancel button",
+    );
   }
 
   async restart() {
@@ -529,6 +612,7 @@ export function appFromEnvironment(name, options = {}) {
     extraEnv: options.extraEnv,
     args: options.args,
     seedVersionCache: options.seedVersionCache,
+    seedDownloadedBrowser: options.seedDownloadedBrowser,
     onboardingCompleted: options.onboardingCompleted,
     wayfernTermsAccepted: options.wayfernTermsAccepted,
   });

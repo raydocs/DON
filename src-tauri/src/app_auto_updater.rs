@@ -71,6 +71,202 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
+
+const APP_RELEASE_REPOSITORY: &str = "raydocs/DON";
+const GITHUB_USER_AGENT: &str = "DON self-updater";
+const UPDATE_JOURNAL_FILENAME: &str = "pending-app-update.json";
+static GITHUB_TOKEN: OnceLock<String> = OnceLock::new();
+static UPDATE_JOURNAL_RECONCILIATION: OnceLock<Result<(), String>> = OnceLock::new();
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum UpdateStage {
+  Prepared,
+  AwaitingRestart,
+  Installed,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct UpdateJournal {
+  target_version: String,
+  platform: String,
+  original_path: PathBuf,
+  backup_path: PathBuf,
+  #[serde(default)]
+  installer_path: Option<PathBuf>,
+  stage: UpdateStage,
+}
+
+impl UpdateJournal {
+  fn new(
+    target_version: &str,
+    platform: &str,
+    original_path: PathBuf,
+    backup_path: PathBuf,
+  ) -> Self {
+    Self {
+      target_version: target_version.to_string(),
+      platform: platform.to_string(),
+      original_path,
+      backup_path,
+      installer_path: None,
+      stage: UpdateStage::Prepared,
+    }
+  }
+
+  fn write_atomic(&self, path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+      fs::create_dir_all(parent)?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec(self).map_err(std::io::Error::other)?;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::OpenOptionsExt;
+      options.mode(0o600);
+    }
+    let mut file = options.open(&temporary)?;
+    file.write_all(&bytes)?;
+    file.sync_all()?;
+    atomic_replace(&temporary, path)?;
+    #[cfg(unix)]
+    if let Some(parent) = path.parent() {
+      fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+  }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+  fs::rename(source, destination)
+}
+
+#[cfg(target_os = "macos")]
+fn atomic_swap(first: &Path, second: &Path) -> std::io::Result<()> {
+  use std::ffi::CString;
+  use std::os::unix::ffi::OsStrExt;
+
+  let first = CString::new(first.as_os_str().as_bytes())
+    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+  let second = CString::new(second.as_os_str().as_bytes())
+    .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
+  // SAFETY: both C strings remain valid for this synchronous call. macOS
+  // guarantees RENAME_SWAP is atomic, so either both names exchange or neither
+  // changes.
+  let result = unsafe { libc::renamex_np(first.as_ptr(), second.as_ptr(), libc::RENAME_SWAP) };
+  if result == 0 {
+    Ok(())
+  } else {
+    Err(std::io::Error::last_os_error())
+  }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) fn atomic_replace(source: &Path, destination: &Path) -> std::io::Result<()> {
+  use std::os::windows::ffi::OsStrExt;
+  let source: Vec<u16> = source
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
+  let destination: Vec<u16> = destination
+    .as_os_str()
+    .encode_wide()
+    .chain(std::iter::once(0))
+    .collect();
+  #[link(name = "kernel32")]
+  extern "system" {
+    fn MoveFileExW(existing: *const u16, new: *const u16, flags: u32) -> i32;
+  }
+  const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
+  const MOVEFILE_WRITE_THROUGH: u32 = 0x8;
+  // SAFETY: both pointers reference null-terminated buffers for the duration
+  // of the synchronous Windows API call.
+  let result = unsafe {
+    MoveFileExW(
+      source.as_ptr(),
+      destination.as_ptr(),
+      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
+  };
+  if result == 0 {
+    Err(std::io::Error::last_os_error())
+  } else {
+    Ok(())
+  }
+}
+
+fn remove_path(path: &Path) -> std::io::Result<()> {
+  if path.is_dir() {
+    fs::remove_dir_all(path)
+  } else if path.exists() {
+    fs::remove_file(path)
+  } else {
+    Ok(())
+  }
+}
+
+fn restore_backup(original: &Path, backup: &Path) -> std::io::Result<()> {
+  if !backup.exists() {
+    return Ok(());
+  }
+
+  #[cfg(target_os = "macos")]
+  if original.exists() {
+    atomic_swap(original, backup)?;
+    return remove_path(backup);
+  }
+
+  remove_path(original)?;
+  fs::rename(backup, original)
+}
+
+fn reconcile_update_journal(path: &Path, current_version: &str) -> std::io::Result<()> {
+  if !path.exists() {
+    return Ok(());
+  }
+  let journal: UpdateJournal = serde_json::from_slice(&fs::read(path)?)
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+  let current = current_version.trim_start_matches('v');
+  let target = journal.target_version.trim_start_matches('v');
+  match journal.stage {
+    UpdateStage::Prepared => {
+      if current == target {
+        // The atomic swap completed, but the process stopped before it could
+        // persist Installed. This target-version launch confirms the update.
+        log::info!("Confirming app update after an interrupted journal write");
+      } else {
+        // The candidate was staged at backup_path, but the atomic swap never
+        // happened. The canonical app is still the healthy old version.
+        log::info!("Discarding an app update interrupted before installation");
+      }
+      remove_path(&journal.backup_path)?;
+    }
+    UpdateStage::AwaitingRestart
+      if current != target
+        && journal
+          .installer_path
+          .as_ref()
+          .is_some_and(|installer| installer.exists()) =>
+    {
+      return Ok(());
+    }
+    UpdateStage::Installed | UpdateStage::AwaitingRestart if current == target => {
+      remove_path(&journal.backup_path)?;
+    }
+    UpdateStage::Installed | UpdateStage::AwaitingRestart => {
+      restore_backup(&journal.original_path, &journal.backup_path)?;
+    }
+  }
+  if let Some(installer) = journal.installer_path {
+    let _ = remove_path(&installer);
+  }
+  fs::remove_file(path)
+}
 
 #[cfg(target_os = "linux")]
 #[derive(Debug, Clone)]
@@ -85,6 +281,10 @@ enum LinuxInstallationMethod {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct AppReleaseAsset {
   pub name: String,
+  /// Authenticated GitHub API endpoint for this asset. Private release files
+  /// must be downloaded through this URL rather than browser_download_url.
+  #[serde(default, rename = "url")]
+  pub api_url: String,
   pub browser_download_url: String,
   pub size: u64,
   /// GitHub-computed digest ("sha256:<hex>"); absent on assets uploaded
@@ -109,6 +309,10 @@ pub struct AppUpdateInfo {
   pub new_version: String,
   pub release_notes: String,
   pub download_url: String,
+  /// Original release asset name. API asset URLs end in a numeric ID, so the
+  /// installer cannot safely infer the filename or extension from the URL.
+  #[serde(default)]
+  pub asset_name: Option<String>,
   pub is_nightly: bool,
   pub published_at: String,
   pub manual_update_required: bool,
@@ -143,6 +347,109 @@ impl AppAutoUpdater {
     &APP_AUTO_UPDATER
   }
 
+  fn releases_api_url() -> String {
+    format!("https://api.github.com/repos/{APP_RELEASE_REPOSITORY}/releases?per_page=100")
+  }
+
+  fn release_page_url(tag: &str) -> String {
+    format!("https://github.com/{APP_RELEASE_REPOSITORY}/releases/tag/{tag}")
+  }
+
+  fn github_token() -> Option<String> {
+    if let Some(token) = GITHUB_TOKEN.get() {
+      return Some(token.clone());
+    }
+
+    let token = ["DON_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]
+      .into_iter()
+      .find_map(|name| {
+        std::env::var(name)
+          .ok()
+          .map(|token| token.trim().to_string())
+          .filter(|token| !token.is_empty())
+      })
+      .or_else(Self::github_cli_token)?;
+    let _ = GITHUB_TOKEN.set(token.clone());
+    Some(token)
+  }
+
+  fn github_cli_token() -> Option<String> {
+    let mut executables = Vec::new();
+    #[cfg(target_os = "macos")]
+    {
+      executables.push(PathBuf::from("/opt/homebrew/bin/gh"));
+      executables.push(PathBuf::from("/usr/local/bin/gh"));
+    }
+    #[cfg(target_os = "windows")]
+    {
+      for root in ["ProgramFiles", "ProgramW6432"] {
+        if let Some(path) = std::env::var_os(root) {
+          executables.push(PathBuf::from(path).join("GitHub CLI").join("gh.exe"));
+        }
+      }
+      if let Some(path) = std::env::var_os("LOCALAPPDATA") {
+        executables.push(
+          PathBuf::from(path)
+            .join("Programs")
+            .join("GitHub CLI")
+            .join("gh.exe"),
+        );
+      }
+    }
+    executables.push(PathBuf::from("gh"));
+
+    for executable in executables {
+      let mut command = Command::new(executable);
+      command.args(["auth", "token", "--hostname", "github.com"]);
+      #[cfg(target_os = "windows")]
+      {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+      }
+      let Ok(output) = command.output() else {
+        continue;
+      };
+      if !output.status.success() {
+        continue;
+      }
+      let token = String::from_utf8(output.stdout).ok()?.trim().to_string();
+      if !token.is_empty() {
+        return Some(token);
+      }
+    }
+    None
+  }
+
+  fn github_request(&self, url: &str, accept: &'static str) -> reqwest::RequestBuilder {
+    let request = self
+      .client
+      .get(url)
+      .header("User-Agent", GITHUB_USER_AGENT)
+      .header("Accept", accept)
+      .header("X-GitHub-Api-Version", "2022-11-28");
+    match Self::github_token() {
+      Some(token) => request.bearer_auth(token),
+      None => request,
+    }
+  }
+
+  fn github_get(&self, url: &str) -> reqwest::RequestBuilder {
+    self.github_request(url, "application/vnd.github+json")
+  }
+
+  fn github_asset_get(&self, url: &str) -> reqwest::RequestBuilder {
+    self.github_request(url, "application/octet-stream")
+  }
+
+  fn asset_download_url(asset: &AppReleaseAsset) -> String {
+    if asset.api_url.is_empty() {
+      asset.browser_download_url.clone()
+    } else {
+      asset.api_url.clone()
+    }
+  }
+
   /// Check if running a nightly build based on environment variable
   pub fn is_nightly_build() -> bool {
     // If STABLE_RELEASE env var is set at compile time, it's a stable build
@@ -167,11 +474,22 @@ impl AppAutoUpdater {
     env!("BUILD_VERSION").to_string()
   }
 
+  pub(crate) fn reconcile_pending_update() -> Result<(), String> {
+    let current_version = Self::get_current_version();
+    UPDATE_JOURNAL_RECONCILIATION
+      .get_or_init(|| {
+        Self::confirm_or_rollback_pending_update(&current_version)
+          .map_err(|error| error.to_string())
+      })
+      .clone()
+  }
+
   /// Check for app updates
   pub async fn check_for_updates(
     &self,
   ) -> Result<Option<AppUpdateInfo>, Box<dyn std::error::Error + Send + Sync>> {
     let current_version = Self::get_current_version();
+    Self::reconcile_pending_update().map_err(std::io::Error::other)?;
     let is_nightly = Self::is_nightly_build();
 
     log::info!("=== App Update Check ===");
@@ -219,24 +537,23 @@ impl AppAutoUpdater {
       log::info!("Update available!");
 
       // Build the release page URL
-      let release_page_url = format!(
-        "https://github.com/zhom/donutbrowser/releases/tag/{}",
-        latest_release.tag_name
-      );
+      let release_page_url = Self::release_page_url(&latest_release.tag_name);
 
       // Find the appropriate asset for current platform
-      let download_url = self.get_download_url_for_platform(&latest_release.assets);
+      let browser_download_url = self.get_download_url_for_platform(&latest_release.assets);
+      let selected_asset = browser_download_url.as_deref().and_then(|url| {
+        latest_release
+          .assets
+          .iter()
+          .find(|asset| asset.browser_download_url == url)
+      });
+      let download_url = selected_asset.map(Self::asset_download_url);
+      let asset_name = selected_asset.map(|asset| asset.name.clone());
 
       // Locate the release's checksums file and the chosen asset's
       // GitHub-computed digest for post-download verification.
       let checksums_url = Self::find_checksums_url(&latest_release.assets);
-      let asset_digest = download_url.as_deref().and_then(|url| {
-        latest_release
-          .assets
-          .iter()
-          .find(|a| a.browser_download_url == url)
-          .and_then(|a| a.digest.clone())
-      });
+      let asset_digest = selected_asset.and_then(|asset| asset.digest.clone());
 
       // Both release workflows upload SHA256SUMS.txt only after every platform
       // build finishes, so a release without it is still being assembled (or
@@ -267,6 +584,7 @@ impl AppAutoUpdater {
           new_version: latest_release.tag_name.clone(),
           release_notes: latest_release.body.clone(),
           download_url: download_url.unwrap_or_else(|| release_page_url.clone()),
+          asset_name,
           is_nightly,
           published_at: latest_release.published_at.clone(),
           manual_update_required,
@@ -294,6 +612,7 @@ impl AppAutoUpdater {
             new_version: latest_release.tag_name.clone(),
             release_notes: latest_release.body.clone(),
             download_url: url,
+            asset_name,
             is_nightly,
             published_at: latest_release.published_at.clone(),
             manual_update_required: false,
@@ -324,15 +643,15 @@ impl AppAutoUpdater {
   async fn fetch_app_releases(
     &self,
   ) -> Result<Vec<AppRelease>, Box<dyn std::error::Error + Send + Sync>> {
-    let url = "https://api.github.com/repos/zhom/donutbrowser/releases?per_page=100";
-    let response = self
-      .client
-      .get(url)
-      .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-      .send()
-      .await?;
+    let response = self.github_get(&Self::releases_api_url()).send().await?;
 
     if !response.status().is_success() {
+      if matches!(response.status().as_u16(), 401 | 404) {
+        return Err(
+          "DON update repository is private; sign in with `gh auth login` or set DON_GITHUB_TOKEN"
+            .into(),
+        );
+      }
       return Err(format!("GitHub API request failed: {}", response.status()).into());
     }
 
@@ -395,6 +714,14 @@ impl AppAutoUpdater {
     let patch = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
     (major, minor, patch)
+  }
+
+  fn update_journal_path() -> PathBuf {
+    crate::app_dirs::data_dir().join(UPDATE_JOURNAL_FILENAME)
+  }
+
+  fn confirm_or_rollback_pending_update(current_version: &str) -> std::io::Result<()> {
+    reconcile_update_journal(&Self::update_journal_path(), current_version)
   }
 
   /// Detect if we're running from an AppImage
@@ -765,7 +1092,7 @@ impl AppAutoUpdater {
     assets
       .iter()
       .find(|a| a.name == Self::CHECKSUMS_ASSET_NAME)
-      .map(|a| a.browser_download_url.clone())
+      .map(Self::asset_download_url)
   }
 
   /// Extract the hex digest for `filename` from standard `sha256sum` output
@@ -831,13 +1158,7 @@ impl AppAutoUpdater {
       return Err(unavailable());
     };
 
-    let response = match self
-      .client
-      .get(checksums_url)
-      .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-      .send()
-      .await
-    {
+    let response = match self.github_asset_get(checksums_url).send().await {
       Ok(response) if response.status().is_success() => response,
       Ok(response) => {
         log::warn!("Checksums file request failed: HTTP {}", response.status());
@@ -917,12 +1238,7 @@ impl AppAutoUpdater {
   ) -> Result<PathBuf, Box<dyn std::error::Error + Send + Sync>> {
     let file_path = dest_dir.join(filename);
 
-    let response = self
-      .client
-      .get(download_url)
-      .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-      .send()
-      .await?;
+    let response = self.github_asset_get(download_url).send().await?;
 
     if !response.status().is_success() {
       return Err(format!("Download failed with status: {}", response.status()).into());
@@ -956,12 +1272,14 @@ impl AppAutoUpdater {
     let temp_dir = std::env::temp_dir().join("donut_app_update");
     fs::create_dir_all(&temp_dir)?;
 
-    let filename = update_info
-      .download_url
-      .split('/')
-      .next_back()
-      .unwrap_or("update.dmg")
-      .to_string();
+    let filename = update_info.asset_name.clone().unwrap_or_else(|| {
+      update_info
+        .download_url
+        .split('/')
+        .next_back()
+        .unwrap_or("update.dmg")
+        .to_string()
+    });
 
     // Resolve the expected checksum first so an unverifiable release is
     // rejected before the multi-hundred-MB download, not after.
@@ -996,10 +1314,22 @@ impl AppAutoUpdater {
         .to_lowercase();
       if ext == "msi" || ext == "exe" {
         log::info!("Deferring Windows installer execution until user-initiated restart");
+        let current = self.get_current_app_path()?;
+        let mut journal = UpdateJournal::new(
+          &update_info.new_version,
+          "windows",
+          current.clone(),
+          current.with_extension("exe.backup"),
+        );
+        journal.stage = UpdateStage::AwaitingRestart;
+        journal.installer_path = Some(extracted_app_path.clone());
+        journal.write_atomic(&Self::update_journal_path())?;
         *PENDING_INSTALLER_PATH.lock().unwrap() = Some(extracted_app_path);
       } else {
         log::info!("Installing update (overwriting binary)...");
-        self.install_update(&extracted_app_path).await?;
+        self
+          .install_update(&extracted_app_path, &update_info.new_version)
+          .await?;
         log::info!("Cleaning up temporary files...");
         let _ = fs::remove_dir_all(&temp_dir);
       }
@@ -1008,7 +1338,9 @@ impl AppAutoUpdater {
     #[cfg(not(target_os = "windows"))]
     {
       log::info!("Installing update (overwriting binary)...");
-      self.install_update(&extracted_app_path).await?;
+      self
+        .install_update(&extracted_app_path, &update_info.new_version)
+        .await?;
       log::info!("Cleaning up temporary files...");
       let _ = fs::remove_dir_all(&temp_dir);
     }
@@ -1129,33 +1461,29 @@ impl AppAutoUpdater {
   async fn install_update(
     &self,
     #[allow(unused_variables)] installer_path: &Path,
+    #[allow(unused_variables)] target_version: &str,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     {
       // Get the current application bundle path
       let current_app_path = self.get_current_app_path()?;
 
-      // Create a backup of the current app
+      // Stage the new app at a sibling path first. This must succeed before the
+      // current bundle is touched; a cross-filesystem or unsupported layout is
+      // rejected instead of falling back to a crash-unsafe two-rename update.
       let backup_path = current_app_path.with_extension("app.backup");
       if backup_path.exists() {
         fs::remove_dir_all(&backup_path)?;
       }
+      fs::rename(installer_path, &backup_path)?;
 
-      // Move current app to backup
-      fs::rename(&current_app_path, &backup_path)?;
-
-      // Move new app to current location
-      fs::rename(installer_path, &current_app_path)?;
-
-      // Remove the macOS quarantine attribute from the freshly-installed app
-      // so Gatekeeper doesn't block its first launch — but only if it's
-      // actually present. macOS Sequoia's App Management TCC fires on the
-      // modify-class syscall regardless of whether anything is actually
-      // modified, so we gate the call behind a read-only `getxattr` check.
+      // Remove quarantine while the candidate is still staged. If Gatekeeper
+      // blocked the first target-version launch, that launch could not confirm
+      // the journal or restore the old bundle.
       let needs_quarantine_removal = {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
-        let path_c = CString::new(current_app_path.as_os_str().as_bytes()).ok();
+        let path_c = CString::new(backup_path.as_os_str().as_bytes()).ok();
         let attr_c = CString::new("com.apple.quarantine").ok();
         match (path_c, attr_c) {
           (Some(p), Some(a)) => {
@@ -1168,17 +1496,36 @@ impl AppAutoUpdater {
         }
       };
       if needs_quarantine_removal {
-        let _ = Command::new("xattr")
-          .args([
-            "-dr",
-            "com.apple.quarantine",
-            current_app_path.to_str().unwrap(),
-          ])
-          .output();
+        let status = Command::new("xattr")
+          .args(["-dr", "com.apple.quarantine"])
+          .arg(&backup_path)
+          .status()?;
+        if !status.success() {
+          let _ = remove_path(&backup_path);
+          return Err("macOS quarantine could not be removed from the staged update".into());
+        }
       }
 
-      // Clean up backup after successful installation
-      let _ = fs::remove_dir_all(&backup_path);
+      let journal_path = Self::update_journal_path();
+      let mut journal = UpdateJournal::new(
+        target_version,
+        "macos",
+        current_app_path.clone(),
+        backup_path.clone(),
+      );
+      journal.write_atomic(&journal_path)?;
+
+      if let Err(error) = atomic_swap(&current_app_path, &backup_path) {
+        let _ = remove_path(&backup_path);
+        let _ = remove_path(&journal_path);
+        return Err(error.into());
+      }
+      if let Some(parent) = current_app_path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+      }
+
+      journal.stage = UpdateStage::Installed;
+      journal.write_atomic(&journal_path)?;
 
       // Clean up old "Donut Browser.app" if it exists (from before the project rename)
       if let Some(parent_dir) = current_app_path.parent() {
@@ -1360,10 +1707,20 @@ impl AppAutoUpdater {
           if backup_path.exists() {
             fs::remove_file(&backup_path)?;
           }
+          let journal_path = Self::update_journal_path();
+          let mut journal = UpdateJournal::new(
+            target_version,
+            "windows",
+            current_exe.clone(),
+            backup_path.clone(),
+          );
+          journal.write_atomic(&journal_path)?;
           fs::copy(&current_exe, &backup_path)?;
 
           // Replace current executable
           fs::copy(&new_exe_path, &current_exe)?;
+          journal.stage = UpdateStage::Installed;
+          journal.write_atomic(&journal_path)?;
 
           // Clean up
           let _ = fs::remove_dir_all(&temp_extract_dir);
@@ -1850,7 +2207,13 @@ rm "{}"
       use std::ffi::OsStr;
       use std::os::windows::ffi::OsStrExt;
 
-      let pending = PENDING_INSTALLER_PATH.lock().unwrap().take();
+      let pending = PENDING_INSTALLER_PATH.lock().unwrap().take().or_else(|| {
+        let bytes = fs::read(Self::update_journal_path()).ok()?;
+        let journal: UpdateJournal = serde_json::from_slice(&bytes).ok()?;
+        (journal.stage == UpdateStage::AwaitingRestart)
+          .then_some(journal.installer_path)
+          .flatten()
+      });
 
       if let Some(installer_path) = pending {
         if let Err(e) = Self::prepare_windows_installer().await {
@@ -2037,9 +2400,19 @@ rm "{}"
 
 #[tauri::command]
 pub async fn check_for_app_updates() -> Result<Option<AppUpdateInfo>, String> {
-  // DON fork: never fetch or install upstream Donut Browser releases.
-  log::info!("DON: app auto-updates permanently disabled");
-  Ok(None)
+  #[cfg(feature = "e2e")]
+  if crate::e2e_automation_enabled()
+    && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some()
+  {
+    log::info!("E2E: skipping app update check");
+    return Ok(None);
+  }
+
+  log::info!("Checking the private DON release repository for app updates");
+  AppAutoUpdater::instance()
+    .check_for_updates()
+    .await
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to check for DON app updates"))
 }
 
 #[tauri::command]
@@ -2051,16 +2424,7 @@ pub async fn download_and_prepare_app_update(
   updater
     .download_and_prepare_update(&app_handle, &update_info)
     .await
-    .map_err(|e| {
-      let msg = e.to_string();
-      // Structured error codes (`{"code": ...}`) must reach the frontend
-      // unwrapped so translateBackendError can resolve them.
-      if msg.starts_with('{') {
-        msg
-      } else {
-        format!("Failed to download and prepare app update: {msg}")
-      }
-    })
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to download and prepare app update"))
 }
 
 #[tauri::command]
@@ -2087,12 +2451,152 @@ pub async fn check_for_app_updates_manual() -> Result<Option<AppUpdateInfo>, Str
   updater
     .check_for_updates()
     .await
-    .map_err(|e| format!("Failed to check for app updates: {e}"))
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to check for DON app updates"))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn write_file(path: &Path, contents: &str) {
+    fs::write(path, contents).unwrap();
+  }
+
+  #[test]
+  fn prepared_candidate_before_swap_is_discarded_without_touching_current_app() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("pending-update.json");
+    let original = dir.path().join("Don.app");
+    let backup = dir.path().join("Don.app.backup");
+    write_file(&original, "old");
+    write_file(&backup, "new-candidate");
+    let journal = UpdateJournal::new("v2", "macos", original.clone(), backup.clone());
+    journal.write_atomic(&journal_path).unwrap();
+
+    reconcile_update_journal(&journal_path, "v1").unwrap();
+
+    assert_eq!(fs::read_to_string(&original).unwrap(), "old");
+    assert!(!backup.exists());
+    assert!(!journal_path.exists());
+  }
+
+  #[test]
+  fn prepared_journal_after_swap_is_confirmed_by_target_version_launch() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("pending-update.json");
+    let original = dir.path().join("Don.app");
+    let backup = dir.path().join("Don.app.backup");
+    write_file(&original, "new");
+    write_file(&backup, "old");
+    let journal = UpdateJournal::new("v2", "macos", original.clone(), backup.clone());
+    journal.write_atomic(&journal_path).unwrap();
+
+    reconcile_update_journal(&journal_path, "v2").unwrap();
+
+    assert_eq!(fs::read_to_string(&original).unwrap(), "new");
+    assert!(!backup.exists());
+    assert!(!journal_path.exists());
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn failed_target_version_launch_atomically_restores_macos_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("pending-update.json");
+    let original = dir.path().join("Don.app");
+    let backup = dir.path().join("Don.app.backup");
+    write_file(&original, "failed-new");
+    write_file(&backup, "old");
+    let mut journal = UpdateJournal::new("v2", "macos", original.clone(), backup.clone());
+    journal.stage = UpdateStage::Installed;
+    journal.write_atomic(&journal_path).unwrap();
+
+    reconcile_update_journal(&journal_path, "v1").unwrap();
+
+    assert_eq!(fs::read_to_string(&original).unwrap(), "old");
+    assert!(!backup.exists());
+    assert!(!journal_path.exists());
+  }
+
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn macos_bundle_swap_never_removes_either_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let current = dir.path().join("Don.app");
+    let staged = dir.path().join("Don.app.backup");
+    write_file(&current, "old");
+    write_file(&staged, "new");
+
+    atomic_swap(&current, &staged).unwrap();
+
+    assert_eq!(fs::read_to_string(&current).unwrap(), "new");
+    assert_eq!(fs::read_to_string(&staged).unwrap(), "old");
+  }
+
+  #[test]
+  fn first_matching_launch_confirms_update_and_removes_backup() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("pending-update.json");
+    let original = dir.path().join("Donut.exe");
+    let backup = dir.path().join("Donut.exe.backup");
+    write_file(&original, "new");
+    write_file(&backup, "old");
+    let mut journal = UpdateJournal::new("v2", "windows", original, backup.clone());
+    journal.stage = UpdateStage::Installed;
+    journal.write_atomic(&journal_path).unwrap();
+
+    reconcile_update_journal(&journal_path, "v2").unwrap();
+
+    assert!(!backup.exists());
+    assert!(!journal_path.exists());
+  }
+
+  #[test]
+  fn downloaded_windows_installer_remains_pending_until_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let journal_path = dir.path().join("pending-update.json");
+    let installer = dir.path().join("Don-setup.exe");
+    write_file(&installer, "installer");
+    let mut journal = UpdateJournal::new(
+      "v2",
+      "windows",
+      dir.path().join("Don.exe"),
+      dir.path().join("Don.exe.backup"),
+    );
+    journal.stage = UpdateStage::AwaitingRestart;
+    journal.installer_path = Some(installer.clone());
+    journal.write_atomic(&journal_path).unwrap();
+
+    reconcile_update_journal(&journal_path, "v1").unwrap();
+
+    assert!(installer.exists());
+    assert!(journal_path.exists());
+  }
+
+  #[test]
+  fn don_updates_only_from_its_fork_repository() {
+    assert_eq!(
+      AppAutoUpdater::releases_api_url(),
+      "https://api.github.com/repos/raydocs/DON/releases?per_page=100"
+    );
+    assert_eq!(
+      AppAutoUpdater::release_page_url("v0.0.3"),
+      "https://github.com/raydocs/DON/releases/tag/v0.0.3"
+    );
+  }
+
+  #[test]
+  fn private_release_assets_request_binary_content() {
+    let request = AppAutoUpdater::instance()
+      .github_asset_get("https://api.github.com/repos/raydocs/DON/releases/assets/1")
+      .build()
+      .unwrap();
+
+    assert_eq!(
+      request.headers().get("Accept").unwrap(),
+      "application/octet-stream"
+    );
+  }
 
   #[test]
   fn test_is_nightly_build() {
@@ -2249,12 +2753,14 @@ not-a-hash  Donut_0.29.0_amd64.deb
     let assets = vec![
       AppReleaseAsset {
         name: "Donut_0.29.0_x64.dmg".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x64.dmg".to_string(),
         size: 1,
         digest: None,
       },
       AppReleaseAsset {
         name: "SHA256SUMS.txt".to_string(),
+        api_url: "https://api.github.com/repos/raydocs/DON/releases/assets/2".to_string(),
         browser_download_url: "https://example.com/SHA256SUMS.txt".to_string(),
         size: 1,
         digest: None,
@@ -2262,7 +2768,7 @@ not-a-hash  Donut_0.29.0_amd64.deb
     ];
     assert_eq!(
       AppAutoUpdater::find_checksums_url(&assets).as_deref(),
-      Some("https://example.com/SHA256SUMS.txt")
+      Some("https://api.github.com/repos/raydocs/DON/releases/assets/2")
     );
     assert_eq!(AppAutoUpdater::find_checksums_url(&assets[..1]), None);
   }
@@ -2275,12 +2781,17 @@ not-a-hash  Donut_0.29.0_amd64.deb
     )
     .expect("asset without digest should deserialize");
     assert_eq!(without.digest, None);
+    assert!(without.api_url.is_empty());
 
     let with: AppReleaseAsset = serde_json::from_str(
-      r#"{"name": "a.dmg", "browser_download_url": "https://example.com/a.dmg", "size": 5, "digest": "sha256:ab12"}"#,
+      r#"{"name": "a.dmg", "url": "https://api.github.com/repos/raydocs/DON/releases/assets/1", "browser_download_url": "https://example.com/a.dmg", "size": 5, "digest": "sha256:ab12"}"#,
     )
     .expect("asset with digest should deserialize");
     assert_eq!(with.digest.as_deref(), Some("sha256:ab12"));
+    assert_eq!(
+      AppAutoUpdater::asset_download_url(&with),
+      "https://api.github.com/repos/raydocs/DON/releases/assets/1"
+    );
   }
 
   #[test]
@@ -2318,12 +2829,14 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // macOS assets
       AppReleaseAsset {
         name: "Donut.Browser_0.1.0_aarch64.dmg".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/aarch64.dmg".to_string(),
         size: 12345,
         digest: None,
       },
       AppReleaseAsset {
         name: "Donut.Browser_0.1.0_x64.dmg".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x64.dmg".to_string(),
         size: 12345,
         digest: None,
@@ -2331,6 +2844,7 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // Windows assets (NSIS naming: _ARCH-setup.exe)
       AppReleaseAsset {
         name: "Donut_0.1.0_x64-setup.exe".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x64-setup.exe".to_string(),
         size: 12345,
         digest: None,
@@ -2338,18 +2852,21 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // Linux assets
       AppReleaseAsset {
         name: "donutbrowser_0.1.0_amd64.deb".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/amd64.deb".to_string(),
         size: 12345,
         digest: None,
       },
       AppReleaseAsset {
         name: "donutbrowser-0.1.0-1.x86_64.rpm".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x86_64.rpm".to_string(),
         size: 12345,
         digest: None,
       },
       AppReleaseAsset {
         name: "Donut.Browser-0.1.0-x86_64.AppImage".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x86_64.AppImage".to_string(),
         size: 12345,
         digest: None,
@@ -2453,12 +2970,14 @@ not-a-hash  Donut_0.29.0_amd64.deb
     let assets = vec![
       AppReleaseAsset {
         name: "donutbrowser_0.1.0_amd64.deb".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/amd64.deb".to_string(),
         size: 12345,
         digest: None,
       },
       AppReleaseAsset {
         name: "Donut.Browser-0.1.0-x86_64.AppImage".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x86_64.AppImage".to_string(),
         size: 12345,
         digest: None,
@@ -2500,6 +3019,7 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // macOS assets
       AppReleaseAsset {
         name: "Donut.Browser_0.1.0_aarch64.dmg".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/aarch64.dmg".to_string(),
         size: 12345,
         digest: None,
@@ -2507,6 +3027,7 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // Windows assets
       AppReleaseAsset {
         name: "Donut.Browser_0.1.0_x64.msi".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x64.msi".to_string(),
         size: 12345,
         digest: None,
@@ -2514,12 +3035,14 @@ not-a-hash  Donut_0.29.0_amd64.deb
       // Linux assets
       AppReleaseAsset {
         name: "donutbrowser_0.1.0_amd64.deb".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/amd64.deb".to_string(),
         size: 12345,
         digest: None,
       },
       AppReleaseAsset {
         name: "Donut.Browser-0.1.0-x86_64.AppImage".to_string(),
+        api_url: String::new(),
         browser_download_url: "https://example.com/x86_64.AppImage".to_string(),
         size: 12345,
         digest: None,

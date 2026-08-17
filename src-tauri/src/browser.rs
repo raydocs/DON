@@ -294,7 +294,6 @@ impl Browser for WayfernBrowser {
       "--no-default-browser-check".to_string(),
       "--disable-background-mode".to_string(),
       "--disable-component-update".to_string(),
-      "--disable-background-timer-throttling".to_string(),
       "--crash-server-url=".to_string(),
       "--disable-updater".to_string(),
       "--disable-session-crashed-bubble".to_string(),
@@ -489,6 +488,17 @@ pub struct GithubAsset {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn wayfern_launch_keeps_chromium_background_throttling_enabled() {
+    let args = WayfernBrowser::new()
+      .create_launch_args("/tmp/profile", None, None, None, false)
+      .unwrap();
+
+    assert!(!args
+      .iter()
+      .any(|arg| arg == "--disable-background-timer-throttling"));
+  }
 
   #[cfg(target_os = "macos")]
   #[test]

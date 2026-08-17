@@ -62,6 +62,11 @@ export interface Extension {
   description?: string;
   author?: string;
   homepage_url?: string;
+  /** How the payload was imported: a `.crx`/`.zip` archive, or a folder. */
+  source_kind: "archive" | "unpacked";
+  /** Absolute folder the extension is loaded from in place. Set means nothing
+   * was copied into Donut, so the extension is machine-local and never syncs. */
+  linked_path?: string;
 }
 
 export interface ExtensionGroup {
@@ -275,11 +280,44 @@ export interface DetectedProfile {
 
 export interface ImportProfileItem {
   source_path: string;
+  /**
+   * Source browser family. Selects which OS keychain entry holds the key that
+   * unlocks the source's cookies and passwords, so it decides whether secrets
+   * survive the import.
+   */
   browser_type?: string;
   new_profile_name: string;
   /** Mutually exclusive with `vpn_id`; the importer rejects setting both. */
   proxy_id?: string | null;
   vpn_id?: string | null;
+  /** Import even though the source browser is still running. */
+  allow_running?: boolean;
+}
+
+/** Stable warning codes; each maps to `importProfile.warnings.*`. */
+export type ProfileImportWarning =
+  | "secretsNotMigrated"
+  | "appBoundEncrypted"
+  | "storeTooOld"
+  | "storeTooNew"
+  | "sourceBrowserRunning"
+  | "securePreferencesReset"
+  | "extensionsPartial"
+  | "storeUnreadable";
+
+export interface ProfileImportReport {
+  cookies_migrated: number;
+  cookies_unrecoverable: number;
+  passwords_migrated: number;
+  passwords_unrecoverable: number;
+  payment_methods_migrated: number;
+  payment_methods_unrecoverable: number;
+  extensions_migrated: number;
+  history_entries: number;
+  bookmarks: number;
+  local_storage_origins: number;
+  bytes_copied: number;
+  warnings: ProfileImportWarning[];
 }
 
 export interface ProfileImportItemResult {
@@ -288,6 +326,8 @@ export interface ProfileImportItemResult {
   status: "imported" | "skipped" | "failed";
   profile_id: string | null;
   error: string | null;
+  /** What actually came across. Present when status is "imported". */
+  report?: ProfileImportReport | null;
 }
 
 export interface ProfileImportBatchResult {
@@ -310,6 +350,27 @@ export interface ProfileImportProgress {
   status: "importing" | "imported" | "skipped" | "failed";
 }
 
+export interface LegacyMigrationSelection {
+  profiles: boolean;
+  proxies: boolean;
+  groups: boolean;
+  extensions: boolean;
+}
+
+export interface LegacyMigrationPreview {
+  available: boolean;
+  source_path: string;
+  counts: Record<keyof LegacyMigrationSelection, number>;
+  conflicts: string[];
+}
+
+export interface LegacyMigrationResult {
+  copied: number;
+  skipped: number;
+  failed: number;
+  report_path: string;
+}
+
 export interface BrowserReleaseTypes {
   stable?: string;
   chrome_stable?: string;
@@ -320,6 +381,8 @@ export interface AppUpdateInfo {
   new_version: string;
   release_notes: string;
   download_url: string;
+  /** Original filename for authenticated GitHub asset API downloads. */
+  asset_name?: string | null;
   is_nightly: boolean;
   published_at: string;
   manual_update_required: boolean;
@@ -724,7 +787,22 @@ export interface ConsistencyResult {
   mismatches: string[];
 }
 
-/** A VPN/proxy extension found in a profile, which can reroute browser traffic. */
+/**
+ * How strongly an extension is believed to be a VPN or proxy tool.
+ * "capability" is not such a claim: it means only that the extension holds
+ * Chromium's `proxy` permission, which download managers do too.
+ */
+export type VpnExtensionConfidence = "confirmed" | "likely" | "capability";
+
+/** How much of a profile's extension set could be read. */
+export type ExtensionScanState =
+  | "scanned"
+  | "partial"
+  | "encrypted"
+  | "ephemeral"
+  | "missing";
+
+/** An extension found in a profile that could change where the browser connects. */
 export interface DetectedVpnExtension {
   /** Acknowledgement identity: `donut:<uuid>` or `crx:<id>`. */
   key: string;
@@ -732,15 +810,16 @@ export interface DetectedVpnExtension {
   version: string | null;
   /** "donut" (managed by Donut) or "browser" (installed in the profile). */
   source: string;
-  /** "confirmed" (holds the proxy permission) or "likely". */
-  confidence: string;
+  confidence: VpnExtensionConfidence;
+  /** Holds the `proxy` permission outright, so it can change the proxy today. */
+  proxy_control: boolean;
   signals: string[];
 }
 
 /** Local-only checks answered before a launch starts any worker. */
 export interface PreLaunchChecks {
   vpn_extensions: DetectedVpnExtension[];
-  scan_state: string;
+  scan_state: ExtensionScanState;
   consistency: ConsistencyResult;
   exit_probe_pending: boolean;
   exit_measurement_unreliable: boolean;
