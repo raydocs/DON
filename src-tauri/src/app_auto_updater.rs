@@ -68,7 +68,6 @@ use crate::events;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
-#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
