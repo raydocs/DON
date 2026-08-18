@@ -1,7 +1,7 @@
 # DON
 
 **Local AGPL-3.0 fork of [Donut Browser](https://github.com/zhom/donutbrowser).**  
-**Version 0.0.7 — not affiliated with official Donut.**
+**Version 0.0.8 — not affiliated with official Donut.**
 
 Open-source anti-detect browser manager (Tauri + Wayfern), customized for personal use:
 
