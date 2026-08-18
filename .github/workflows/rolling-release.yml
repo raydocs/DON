@@ -197,6 +197,10 @@ jobs:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_KEY: ${{ secrets.APPLE_CERTIFICATE_KEY }}
         run: |
+          if [[ -z "$APPLE_CERTIFICATE" || -z "$APPLE_CERTIFICATE_KEY" ]]; then
+            echo "Apple signing certificate is not configured; using ad-hoc signing for self-use"
+            exit 0
+          fi
           CERT_PATH=$RUNNER_TEMP/cert.cer
           KEY_PATH=$RUNNER_TEMP/cert.key
           PEM_PATH=$RUNNER_TEMP/cert.pem
@@ -231,7 +235,7 @@ jobs:
           BUILD_TAG: "nightly-${{ steps.timestamp.outputs.timestamp }}"
           GITHUB_REF_NAME: "nightly-${{ steps.timestamp.outputs.timestamp }}"
           GITHUB_SHA: ${{ github.sha }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}

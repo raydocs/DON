@@ -1,6 +1,6 @@
 [package]
 name = "donutbrowser"
-version = "0.0.6"
+version = "0.0.7"
 description = "Don — private AGPL fork of Donut Browser with safer fingerprints"
 authors = ["DON fork"]
 edition = "2021"
