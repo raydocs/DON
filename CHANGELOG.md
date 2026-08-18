@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.0.4 (2026-08-18)
+
+### Release reliability
+
+- use a supported Node.js LTS release so cross-platform license generation is deterministic
+- update the affected Rust event listener dependency and keep dependency scanning blocking on actionable findings
+- enable GitHub's required experimental flag for Rust CodeQL analysis
+- publish only the requested macOS and Windows packages
 
 ## v0.0.3 (2026-08-17)
 

@@ -1,0 +1,86 @@
+# OSV reports RustSec maintenance notices as vulnerabilities. Keep the scan
+# blocking, but suppress inherited findings that have no actionable upgrade.
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0411"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0412"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0413"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0414"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0415"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0416"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0417"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0418"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0419"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0420"
+reason = "Unmaintained GTK3 binding inherited from Tauri's Linux backend; not present in macOS or Windows builds."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0429"
+reason = "The affected VariantStrIter API is unused; glib 0.18 is pinned transitively by Tauri's Linux-only GTK3 backend."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0436"
+reason = "Maintenance notice for an inherited macro dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2024-0370"
+reason = "Maintenance notice for an inherited procedural macro dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0075"
+reason = "Maintenance notice for an inherited Unicode dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0080"
+reason = "Maintenance notice for an inherited Unicode dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0081"
+reason = "Maintenance notice for an inherited Unicode dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0098"
+reason = "Maintenance notice for an inherited Unicode dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2025-0100"
+reason = "Maintenance notice for an inherited Unicode dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0192"
+reason = "Maintenance notice for an inherited font parser dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0206"
+reason = "Maintenance notice for an inherited font shaping dependency, not a vulnerability."
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0235"
+reason = "rkyv is an inactive optional rust_decimal dependency and is absent from the all-target build graph."

@@ -13,6 +13,8 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    env:
+      CODEQL_ENABLE_EXPERIMENTAL_FEATURES: ${{ matrix.language == 'rust' && 'true' || 'false' }}
     permissions:
       security-events: write
       packages: read

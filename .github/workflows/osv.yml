@@ -51,6 +51,7 @@ jobs:
       upload-sarif: false
       scan-args: |-
         -r
+        --config=osv-scanner.toml
         --lockfile=pnpm-lock.yaml
         --lockfile=src-tauri/Cargo.lock
         ./
@@ -63,6 +64,7 @@ jobs:
       upload-sarif: false
       scan-args: |-
         -r
+        --config=osv-scanner.toml
         --lockfile=pnpm-lock.yaml
         --lockfile=src-tauri/Cargo.lock
         ./
