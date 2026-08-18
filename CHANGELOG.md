@@ -1,7 +1,7 @@
 # Changelog
 
 
-## v0.0.2 (Unreleased)
+## v0.0.3 (2026-08-17)
 
 ### Upstream integration
 

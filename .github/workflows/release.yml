@@ -22,9 +22,9 @@ jobs:
     name: Security Vulnerability Scan
     uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@8deb546fdb875b9996d27d4950be7312dac076a1" # v2.5.0
     with:
+      upload-sarif: false
       scan-args: |-
         -r
-        --skip-git
         --lockfile=pnpm-lock.yaml
         --lockfile=src-tauri/Cargo.lock
         ./

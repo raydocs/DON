@@ -13,6 +13,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
+#[cfg(any(target_os = "macos", test))]
 fn select_new_wayfern_process(
   candidates: &[(u32, Option<u16>)],
   existing: &std::collections::HashSet<u32>,
@@ -677,14 +678,14 @@ impl WayfernManager {
     executable_path: &std::path::Path,
     args: &[String],
     wayfern_token: Option<&str>,
-    profile_path: &str,
+    _profile_path: &str,
     port: u16,
   ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     if crate::platform_browser::macos::app_bundle_for_executable(executable_path).is_some() {
-      let target_path = std::path::Path::new(profile_path)
+      let target_path = std::path::Path::new(_profile_path)
         .canonicalize()
-        .unwrap_or_else(|_| std::path::Path::new(profile_path).to_path_buf());
+        .unwrap_or_else(|_| std::path::Path::new(_profile_path).to_path_buf());
       let existing: std::collections::HashSet<u32> =
         Self::find_wayfern_processes_by_profile(&target_path)
           .into_iter()

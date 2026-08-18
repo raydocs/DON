@@ -68,6 +68,7 @@ use crate::events;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -98,6 +99,7 @@ struct UpdateJournal {
   stage: UpdateStage,
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl UpdateJournal {
   fn new(
     target_version: &str,
@@ -374,29 +376,24 @@ impl AppAutoUpdater {
   }
 
   fn github_cli_token() -> Option<String> {
-    let mut executables = Vec::new();
     #[cfg(target_os = "macos")]
-    {
-      executables.push(PathBuf::from("/opt/homebrew/bin/gh"));
-      executables.push(PathBuf::from("/usr/local/bin/gh"));
-    }
+    let executables = ["/opt/homebrew/bin/gh", "/usr/local/bin/gh", "gh"]
+      .into_iter()
+      .map(PathBuf::from);
     #[cfg(target_os = "windows")]
-    {
-      for root in ["ProgramFiles", "ProgramW6432"] {
-        if let Some(path) = std::env::var_os(root) {
-          executables.push(PathBuf::from(path).join("GitHub CLI").join("gh.exe"));
-        }
-      }
-      if let Some(path) = std::env::var_os("LOCALAPPDATA") {
-        executables.push(
-          PathBuf::from(path)
-            .join("Programs")
-            .join("GitHub CLI")
-            .join("gh.exe"),
-        );
-      }
-    }
-    executables.push(PathBuf::from("gh"));
+    let executables = ["ProgramFiles", "ProgramW6432"]
+      .into_iter()
+      .filter_map(std::env::var_os)
+      .map(|path| PathBuf::from(path).join("GitHub CLI").join("gh.exe"))
+      .chain(std::env::var_os("LOCALAPPDATA").map(|path| {
+        PathBuf::from(path)
+          .join("Programs")
+          .join("GitHub CLI")
+          .join("gh.exe")
+      }))
+      .chain(std::iter::once(PathBuf::from("gh")));
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let executables = std::iter::once(PathBuf::from("gh"));
 
     for executable in executables {
       let mut command = Command::new(executable);
