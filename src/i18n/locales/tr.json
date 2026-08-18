@@ -999,6 +999,8 @@
     "manual": "Elle",
     "webrtcMode": "WebRTC modu",
     "webrtcModeDescription": "WebRTC ağ adaylarının nasıl işleneceğini seçin.",
+    "gpuCompatibilityMode": "GPU uyumluluk modu",
+    "gpuCompatibilityModeDescription": "Wayfern GPU işlemi yüksek CPU kullanımına veya sayfa yavaşlamasına neden olursa bu profil için donanım hızlandırmayı kapatır. Yalnızca gerektiğinde etkinleştirin; sonraki başlatmada uygulanır.",
     "webrtcProxy": "Proxy",
     "webrtcOff": "Kapalı",
     "webrtcReal": "Gerçek ağ",
@@ -2277,7 +2279,7 @@
     "explainer": "Çıkış IP'nizle uyuşmayan bir saat dilimi veya dil, gerçek cihazınız hiç sızdırmasa bile güçlü bir anti-bot sinyalidir. Şüpheli muameleyi azaltmak için parmak izini proxy konumuyla hizalayın.",
     "matchToProxy": "Parmak izini proxy'ye eşle",
     "matching": "Eşleniyor…",
-    "matchSuccess": "Parmak izi proxy'ye uyacak şekilde güncellendi. Uygulamak için profili yeniden başlatın."
+    "matchSuccess": "Parmak izi proxy'ye uyacak şekilde güncellendi. Profil başlatılmadan önce yeniden doğrulanacak."
   },
   "cookieBot": {
     "title": "Cookie Bot",

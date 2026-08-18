@@ -1,6 +1,6 @@
 # DON — AGPL fork of Donut Browser
 
-**Version:** 0.0.4
+**Version:** 0.0.5
 
 **Upstream:** [zhom/donutbrowser](https://github.com/zhom/donutbrowser) (AGPL-3.0)
 
@@ -8,11 +8,11 @@
 
 ## What changed vs upstream
 
-| Area | Upstream | DON 0.0.4 |
+| Area | Upstream | DON 0.0.5 |
 |------|----------|-----------|
 | App name / id | Donut / `com.donutbrowser` | **DON** / `com.donbrowser` |
 | Data directory | `DonutBrowser` | **`DON`** (`DONDev` in debug) |
-| Version | 0.29.x | **0.0.4** |
+| Version | 0.29.x | **0.0.5** |
 | Paid gates | Pro subscription required for fingerprint edit, automation, etc. | **All local capabilities unlocked** |
 | Commercial trial modal | 14-day commercial use trial | **Removed** (module, commands, modal, settings section, locale keys) |
 | App auto-update | Pulls `zhom/donutbrowser` releases | **Authenticated private releases from `raydocs/DON` only** |

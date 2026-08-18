@@ -1031,18 +1031,82 @@ test("visible UI creates and assigns profiles, groups, proxies, VPNs, extensions
     if (!(await app.invoke("is_geoip_database_available"))) {
       await app.invoke("download_geoip_database");
     }
-    await app.invoke("match_profile_fingerprint_to_exit", {
+    const measuredMismatch = await app.invoke("check_profile_consistency_now", {
       profileId: profile.id,
-      exitIp: socksBrowserExitIp,
     });
-    const matchedProfile = (await app.invoke("list_browser_profiles")).find(
+    assert.equal(measuredMismatch.checked, true);
+    assert.equal(measuredMismatch.exit_ip, socksBrowserExitIp);
+    const profileBeforeMatch = (await app.invoke("list_browser_profiles")).find(
       (item) => item.id === profile.id,
+    );
+    const mismatchedFingerprint = JSON.parse(
+      profileBeforeMatch.wayfern_config.fingerprint,
+    );
+    mismatchedFingerprint.timezone =
+      measuredMismatch.exit_timezone === "Etc/UTC"
+        ? "America/Los_Angeles"
+        : "Etc/UTC";
+    await app.invoke("update_wayfern_config", {
+      profileId: profile.id,
+      config: {
+        ...profileBeforeMatch.wayfern_config,
+        fingerprint: JSON.stringify(mismatchedFingerprint),
+      },
+    });
+    const blockingChecks = await app.invoke("get_profile_pre_launch_checks", {
+      profileId: profile.id,
+    });
+    assert.equal(blockingChecks.consistency.checked, true);
+    assert.equal(blockingChecks.consistency.consistent, false);
+
+    const launchButton = await app.execute(
+      `
+        const row = [...document.querySelectorAll("tr")].find((candidate) =>
+          (candidate.innerText || "").includes(arguments[0])
+        );
+        return row?.querySelector('button[aria-label="Launch"]') ?? null;
+      `,
+      [profile.name],
+    );
+    assert.ok(launchButton, "Profile launch control was not visible");
+    await app.clickElement(launchButton, "profile launch control");
+    await app.waitForText("Launch blocked", 30_000);
+    await app.clickTextIn('[role="dialog"]', "Match fingerprint to proxy", {
+      roles: ["button"],
+    });
+    const matchedProfile = await app.waitFor(
+      async () => {
+        const current = (await app.invoke("list_browser_profiles")).find(
+          (item) => item.id === profile.id,
+        );
+        return current?.process_id ? current : false;
+      },
+      {
+        timeoutMs: 60_000,
+        description: "automatic launch after matching fingerprint to proxy",
+      },
     );
     const matchedFingerprint = JSON.parse(
       matchedProfile.wayfern_config.fingerprint,
     );
     assert.ok(matchedFingerprint.timezone);
     assert.equal(typeof matchedFingerprint.timezoneOffset, "number");
+    assert.equal(
+      await app.visibleTextIncludes("Launch blocked"),
+      false,
+      "the resolved launch gate remained open",
+    );
+    await app.invoke("kill_browser_profile", { profile: matchedProfile });
+    await app.waitFor(
+      async () =>
+        !(await app.invoke("list_browser_profiles")).find(
+          (item) => item.id === profile.id,
+        )?.process_id,
+      {
+        timeoutMs: 20_000,
+        description: "automatically launched profile cleanup",
+      },
+    );
 
     await app.restart();
     const persistedProfile = (await app.invoke("list_browser_profiles")).find(

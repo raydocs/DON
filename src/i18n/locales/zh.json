@@ -999,6 +999,8 @@
     "manual": "手动",
     "webrtcMode": "WebRTC 模式",
     "webrtcModeDescription": "选择 WebRTC 网络候选的处理方式。",
+    "gpuCompatibilityMode": "GPU 兼容模式",
+    "gpuCompatibilityModeDescription": "当 Wayfern 的 GPU 进程导致 CPU 占用过高或页面卡顿时，为此配置停用硬件加速。仅在需要时启用，下次启动时生效。",
     "webrtcProxy": "代理",
     "webrtcOff": "关闭",
     "webrtcReal": "真实网络",
@@ -2277,7 +2279,7 @@
     "explainer": "时区或语言与出口 IP 不一致是强烈的反机器人信号,即使您的真实设备信息从未泄露。请让指纹与代理位置保持一致,以减少被针对的风险。",
     "matchToProxy": "将指纹匹配到代理",
     "matching": "匹配中…",
-    "matchSuccess": "指纹已更新以匹配代理。重新启动配置文件以生效。"
+    "matchSuccess": "指纹已更新以匹配代理。启动前将重新验证配置文件。"
   },
   "cookieBot": {
     "title": "Cookie Bot",

@@ -999,6 +999,8 @@
     "manual": "Manual",
     "webrtcMode": "Modo WebRTC",
     "webrtcModeDescription": "Escolha como os candidatos de rede WebRTC serão tratados.",
+    "gpuCompatibilityMode": "Modo de compatibilidade da GPU",
+    "gpuCompatibilityModeDescription": "Desativa a aceleração de hardware para este perfil se o processo de GPU do Wayfern causar uso elevado da CPU ou lentidão nas páginas. Ative apenas quando necessário; entra em vigor no próximo arranque.",
     "webrtcProxy": "Proxy",
     "webrtcOff": "Desativado",
     "webrtcReal": "Rede real",
@@ -2277,7 +2279,7 @@
     "explainer": "Um fuso horário ou idioma que não combina com seu IP de saída é um forte sinal anti-bot, mesmo que seu dispositivo real nunca vaze. Alinhe a impressão digital com a localização do proxy para reduzir tratamentos hostis.",
     "matchToProxy": "Ajustar impressão ao proxy",
     "matching": "Ajustando…",
-    "matchSuccess": "Impressão digital atualizada para corresponder ao proxy. Reinicie o perfil para aplicar."
+    "matchSuccess": "Impressão digital atualizada para corresponder ao proxy. O perfil será validado novamente antes de iniciar."
   },
   "cookieBot": {
     "title": "Cookie Bot",

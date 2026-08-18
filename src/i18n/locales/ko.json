@@ -999,6 +999,8 @@
     "manual": "수동",
     "webrtcMode": "WebRTC 모드",
     "webrtcModeDescription": "WebRTC 네트워크 후보를 처리하는 방식을 선택합니다.",
+    "gpuCompatibilityMode": "GPU 호환 모드",
+    "gpuCompatibilityModeDescription": "Wayfern GPU 프로세스로 인해 CPU 사용량이 높거나 페이지가 느려질 때 이 프로필의 하드웨어 가속을 끕니다. 필요한 경우에만 사용하세요. 다음 실행부터 적용됩니다.",
     "webrtcProxy": "프록시",
     "webrtcOff": "끔",
     "webrtcReal": "실제 네트워크",
@@ -2277,7 +2279,7 @@
     "explainer": "출구 IP와 어긋나는 시간대나 언어는 실제 기기 정보가 유출되지 않더라도 강력한 안티봇 신호가 됩니다. 핑거프린트를 프록시 위치에 맞춰 의심받는 상황을 줄이세요.",
     "matchToProxy": "지문을 프록시에 맞추기",
     "matching": "맞추는 중…",
-    "matchSuccess": "지문이 프록시에 맞게 업데이트되었습니다. 적용하려면 프로필을 다시 실행하세요."
+    "matchSuccess": "지문이 프록시에 맞게 업데이트되었습니다. 실행 전에 프로필을 다시 검증합니다."
   },
   "cookieBot": {
     "title": "Cookie Bot",

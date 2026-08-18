@@ -14,6 +14,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "motion/react";
 import type { Dispatch, SetStateAction } from "react";
 import * as React from "react";
@@ -125,6 +126,10 @@ import { canUseCookieBot } from "@/lib/entitlements";
 import { formatRelativeTime } from "@/lib/flag-utils";
 import type { RemoteHandoffState } from "@/lib/remote-sessions";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
+import {
+  shouldPollTraffic,
+  trafficSnapshotsEqual,
+} from "@/lib/traffic-snapshots";
 import { cn } from "@/lib/utils";
 import type {
   BrowserProfile,
@@ -1681,6 +1686,9 @@ export function ProfilesDataTable({
   const [trafficSnapshots, setTrafficSnapshots] = React.useState<
     Record<string, TrafficSnapshot>
   >({});
+  const [trafficDocumentVisible, setTrafficDocumentVisible] =
+    React.useState(true);
+  const [trafficWindowFocused, setTrafficWindowFocused] = React.useState(true);
   const [trafficDialogProfile, setTrafficDialogProfile] = React.useState<{
     id: string;
     name?: string;
@@ -2020,15 +2028,76 @@ export function ProfilesDataTable({
     [runningProfiles],
   );
   const runningCount = runningProfileIds.length;
+
+  React.useEffect(() => {
+    if (!browserState.isClient) return;
+
+    const updateDocumentVisibility = () => {
+      setTrafficDocumentVisible(document.visibilityState !== "hidden");
+    };
+    updateDocumentVisibility();
+    document.addEventListener("visibilitychange", updateDocumentVisibility);
+
+    let disposed = false;
+    let unlistenFocus: (() => void) | undefined;
+    const appWindow = getCurrentWindow();
+    void appWindow
+      .isFocused()
+      .then((focused) => {
+        if (!disposed) setTrafficWindowFocused(focused);
+      })
+      .catch((error) => {
+        console.error("Failed to read app window focus:", error);
+      });
+    void appWindow
+      .onFocusChanged(({ payload: focused }) => {
+        if (!disposed) setTrafficWindowFocused(focused);
+      })
+      .then((unlisten) => {
+        if (disposed) {
+          unlisten();
+        } else {
+          unlistenFocus = unlisten;
+        }
+      })
+      .catch((error) => {
+        console.error("Failed to listen for app window focus:", error);
+      });
+
+    return () => {
+      disposed = true;
+      document.removeEventListener(
+        "visibilitychange",
+        updateDocumentVisibility,
+      );
+      unlistenFocus?.();
+    };
+  }, [browserState.isClient]);
+
   React.useEffect(() => {
     if (!browserState.isClient) return;
 
     if (runningCount === 0) {
-      setTrafficSnapshots({});
+      setTrafficSnapshots((current) =>
+        trafficSnapshotsEqual(current, {}) ? current : {},
+      );
+      return;
+    }
+    if (
+      !shouldPollTraffic(
+        runningCount,
+        trafficDocumentVisible,
+        trafficWindowFocused,
+      )
+    ) {
       return;
     }
 
+    let disposed = false;
+    let fetchInFlight = false;
     const fetchTrafficSnapshots = async () => {
+      if (fetchInFlight) return;
+      fetchInFlight = true;
       try {
         const allSnapshots = await invoke<TrafficSnapshot[]>(
           "get_running_profile_traffic_snapshots",
@@ -2043,20 +2112,35 @@ export function ProfilesDataTable({
             }
           }
         }
-        setTrafficSnapshots(newSnapshots);
+        if (!disposed) {
+          setTrafficSnapshots((current) =>
+            trafficSnapshotsEqual(current, newSnapshots)
+              ? current
+              : newSnapshots,
+          );
+        }
       } catch (error) {
         console.error("Failed to fetch traffic snapshots:", error);
+      } finally {
+        fetchInFlight = false;
       }
     };
 
     void fetchTrafficSnapshots();
     const interval = setInterval(() => {
       void fetchTrafficSnapshots();
-    }, 1000);
+    }, 2000);
     return () => {
+      disposed = true;
       clearInterval(interval);
     };
-  }, [browserState.isClient, runningCount, runningProfileIds]);
+  }, [
+    browserState.isClient,
+    runningCount,
+    runningProfileIds,
+    trafficDocumentVisible,
+    trafficWindowFocused,
+  ]);
 
   // Clean up snapshots for profiles that are no longer running
   React.useEffect(() => {
@@ -3284,7 +3368,6 @@ export function ProfilesDataTable({
             return (
               <div className="min-w-0 overflow-hidden">
                 <BandwidthMiniChart
-                  key={`${profile.id}-${snapshot?.last_update ?? 0}-${bandwidthData.length}`}
                   data={bandwidthData}
                   currentBandwidth={currentBandwidth}
                   onClick={() => meta.onOpenTrafficDialog?.(profile.id)}

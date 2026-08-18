@@ -241,6 +241,30 @@ export function WayfernConfigForm({
     </div>
   );
 
+  const renderGpuCompatibilityMode = (idPrefix: string) => (
+    <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+      <div className="flex items-center gap-x-2">
+        <Checkbox
+          id={`${idPrefix}-gpu-compatibility-mode`}
+          checked={config.gpu_compatibility_mode ?? false}
+          onCheckedChange={(checked) => {
+            onConfigChange("gpu_compatibility_mode", checked === true);
+          }}
+          disabled={readOnly}
+        />
+        <Label
+          htmlFor={`${idPrefix}-gpu-compatibility-mode`}
+          className="font-medium"
+        >
+          {t("fingerprint.gpuCompatibilityMode")}
+        </Label>
+      </div>
+      <p className="ml-6 text-sm text-muted-foreground">
+        {t("fingerprint.gpuCompatibilityModeDescription")}
+      </p>
+    </div>
+  );
+
   const renderDevicePresetPicker = (idPrefix: string) => (
     <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
       <div>
@@ -390,6 +414,8 @@ export function WayfernConfigForm({
       </div>
 
       {renderWebRtcMode("advanced")}
+
+      {renderGpuCompatibilityMode("advanced")}
 
       <div
         className={
@@ -1876,6 +1902,8 @@ export function WayfernConfigForm({
             </div>
 
             {renderWebRtcMode("automatic")}
+
+            {renderGpuCompatibilityMode("automatic")}
 
             {/* Screen Resolution */}
             <div

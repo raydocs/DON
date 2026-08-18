@@ -358,6 +358,28 @@ test("all primary navigation buttons and sub-page tabs render and remain interac
       { description: "new profile dialog" },
     );
     assert.match(await app.bodyText(), /profile/i);
+    if (!(await app.visibleTextIncludes("Create New Chromium Profile"))) {
+      await app.clickText("Chromium", { exact: false, roles: ["button"] });
+      await app.waitForText("Create New Chromium Profile");
+    }
+    await app.waitForText(en.fingerprint.gpuCompatibilityMode);
+    assert.equal(
+      await app.execute(
+        `return document.querySelector("#automatic-gpu-compatibility-mode")
+          ?.getAttribute("data-state") === "checked";`,
+      ),
+      false,
+      "GPU compatibility mode must remain opt-in",
+    );
+    await app.clickSelector("#automatic-gpu-compatibility-mode");
+    assert.equal(
+      await app.execute(
+        `return document.querySelector("#automatic-gpu-compatibility-mode")
+          ?.getAttribute("data-state") === "checked";`,
+      ),
+      true,
+      "GPU compatibility control did not toggle",
+    );
     await dismissSurface(app);
   });
 });

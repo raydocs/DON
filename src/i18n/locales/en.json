@@ -999,6 +999,8 @@
     "manual": "Manual",
     "webrtcMode": "WebRTC mode",
     "webrtcModeDescription": "Choose how WebRTC network candidates are handled.",
+    "gpuCompatibilityMode": "GPU compatibility mode",
+    "gpuCompatibilityModeDescription": "Disable hardware acceleration for this profile if Wayfern's GPU process causes high CPU usage or page lag. Enable only when needed; takes effect on the next launch.",
     "webrtcProxy": "Proxy",
     "webrtcOff": "Off",
     "webrtcReal": "Real network",
@@ -2277,7 +2279,7 @@
     "explainer": "A timezone or language that disagrees with your exit IP is a strong anti-bot signal, even though your real device never leaks. Align the fingerprint with the proxy location to reduce hostile treatment.",
     "matchToProxy": "Match fingerprint to proxy",
     "matching": "Matching…",
-    "matchSuccess": "Fingerprint updated to match the proxy. Relaunch the profile to apply."
+    "matchSuccess": "Fingerprint updated to match the proxy. Revalidating the profile before launch."
   },
   "cookieBot": {
     "title": "Cookie Bot",

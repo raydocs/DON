@@ -999,6 +999,8 @@
     "manual": "手動",
     "webrtcMode": "WebRTC モード",
     "webrtcModeDescription": "WebRTC のネットワーク候補の扱いを選択します。",
+    "gpuCompatibilityMode": "GPU 互換モード",
+    "gpuCompatibilityModeDescription": "Wayfern の GPU プロセスによって CPU 使用率の上昇やページの遅延が発生する場合、このプロファイルのハードウェアアクセラレーションを無効にします。必要な場合のみ有効にしてください。次回起動時に反映されます。",
     "webrtcProxy": "プロキシ",
     "webrtcOff": "オフ",
     "webrtcReal": "実ネットワーク",
@@ -2277,7 +2279,7 @@
     "explainer": "出口 IP と食い違うタイムゾーンや言語は、実際のデバイス情報が漏れていなくても強力なアンチボットシグナルになります。フィンガープリントをプロキシの場所に合わせて、警戒される扱いを減らしましょう。",
     "matchToProxy": "フィンガープリントをプロキシに合わせる",
     "matching": "調整中…",
-    "matchSuccess": "フィンガープリントをプロキシに合わせて更新しました。反映するにはプロファイルを再起動してください。"
+    "matchSuccess": "フィンガープリントをプロキシに合わせて更新しました。起動前にプロファイルを再検証します。"
   },
   "cookieBot": {
     "title": "Cookie Bot",

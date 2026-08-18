@@ -274,8 +274,19 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     assert.equal(await app.invoke("check_missing_geoip_database"), false);
     await app.invoke("update_wayfern_config", {
       profileId: profile.id,
-      config: profile.wayfern_config,
+      config: {
+        ...profile.wayfern_config,
+        gpu_compatibility_mode: true,
+      },
     });
+    const configuredProfile = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    assert.equal(
+      configuredProfile.wayfern_config.gpu_compatibility_mode,
+      true,
+      "GPU compatibility mode did not survive a native config round trip",
+    );
     await app.invoke("match_profile_fingerprint_to_exit", {
       profileId: profile.id,
       exitIp: "8.8.8.8",

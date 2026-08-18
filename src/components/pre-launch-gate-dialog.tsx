@@ -14,6 +14,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { translateBackendError } from "@/lib/backend-errors";
+import type { GateDecision } from "@/lib/launch-gate";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import type {
   ConsistencyResult,
@@ -33,13 +34,6 @@ export interface GateFindings {
   measurementUnreliable: boolean;
   /// The exit has not been measured yet; the launch itself will still check.
   probePending: boolean;
-}
-
-export interface GateDecision {
-  proceed: boolean;
-  ackFingerprint: boolean;
-  ackExtensionKeys: string[];
-  applyToRemaining: boolean;
 }
 
 interface PreLaunchGateDialogProps {
@@ -216,7 +210,7 @@ export function PreLaunchGateDialog({
   };
 
   const handleMatchFingerprint = async () => {
-    if (!exitIp) {
+    if (!exitIp || isMatching || decidedRef.current === requestId) {
       return;
     }
     const request = requestId;
@@ -235,10 +229,19 @@ export function PreLaunchGateDialog({
       if (liveRequestRef.current !== request) {
         return;
       }
-      // The fingerprint the block was measured against no longer exists, so
-      // this launch is abandoned rather than forced through with a stale
-      // consent token; the user relaunches against the corrected profile.
-      decide(false);
+      // This result is not approval to reuse the gate's old consent token. The
+      // caller reloads the persisted profile and runs the full exit check again
+      // before it allows the browser to start.
+      decidedRef.current = requestId;
+      lastDecisionAtRef.current = performance.now();
+      patch({ decided: true });
+      onResult({
+        proceed: false,
+        ackFingerprint: false,
+        ackExtensionKeys: [],
+        applyToRemaining: false,
+        retryAfterFingerprintMatch: true,
+      });
     } catch (e) {
       showErrorToast(translateBackendError(t, e));
       patch({ isMatching: false });

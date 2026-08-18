@@ -79,11 +79,6 @@ jobs:
             arch: "aarch64"
             target: "aarch64-apple-darwin"
             pkg_target: "latest-macos-arm64"
-          - platform: "macos-latest"
-            args: "--target x86_64-apple-darwin --verbose"
-            arch: "x86_64"
-            target: "x86_64-apple-darwin"
-            pkg_target: "latest-macos-x64"
           - platform: "windows-latest"
             args: "--target x86_64-pc-windows-msvc --verbose"
             arch: "x86_64"
@@ -400,9 +395,7 @@ jobs:
           cat > /tmp/install-links.md << LINKS
           ### macOS
 
-          | | Apple Silicon | Intel |
-          |---|---|---|
-          | **DMG** | [Download](${BASE}/Donut_${VERSION}_aarch64.dmg) | [Download](${BASE}/Donut_${VERSION}_x64.dmg) |
+          [Download macOS DMG (Apple Silicon)](${BASE}/Donut_${VERSION}_aarch64.dmg)
 
           Or install via Homebrew:
 
@@ -527,7 +520,6 @@ jobs:
             --arg url "$RELEASE_URL" \
             --arg changes "$CHANGES" \
             --arg dl_mac_arm "https://github.com/'"${GITHUB_REPOSITORY}"'/releases/download/'"${VERSION}"'/Donut_'"${VERSION#v}"'_aarch64.dmg" \
-            --arg dl_mac_intel "https://github.com/'"${GITHUB_REPOSITORY}"'/releases/download/'"${VERSION}"'/Donut_'"${VERSION#v}"'_x64.dmg" \
             --arg dl_win "https://github.com/'"${GITHUB_REPOSITORY}"'/releases/download/'"${VERSION}"'/Donut_'"${VERSION#v}"'_x64-setup.exe" \
             --arg dl_linux "https://github.com/'"${GITHUB_REPOSITORY}"'/releases/download/'"${VERSION}"'/Donut_'"${VERSION#v}"'_amd64.AppImage" \
             '{
@@ -537,7 +529,7 @@ jobs:
                 description: $changes,
                 color: 5814783,
                 fields: [
-                  { name: "Download", value: ("[macOS (Apple Silicon)](" + $dl_mac_arm + ") · [macOS (Intel)](" + $dl_mac_intel + ")\n[Windows x64](" + $dl_win + ") · [Linux x64](" + $dl_linux + ")"), inline: false }
+                  { name: "Download", value: ("[macOS (Apple Silicon)](" + $dl_mac_arm + ")\n[Windows x64](" + $dl_win + ") · [Linux x64](" + $dl_linux + ")"), inline: false }
                 ],
                 footer: { text: "donutbrowser.com" }
               }]

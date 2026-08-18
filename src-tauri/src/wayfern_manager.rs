@@ -62,6 +62,10 @@ pub struct WayfernConfig {
   /// WebRTC handling: `proxy`, `off`, or `real`.
   #[serde(default)]
   pub webrtc_mode: Option<String>,
+  /// Opt-in software rendering fallback for Wayfern builds whose GPU process
+  /// consumes excessive CPU. Hardware acceleration remains the default.
+  #[serde(default)]
+  pub gpu_compatibility_mode: Option<bool>,
   #[serde(default)]
   pub block_webgl: Option<bool>,
   #[serde(default, skip_serializing)]
@@ -190,9 +194,12 @@ impl WayfernConfig {
     }
   }
 
-  fn append_webrtc_launch_args(args: &mut Vec<String>, config: &WayfernConfig) {
+  fn append_configured_launch_args(args: &mut Vec<String>, config: &WayfernConfig) {
     if let Some(flag) = config.webrtc_launch_arg() {
       args.push(flag.to_string());
+    }
+    if config.gpu_compatibility_mode == Some(true) {
+      args.push("--disable-gpu".to_string());
     }
   }
 
@@ -1279,7 +1286,7 @@ impl WayfernManager {
     log::info!("Launching Wayfern on CDP port {port} (detached)");
 
     let mut args = base_wayfern_launch_args(port, profile_path);
-    WayfernConfig::append_webrtc_launch_args(&mut args, config);
+    WayfernConfig::append_configured_launch_args(&mut args, config);
 
     if headless {
       args.push("--headless=new".to_string());
@@ -2006,7 +2013,7 @@ mod tests {
         ..Default::default()
       };
       let mut args = Vec::new();
-      WayfernConfig::append_webrtc_launch_args(&mut args, &config);
+      WayfernConfig::append_configured_launch_args(&mut args, &config);
       assert_eq!(args.first().map(String::as_str), expected);
     }
   }
@@ -2029,6 +2036,27 @@ mod tests {
     assert_eq!(blocked.webrtc_launch_arg(), Some(WEBRTC_PROXY_POLICY_FLAG));
     assert_eq!(open.webrtc_launch_arg(), None);
     assert_eq!(fresh.webrtc_launch_arg(), Some(WEBRTC_PROXY_POLICY_FLAG));
+  }
+
+  #[test]
+  fn gpu_compatibility_mode_disables_hardware_acceleration_only_when_enabled() {
+    let enabled: WayfernConfig = serde_json::from_value(json!({
+      "webrtc_mode": "real",
+      "gpu_compatibility_mode": true
+    }))
+    .unwrap();
+    let disabled: WayfernConfig = serde_json::from_value(json!({
+      "webrtc_mode": "real"
+    }))
+    .unwrap();
+    let mut enabled_args = Vec::new();
+    let mut disabled_args = Vec::new();
+
+    WayfernConfig::append_configured_launch_args(&mut enabled_args, &enabled);
+    WayfernConfig::append_configured_launch_args(&mut disabled_args, &disabled);
+
+    assert_eq!(enabled_args, ["--disable-gpu"]);
+    assert!(disabled_args.is_empty());
   }
 
   #[test]

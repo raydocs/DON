@@ -999,6 +999,8 @@
     "manual": "Manuel",
     "webrtcMode": "Mode WebRTC",
     "webrtcModeDescription": "Choisissez comment les candidats réseau WebRTC sont gérés.",
+    "gpuCompatibilityMode": "Mode de compatibilité GPU",
+    "gpuCompatibilityModeDescription": "Désactive l’accélération matérielle pour ce profil si le processus GPU de Wayfern entraîne une forte utilisation du processeur ou des ralentissements. Activez-le uniquement si nécessaire ; il prendra effet au prochain lancement.",
     "webrtcProxy": "Proxy",
     "webrtcOff": "Désactivé",
     "webrtcReal": "Réseau réel",
@@ -2277,7 +2279,7 @@
     "explainer": "Un fuseau horaire ou une langue en désaccord avec votre IP de sortie est un signal anti-bot fort, même si votre appareil réel ne fuite jamais. Alignez l'empreinte sur l'emplacement du proxy pour réduire les traitements hostiles.",
     "matchToProxy": "Aligner l'empreinte sur le proxy",
     "matching": "Alignement…",
-    "matchSuccess": "Empreinte mise à jour pour correspondre au proxy. Relancez le profil pour l'appliquer."
+    "matchSuccess": "Empreinte mise à jour pour correspondre au proxy. Le profil sera revérifié avant son lancement."
   },
   "cookieBot": {
     "title": "Cookie Bot",

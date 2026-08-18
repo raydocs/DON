@@ -999,6 +999,8 @@
     "manual": "Thủ công",
     "webrtcMode": "Chế độ WebRTC",
     "webrtcModeDescription": "Chọn cách xử lý các ứng viên mạng WebRTC.",
+    "gpuCompatibilityMode": "Chế độ tương thích GPU",
+    "gpuCompatibilityModeDescription": "Tắt tăng tốc phần cứng cho hồ sơ này nếu tiến trình GPU của Wayfern gây mức sử dụng CPU cao hoặc làm trang bị chậm. Chỉ bật khi cần; có hiệu lực ở lần khởi chạy tiếp theo.",
     "webrtcProxy": "Proxy",
     "webrtcOff": "Tắt",
     "webrtcReal": "Mạng thực",
@@ -2277,7 +2279,7 @@
     "explainer": "Múi giờ hoặc ngôn ngữ không khớp với IP thoát là một tín hiệu chống bot rất mạnh, dù thiết bị thật của bạn không bao giờ bị lộ. Hãy căn chỉnh vân tay theo vị trí proxy để giảm bị đối xử khắt khe.",
     "matchToProxy": "Khớp vân tay với proxy",
     "matching": "Đang khớp…",
-    "matchSuccess": "Đã cập nhật vân tay để khớp với proxy. Khởi động lại hồ sơ để áp dụng."
+    "matchSuccess": "Đã cập nhật vân tay để khớp với proxy. Hồ sơ sẽ được xác thực lại trước khi khởi chạy."
   },
   "cookieBot": {
     "title": "Cookie Bot",

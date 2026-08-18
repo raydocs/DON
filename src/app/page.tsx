@@ -29,7 +29,6 @@ import { IntegrationsDialog } from "@/components/integrations-dialog";
 import { ONBOARDING_TOUR } from "@/components/onboarding-provider";
 import { PermissionDialog } from "@/components/permission-dialog";
 import {
-  type GateDecision,
   type GateFindings,
   PreLaunchGateDialog,
 } from "@/components/pre-launch-gate-dialog";
@@ -72,6 +71,7 @@ import {
   resolveClaudeStartUrl,
 } from "@/lib/claude-workflow";
 import { canUseCookieBot, getEntitlements } from "@/lib/entitlements";
+import { type GateDecision, gateDecisionAction } from "@/lib/launch-gate";
 import { MOTION_EASE_OUT } from "@/lib/motion";
 import {
   ONBOARDING_TOUR_CLOSED_EVENT,
@@ -1230,128 +1230,173 @@ export default function Home() {
         }
       }
 
-      // Tier 1: purely local checks — an extension scan and a cached exit
-      // verdict. No network, no worker started, so a profile whose exit is
-      // already known blocks before the launch touches anything.
-      let consentToken: string | null = null;
-      // Kept for the tier-2 dialog below: the extensions are the same ones,
-      // and a mismatch measured mid-launch is exactly when knowing that one of
-      // them can change the proxy matters most. Minus anything the user just
-      // acknowledged, so a box they ticked seconds ago is not shown again.
-      let localChecks: PreLaunchChecks | null = null;
-      let ackedExtensionKeys: string[] = [];
-      try {
-        // One-shot migration of the old per-profile "don't warn again" flag,
-        // so a user who already dismissed this profile isn't hard-blocked by
-        // the new gate. Granted against the profile's current exit, which is
-        // the mismatch they were looking at when they dismissed it.
-        const legacySkipKey = `consistency-warn-skip-${profile.id}`;
-        if (localStorage.getItem(legacySkipKey) === "1") {
-          await invoke("ack_launch_gate", {
-            profileId: profile.id,
-            ackFingerprint: true,
-            ackExtensionKeys: [],
-          }).catch((err: unknown) => {
-            console.warn("Failed to migrate consistency skip flag:", err);
-          });
-          localStorage.removeItem(legacySkipKey);
-        }
+      let profileForAttempt = profile;
+      let reloadBeforeAttempt = false;
 
-        const checks = await invoke<PreLaunchChecks>(
-          "get_profile_pre_launch_checks",
-          { profileId: profile.id },
-        );
-        localChecks = checks;
-        const blocked =
-          checks.consistency.checked && !checks.consistency.consistent;
-        if (blocked || checks.vpn_extensions.length > 0) {
-          const decision = await requestGateDecision(
-            {
-              profile,
-              findings: {
-                vpnExtensions: checks.vpn_extensions,
-                scanState: checks.scan_state,
-                fingerprint: blocked ? checks.consistency : null,
-                measurementUnreliable: checks.exit_measurement_unreliable,
-                probePending: checks.exit_probe_pending,
-              },
-            },
-            opts?.bulkRunId,
-          );
-          await persistGateAcks(profile.id, decision);
-          if (!decision.proceed) {
-            return { status: "cancelled" };
-          }
-          ackedExtensionKeys = decision.ackExtensionKeys;
-          consentToken = checks.consent_token;
-        }
-      } catch (err) {
-        // Same posture as the password and window-resize gates: a check that
-        // cannot run must not make profiles unlaunchable.
-        console.warn("Pre-launch checks failed, launching anyway:", err);
-      }
-
-      // Claude isolation profiles open claude.com (or note start_url) by default.
-      const startUrl = resolveClaudeStartUrl(profile) ?? undefined;
-
-      try {
-        const result = await invoke<BrowserProfile>("launch_browser_profile", {
-          profile,
-          url: startUrl,
-          consentToken,
-        });
-        console.log("Successfully launched profile:", result.name);
-        return { status: "launched" };
-      } catch (err: unknown) {
-        // Tier 2: the enforcing gate measured the exit mid-launch and stopped
-        // before spawning the browser. Offer the same decision, then retry
-        // exactly once with the token it minted — bounded, so a gate loop is
-        // structurally impossible.
-        const parsed = parseBackendError(err);
-        if (parsed?.code === "FINGERPRINT_EXIT_MISMATCH") {
-          const decision = await requestGateDecision(
-            {
-              profile,
-              findings: {
-                vpnExtensions: (localChecks?.vpn_extensions ?? []).filter(
-                  (ext) => !ackedExtensionKeys.includes(ext.key),
-                ),
-                scanState: localChecks?.scan_state ?? "scanned",
-                fingerprint: consistencyFromErrorParams(parsed.params),
-                measurementUnreliable:
-                  localChecks?.exit_measurement_unreliable ?? false,
-                probePending: false,
-              },
-            },
-            opts?.bulkRunId,
-          );
-          await persistGateAcks(profile.id, decision);
-          if (!decision.proceed) {
-            return { status: "cancelled" };
-          }
+      // Matching the fingerprint persists a new identity. It must re-enter
+      // both launch-gate tiers with a freshly loaded profile and no consent
+      // token from the old identity. An explicit user action may repeat this
+      // loop; an ordinary launch still executes it exactly once.
+      for (;;) {
+        if (reloadBeforeAttempt) {
           try {
-            await invoke<BrowserProfile>("launch_browser_profile", {
-              profile,
-              url: startUrl,
-              consentToken: parsed.params?.token ?? null,
-            });
-            return { status: "launched" };
-          } catch (retryErr: unknown) {
+            const latestProfiles = await invoke<BrowserProfile[]>(
+              "list_browser_profiles",
+            );
+            const latestProfile = latestProfiles.find(
+              (candidate) => candidate.id === profileForAttempt.id,
+            );
+            if (!latestProfile) {
+              showErrorToast(t("backendErrors.profileNotFound"));
+              return { status: "blocked" };
+            }
+            profileForAttempt = latestProfile;
+            reloadBeforeAttempt = false;
+          } catch (err) {
             showErrorToast(
               t("errors.launchBrowserFailed", {
-                error: translateBackendError(t, retryErr),
+                error: translateBackendError(t, err),
               }),
             );
             return { status: "blocked" };
           }
         }
 
-        console.error("Failed to launch browser:", err);
-        const errorMessage = translateBackendError(t, err);
-        showErrorToast(
-          t("errors.launchBrowserFailed", { error: errorMessage }),
-        );
-        throw err;
+        // Tier 1: purely local checks — an extension scan and a cached exit
+        // verdict. No network, no worker started, so a profile whose exit is
+        // already known blocks before the launch touches anything.
+        let consentToken: string | null = null;
+        // Kept for the tier-2 dialog below: the extensions are the same ones,
+        // and a mismatch measured mid-launch is exactly when knowing that one
+        // of them can change the proxy matters most. Minus anything the user
+        // just acknowledged, so a box they ticked is not shown again.
+        let localChecks: PreLaunchChecks | null = null;
+        let ackedExtensionKeys: string[] = [];
+        try {
+          // One-shot migration of the old per-profile "don't warn again" flag,
+          // so a user who already dismissed this profile isn't hard-blocked by
+          // the new gate. Granted against the profile's current exit, which is
+          // the mismatch they were looking at when they dismissed it.
+          const legacySkipKey = `consistency-warn-skip-${profileForAttempt.id}`;
+          if (localStorage.getItem(legacySkipKey) === "1") {
+            await invoke("ack_launch_gate", {
+              profileId: profileForAttempt.id,
+              ackFingerprint: true,
+              ackExtensionKeys: [],
+            }).catch((err: unknown) => {
+              console.warn("Failed to migrate consistency skip flag:", err);
+            });
+            localStorage.removeItem(legacySkipKey);
+          }
+
+          const checks = await invoke<PreLaunchChecks>(
+            "get_profile_pre_launch_checks",
+            { profileId: profileForAttempt.id },
+          );
+          localChecks = checks;
+          const blocked =
+            checks.consistency.checked && !checks.consistency.consistent;
+          if (blocked || checks.vpn_extensions.length > 0) {
+            const decision = await requestGateDecision(
+              {
+                profile: profileForAttempt,
+                findings: {
+                  vpnExtensions: checks.vpn_extensions,
+                  scanState: checks.scan_state,
+                  fingerprint: blocked ? checks.consistency : null,
+                  measurementUnreliable: checks.exit_measurement_unreliable,
+                  probePending: checks.exit_probe_pending,
+                },
+              },
+              opts?.bulkRunId,
+            );
+            await persistGateAcks(profileForAttempt.id, decision);
+            const action = gateDecisionAction(decision);
+            if (action === "retry") {
+              reloadBeforeAttempt = true;
+              continue;
+            }
+            if (action === "cancel") {
+              return { status: "cancelled" };
+            }
+            ackedExtensionKeys = decision.ackExtensionKeys;
+            consentToken = checks.consent_token;
+          }
+        } catch (err) {
+          // Same posture as the password and window-resize gates: a check that
+          // cannot run must not make profiles unlaunchable.
+          console.warn("Pre-launch checks failed, launching anyway:", err);
+        }
+
+        // Claude isolation profiles open claude.com (or note start_url) by default.
+        const startUrl = resolveClaudeStartUrl(profileForAttempt) ?? undefined;
+
+        try {
+          const result = await invoke<BrowserProfile>(
+            "launch_browser_profile",
+            {
+              profile: profileForAttempt,
+              url: startUrl,
+              consentToken,
+            },
+          );
+          console.log("Successfully launched profile:", result.name);
+          return { status: "launched" };
+        } catch (err: unknown) {
+          // Tier 2: the enforcing gate measured the exit mid-launch and stopped
+          // before spawning the browser. Approval retries exactly once with the
+          // token it minted. A fingerprint match instead restarts both tiers.
+          const parsed = parseBackendError(err);
+          if (parsed?.code === "FINGERPRINT_EXIT_MISMATCH") {
+            const decision = await requestGateDecision(
+              {
+                profile: profileForAttempt,
+                findings: {
+                  vpnExtensions: (localChecks?.vpn_extensions ?? []).filter(
+                    (ext) => !ackedExtensionKeys.includes(ext.key),
+                  ),
+                  scanState: localChecks?.scan_state ?? "scanned",
+                  fingerprint: consistencyFromErrorParams(parsed.params),
+                  measurementUnreliable:
+                    localChecks?.exit_measurement_unreliable ?? false,
+                  probePending: false,
+                },
+              },
+              opts?.bulkRunId,
+            );
+            await persistGateAcks(profileForAttempt.id, decision);
+            const action = gateDecisionAction(decision);
+            if (action === "retry") {
+              reloadBeforeAttempt = true;
+              continue;
+            }
+            if (action === "cancel") {
+              return { status: "cancelled" };
+            }
+            try {
+              await invoke<BrowserProfile>("launch_browser_profile", {
+                profile: profileForAttempt,
+                url: startUrl,
+                consentToken: parsed.params?.token ?? null,
+              });
+              return { status: "launched" };
+            } catch (retryErr: unknown) {
+              showErrorToast(
+                t("errors.launchBrowserFailed", {
+                  error: translateBackendError(t, retryErr),
+                }),
+              );
+              return { status: "blocked" };
+            }
+          }
+
+          console.error("Failed to launch browser:", err);
+          const errorMessage = translateBackendError(t, err);
+          showErrorToast(
+            t("errors.launchBrowserFailed", { error: errorMessage }),
+          );
+          throw err;
+        }
       }
     },
     [persistGateAcks, profiles, requestGateDecision, t],

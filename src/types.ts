@@ -418,6 +418,8 @@ export interface WayfernConfig {
   /** Legacy field; use webrtc_mode for new profiles. */
   block_webrtc?: boolean;
   webrtc_mode?: WayfernWebRtcMode;
+  /** Opt-in software rendering fallback for Wayfern GPU performance issues. */
+  gpu_compatibility_mode?: boolean;
   block_webgl?: boolean;
   executable_path?: string;
   fingerprint?: string; // JSON string of the complete fingerprint config
