@@ -65,7 +65,7 @@ def main() -> None:
             note = (note + "\n" if note.strip() else "") + migrate_line
         if meta.get("proxy_id") and "start_url:" not in note:
             note += "\nstart_url: https://claude.com"
-            note += "\nproxy_lease_days: 7"
+            note += "\nproxy_lease_days: 3"
             if "card:" not in note.lower():
                 note += "\ncard: card-A (migrated — set your label)"
             if "residential:" not in note.lower():

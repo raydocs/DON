@@ -5,7 +5,7 @@ use crate::events;
 use crate::profile::types::{get_host_os, is_host_os, BrowserProfile, SyncMode};
 use crate::proxy_manager::PROXY_MANAGER;
 use crate::wayfern_manager::WayfernConfig;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs::{self, create_dir_all};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
@@ -24,6 +24,28 @@ fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     f.sync_all()?;
   }
   crate::app_auto_updater::atomic_replace(&tmp, path)
+}
+
+fn tags_changed(before: &[String], after: &[String]) -> bool {
+  before.iter().map(String::as_str).collect::<BTreeSet<_>>()
+    != after.iter().map(String::as_str).collect::<BTreeSet<_>>()
+}
+
+fn repair_host_os(profile: &mut BrowserProfile) -> bool {
+  let needs_repair = profile.host_os.as_deref().is_some_and(|os| !is_host_os(os));
+  if profile.host_os.is_some() && !needs_repair {
+    return false;
+  }
+
+  let inferred_os = profile
+    .resolved_os()
+    .filter(|os| is_host_os(os))
+    .map(str::to_string);
+  if inferred_os == profile.host_os {
+    return false;
+  }
+  profile.host_os = inferred_os;
+  true
 }
 
 fn mutate_profile_file<F>(
@@ -83,6 +105,48 @@ impl ProfileManager {
     lock
   }
 
+  /// Load one profile without walking and deserializing the entire profile
+  /// directory. Runtime status checks use this on the small set of profiles
+  /// that are actually running.
+  pub fn load_profile(
+    &self,
+    profile_id: &str,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+    let profile_uuid =
+      uuid::Uuid::parse_str(profile_id).map_err(|_| format!("Invalid profile ID: {profile_id}"))?;
+    let metadata_file = self
+      .get_profiles_dir()
+      .join(profile_uuid.to_string())
+      .join("metadata.json");
+    if !metadata_file.exists() {
+      return Err(format!("Profile with ID '{profile_id}' not found").into());
+    }
+
+    let lock = self.profile_lock(profile_uuid);
+    let _guard = lock
+      .lock()
+      .map_err(|_| "Profile metadata lock is poisoned")?;
+    let content = fs::read_to_string(&metadata_file)?;
+    let mut profile: BrowserProfile = serde_json::from_str(&content)?;
+    if profile.id != profile_uuid {
+      return Err(
+        std::io::Error::new(
+          std::io::ErrorKind::InvalidData,
+          format!(
+            "Profile metadata ID {} does not match directory ID {profile_uuid}",
+            profile.id
+          ),
+        )
+        .into(),
+      );
+    }
+    if repair_host_os(&mut profile) {
+      let json = serde_json::to_string_pretty(&profile)?;
+      atomic_write(&metadata_file, json.as_bytes())?;
+    }
+    Ok(profile)
+  }
+
   /// Atomically reload and patch one profile's latest metadata. Field-specific
   /// updates must use this boundary instead of saving a clone captured before
   /// another task changed an unrelated field.
@@ -104,8 +168,22 @@ impl ProfileManager {
       return Err(format!("Profile with ID '{profile_id}' not found").into());
     }
     let lock = self.profile_lock(profile_uuid);
-    let profile = mutate_profile_file(&metadata_file, &lock, mutation)?;
-    self.rebuild_tag_suggestions();
+    let mut rebuild_tags = false;
+    let profile = mutate_profile_file(&metadata_file, &lock, |latest| {
+      if latest.id != profile_uuid {
+        return Err(format!(
+          "Profile metadata ID {} does not match directory ID {profile_uuid}",
+          latest.id
+        ));
+      }
+      let previous_tags = latest.tags.clone();
+      mutation(latest)?;
+      rebuild_tags = tags_changed(&previous_tags, &latest.tags);
+      Ok(())
+    })?;
+    if rebuild_tags {
+      self.rebuild_tag_suggestions();
+    }
     Ok(profile)
   }
 
@@ -391,6 +469,8 @@ impl ProfileManager {
 
     log::info!("Profile '{name}' created successfully with ID: {profile_id}");
 
+    crate::fingerprint_consistency::prewarm_profile_exit(&profile);
+
     // Emit profile creation event
     if let Err(e) = events::emit_empty("profiles-changed") {
       log::warn!("Warning: Failed to emit profiles-changed event: {e}");
@@ -407,17 +487,30 @@ impl ProfileManager {
     // Ensure the UUID directory exists
     create_dir_all(&profile_uuid_dir)?;
 
-    {
+    let rebuild_tags = {
       let lock = self.profile_lock(profile.id);
       let _guard = lock
         .lock()
         .map_err(|_| "Profile metadata lock is poisoned")?;
+      let rebuild_tags = if profile_file.exists() {
+        match fs::read_to_string(&profile_file)
+          .ok()
+          .and_then(|content| serde_json::from_str::<BrowserProfile>(&content).ok())
+        {
+          Some(previous) => tags_changed(&previous.tags, &profile.tags),
+          None => true,
+        }
+      } else {
+        !profile.tags.is_empty()
+      };
       let json = serde_json::to_string_pretty(profile)?;
       atomic_write(&profile_file, json.as_bytes())?;
-    }
+      rebuild_tags
+    };
 
-    // Update tag suggestions after any save
-    self.rebuild_tag_suggestions();
+    if rebuild_tags {
+      self.rebuild_tag_suggestions();
+    }
 
     Ok(())
   }
@@ -467,6 +560,17 @@ impl ProfileManager {
       if path.is_dir() {
         let metadata_file = path.join("metadata.json");
         if metadata_file.exists() {
+          let Some(directory_id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| uuid::Uuid::parse_str(name).ok())
+          else {
+            log::warn!(
+              "Skipping profile at {}: directory name is not a UUID",
+              path.display()
+            );
+            continue;
+          };
           let content = match fs::read_to_string(&metadata_file) {
             Ok(c) => c,
             Err(e) => {
@@ -487,6 +591,14 @@ impl ProfileManager {
               continue;
             }
           };
+          if profile.id != directory_id {
+            log::warn!(
+              "Skipping profile at {}: metadata ID {} does not match directory ID {directory_id}",
+              path.display(),
+              profile.id
+            );
+            continue;
+          }
 
           // Backfill host_os from browser config for profiles created before
           // the field existed (or synced without it), and repair any profile
@@ -498,17 +610,9 @@ impl ProfileManager {
           // permanently true and locked the profile out of every local launch,
           // with no way to undo it from the UI. Leaving `host_os` as None keeps
           // the profile launchable, which is what it was before the field.
-          let needs_repair = profile.host_os.as_deref().is_some_and(|os| !is_host_os(os));
-          if profile.host_os.is_none() || needs_repair {
-            let inferred_os = profile
-              .resolved_os()
-              .filter(|os| is_host_os(os))
-              .map(str::to_string);
-            if inferred_os != profile.host_os {
-              profile.host_os = inferred_os;
-              if let Ok(json) = serde_json::to_string_pretty(&profile) {
-                let _ = atomic_write(&metadata_file, json.as_bytes());
-              }
+          if repair_host_os(&mut profile) {
+            if let Ok(json) = serde_json::to_string_pretty(&profile) {
+              let _ = atomic_write(&metadata_file, json.as_bytes());
             }
           }
 
@@ -551,14 +655,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    // Keep tag suggestions up to date after name change (rebuild from all profiles)
-    let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-      let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
-    });
-
-    // Emit profile rename event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -651,10 +749,7 @@ impl ProfileManager {
       });
     }
 
-    // Rebuild tag suggestions after deletion
-    let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-      let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
-    });
+    self.rebuild_tag_suggestions();
 
     // Always perform cleanup after profile deletion to remove unused binaries
     if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
@@ -681,6 +776,8 @@ impl ProfileManager {
       fs::remove_dir_all(&profile_dir)?;
       log::info!("Deleted local profile {} (tombstoned remotely)", profile_id);
     }
+
+    self.rebuild_tag_suggestions();
 
     if let Err(e) = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance()
       .cleanup_unused_binaries()
@@ -736,9 +833,8 @@ impl ProfileManager {
       Ok(())
     })?;
 
-    // Emit profile update event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -779,11 +875,6 @@ impl ProfileManager {
       }
     }
 
-    // Rebuild tag suggestions after group changes just in case
-    let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-      let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
-    });
-
     // Emit profile group assignment event
     if let Err(e) = events::emit_empty("profiles-changed") {
       log::warn!("Warning: Failed to emit profiles-changed event: {e}");
@@ -813,14 +904,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    // Update global tag suggestions from all profiles
-    let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-      let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
-    });
-
-    // Emit profile tags update event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -841,9 +926,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    // Emit profile note update event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -866,8 +950,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -890,8 +974,8 @@ impl ProfileManager {
       Ok(())
     })?;
     crate::sync::queue_profile_sync_if_eligible(&profile);
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -916,10 +1000,6 @@ impl ProfileManager {
       log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-    }
-
     Ok(profile)
   }
 
@@ -937,8 +1017,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -957,8 +1037,8 @@ impl ProfileManager {
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
 
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(profile)
@@ -1198,9 +1278,8 @@ impl ProfileManager {
       profile_id
     );
 
-    // Emit profile config update event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    if let Err(e) = events::emit("profile-updated", &profile) {
+      log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
     Ok(())
@@ -1230,6 +1309,7 @@ impl ProfileManager {
     // move that copy, or tonight's run egresses from the leased host's own
     // datacenter address.
     crate::cookie_bot::report_profile_state(&profile);
+    crate::fingerprint_consistency::prewarm_profile_exit(&profile);
 
     // Auto-enable sync for new proxy if profile has sync enabled
     if profile.is_sync_enabled() {
@@ -1244,11 +1324,6 @@ impl ProfileManager {
     // Emit profile update event so frontend UIs can refresh immediately (e.g. proxy manager)
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
-    }
-
-    // Emit general profiles changed event for profile list updates
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
     }
 
     Ok(profile)
@@ -1291,10 +1366,6 @@ impl ProfileManager {
       log::warn!("Warning: Failed to emit profile update event: {e}");
     }
 
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-    }
-
     Ok(profile)
   }
 
@@ -1328,9 +1399,6 @@ impl ProfileManager {
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Failed to emit profile update event: {e}");
     }
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Failed to emit profiles-changed event: {e}");
-    }
 
     Ok(profile)
   }
@@ -1346,7 +1414,6 @@ impl ProfileManager {
     }
 
     // For non-wayfern browsers, use the existing PID-based logic
-    let inner_profile = profile.clone();
     let system = System::new_with_specifics(
       RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
     );
@@ -1428,12 +1495,12 @@ impl ProfileManager {
     let metadata_exists = metadata_file.exists();
 
     if metadata_exists {
-      let latest_profile: BrowserProfile = match std::fs::read_to_string(&metadata_file)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-      {
-        Some(p) => p,
-        None => inner_profile.clone(),
+      let latest_profile = match self.load_profile(&profile.id.to_string()) {
+        Ok(profile) => profile,
+        Err(error) => {
+          log::warn!("Skipping browser status persistence for invalid profile metadata: {error}");
+          return Ok(is_running);
+        }
       };
 
       let mut merged = latest_profile.clone();
@@ -1513,12 +1580,14 @@ impl ProfileManager {
         let metadata_exists = metadata_file.exists();
 
         if metadata_exists {
-          let latest: BrowserProfile = match std::fs::read_to_string(&metadata_file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-          {
-            Some(p) => p,
-            None => profile.clone(),
+          let latest = match self.load_profile(&profile.id.to_string()) {
+            Ok(profile) => profile,
+            Err(error) => {
+              log::warn!(
+                "Skipping Wayfern status persistence for invalid profile metadata: {error}"
+              );
+              return Ok(true);
+            }
           };
 
           if latest.process_id != wayfern_process.processId {
@@ -1577,12 +1646,14 @@ impl ProfileManager {
         let metadata_exists = metadata_file.exists();
 
         if metadata_exists {
-          let mut latest: BrowserProfile = match std::fs::read_to_string(&metadata_file)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-          {
-            Some(p) => p,
-            None => profile.clone(),
+          let mut latest = match self.load_profile(&profile.id.to_string()) {
+            Ok(profile) => profile,
+            Err(error) => {
+              log::warn!(
+                "Skipping Wayfern status persistence for invalid profile metadata: {error}"
+              );
+              return Ok(false);
+            }
           };
 
           if latest.process_id.is_some() {
@@ -1639,6 +1710,88 @@ mod tests {
   }
 
   #[test]
+  fn load_profile_rejects_metadata_from_a_different_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let requested_id = uuid::Uuid::new_v4();
+    let stored = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "mismatched profile".to_string(),
+      browser: "wayfern".to_string(),
+      ..BrowserProfile::default()
+    };
+    let profile_dir = manager.get_profiles_dir().join(requested_id.to_string());
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+      profile_dir.join("metadata.json"),
+      serde_json::to_vec_pretty(&stored).unwrap(),
+    )
+    .unwrap();
+
+    let error = manager
+      .load_profile(&requested_id.to_string())
+      .unwrap_err()
+      .to_string();
+
+    assert!(error.contains("does not match"), "{error}");
+  }
+
+  #[test]
+  fn list_profiles_skips_metadata_from_a_different_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let directory_id = uuid::Uuid::new_v4();
+    let stored = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "mismatched profile".to_string(),
+      browser: "wayfern".to_string(),
+      ..BrowserProfile::default()
+    };
+    let profile_dir = manager.get_profiles_dir().join(directory_id.to_string());
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+      profile_dir.join("metadata.json"),
+      serde_json::to_vec_pretty(&stored).unwrap(),
+    )
+    .unwrap();
+
+    assert!(manager.list_profiles().unwrap().is_empty());
+  }
+
+  #[test]
+  fn mutate_profile_rejects_metadata_from_a_different_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let requested_id = uuid::Uuid::new_v4();
+    let stored = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "mismatched profile".to_string(),
+      browser: "wayfern".to_string(),
+      note: Some("unchanged".to_string()),
+      ..BrowserProfile::default()
+    };
+    let metadata_file = manager
+      .get_profiles_dir()
+      .join(requested_id.to_string())
+      .join("metadata.json");
+    std::fs::create_dir_all(metadata_file.parent().unwrap()).unwrap();
+    std::fs::write(&metadata_file, serde_json::to_vec_pretty(&stored).unwrap()).unwrap();
+
+    let result = manager.mutate_profile(&requested_id.to_string(), |profile| {
+      profile.note = Some("must not be written".to_string());
+      Ok(())
+    });
+
+    assert!(result.is_err());
+    let persisted: BrowserProfile =
+      serde_json::from_str(&std::fs::read_to_string(metadata_file).unwrap()).unwrap();
+    assert_eq!(persisted.note.as_deref(), Some("unchanged"));
+  }
+
+  #[test]
   fn concurrent_metadata_mutations_do_not_overwrite_unrelated_fields() {
     let temp = TempDir::new().unwrap();
     let metadata_file = temp.path().join("metadata.json");
@@ -1689,6 +1842,104 @@ mod tests {
       serde_json::from_str(&std::fs::read_to_string(metadata_file).unwrap()).unwrap();
     assert_eq!(persisted.note.as_deref(), Some("keep this note"));
     assert_eq!(persisted.tags, vec!["keep-this-tag"]);
+  }
+
+  fn write_tag_suggestions(tags: &[&str]) {
+    let path = crate::app_dirs::data_subdir().join("tags.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(
+      path,
+      serde_json::to_vec_pretty(&serde_json::json!({ "tags": tags })).unwrap(),
+    )
+    .unwrap();
+  }
+
+  fn read_tag_suggestions() -> Vec<String> {
+    crate::tag_manager::TAG_MANAGER
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get_all_tags()
+      .unwrap()
+  }
+
+  fn tagged_profile(tag: &str) -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "tag rebuild regression".to_string(),
+      browser: "wayfern".to_string(),
+      tags: vec![tag.to_string()],
+      ..BrowserProfile::default()
+    }
+  }
+
+  #[test]
+  fn runtime_mutation_does_not_rebuild_tag_suggestions() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let profile = tagged_profile("profile-tag");
+    manager.save_profile(&profile).unwrap();
+    write_tag_suggestions(&["sentinel"]);
+
+    manager
+      .mutate_profile(&profile.id.to_string(), |latest| {
+        latest.process_id = Some(42);
+        latest.last_launch = Some(123);
+        Ok(())
+      })
+      .unwrap();
+
+    assert_eq!(read_tag_suggestions(), vec!["sentinel"]);
+  }
+
+  #[test]
+  fn runtime_save_does_not_rebuild_tag_suggestions() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let mut profile = tagged_profile("profile-tag");
+    manager.save_profile(&profile).unwrap();
+    write_tag_suggestions(&["sentinel"]);
+
+    profile.process_id = Some(42);
+    manager.save_profile(&profile).unwrap();
+
+    assert_eq!(read_tag_suggestions(), vec!["sentinel"]);
+  }
+
+  #[test]
+  fn changing_tags_rebuilds_tag_suggestions() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let profile = tagged_profile("old-tag");
+    manager.save_profile(&profile).unwrap();
+    write_tag_suggestions(&["sentinel"]);
+
+    manager
+      .mutate_profile(&profile.id.to_string(), |latest| {
+        latest.tags = vec!["new-tag".to_string()];
+        Ok(())
+      })
+      .unwrap();
+
+    assert_eq!(read_tag_suggestions(), vec!["new-tag"]);
+  }
+
+  #[test]
+  fn local_only_delete_removes_unused_tag_suggestions() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let profile = tagged_profile("deleted-tag");
+    manager.save_profile(&profile).unwrap();
+    assert_eq!(read_tag_suggestions(), vec!["deleted-tag"]);
+
+    manager
+      .delete_profile_local_only(&profile.id.to_string())
+      .unwrap();
+
+    assert!(read_tag_suggestions().is_empty());
   }
 
   #[test]
@@ -1993,8 +2244,7 @@ pub async fn check_browser_status(
   app_handle: tauri::AppHandle,
   profile: BrowserProfile,
 ) -> Result<bool, String> {
-  let profile_manager = ProfileManager::instance();
-  profile_manager
+  crate::browser_runner::BrowserRunner::instance()
     .check_browser_status(app_handle, &profile)
     .await
     .map_err(|e| format!("Failed to check browser status: {e}"))

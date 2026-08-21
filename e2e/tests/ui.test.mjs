@@ -48,6 +48,16 @@ async function dismissSurface(app) {
   await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
+async function createWayfernUiFixture(app, name, wayfernConfig) {
+  return app.invoke("create_browser_profile_new", {
+    name,
+    browserStr: "wayfern",
+    version: "150.0.7871.100",
+    releaseType: "stable",
+    wayfernConfig,
+  });
+}
+
 async function themeSnapshot(app) {
   return app.execute(
     `
@@ -119,11 +129,10 @@ async function applyThemeForContrastAudit(app, theme) {
     `,
     [theme.colors, getDerivedThemeColors(theme.colors), theme.mode],
   );
-  // One frame is enough once transitions are off; the value cannot drift after
-  // style recalculation.
-  await app.execute(
-    `return new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))));`,
-  );
+  // Force style recalculation synchronously. requestAnimationFrame pauses when
+  // macOS backgrounds the native test window, which otherwise turns this
+  // deterministic colour audit into a five-minute WebDriver timeout.
+  await app.execute(`void document.documentElement.offsetHeight; return true;`);
 }
 
 async function animatedTabContrastSnapshot(app) {
@@ -363,6 +372,60 @@ test("all primary navigation buttons and sub-page tabs render and remain interac
       await app.waitForText("Create New Chromium Profile");
     }
     await app.waitForText(en.fingerprint.gpuCompatibilityMode);
+    const expectedHostOs = await app.execute(`
+      const platform = navigator.platform.toLowerCase();
+      return platform.includes("mac")
+        ? "macOS"
+        : platform.includes("win")
+          ? "Windows"
+          : "Linux";
+    `);
+    assert.equal(
+      await app.execute(
+        `return document.querySelector("#automatic-fingerprint-os")?.textContent?.trim();`,
+      ),
+      expectedHostOs,
+      "new profiles must default to the current desktop OS fingerprint",
+    );
+    await app.clickSelector("#automatic-fingerprint-os");
+    const fingerprintOsOptions = await app.execute(`
+      return [...document.querySelectorAll('[role="option"]')]
+        .map((option) => option.textContent?.trim());
+    `);
+    for (const option of ["Windows", "macOS", "Linux", "Android", "iOS"]) {
+      assert.ok(
+        fingerprintOsOptions.includes(option),
+        `fingerprint OS option ${option} is unavailable`,
+      );
+    }
+    await app.pressShortcut({ key: "Escape" });
+    assert.equal(
+      await app.execute(
+        `const trigger = document.querySelector("#automatic-device-preset");
+         trigger?.click();
+         return Boolean(trigger);`,
+      ),
+      true,
+    );
+    await app.waitFor(
+      () =>
+        app.execute(
+          `return document.querySelectorAll('[role="option"]').length > 0;`,
+        ),
+      { description: "device preset options" },
+    );
+    const devicePresetOptions = await app.execute(`
+      return [...document.querySelectorAll('[role="option"]')]
+        .map((option) => option.textContent?.trim());
+    `);
+    assert.ok(
+      !devicePresetOptions.some(
+        (option) =>
+          option?.includes("iPhone 15 Pro") || option?.includes("Pixel 9"),
+      ),
+      "named mobile presets must not be offered without a Wayfern model selector",
+    );
+    await app.pressShortcut({ key: "Escape" });
     assert.equal(
       await app.execute(
         `return document.querySelector("#automatic-gpu-compatibility-mode")
@@ -382,6 +445,160 @@ test("all primary navigation buttons and sub-page tabs render and remain interac
     );
     await dismissSurface(app);
   });
+});
+
+test("clearing a device preset removes its fingerprint and preset DPR", async () => {
+  await withApp(
+    "ui-clear-device-preset",
+    async (app) => {
+      const profileName = "Preset cleanup fixture";
+      const targetOs = process.platform === "win32" ? "macos" : "windows";
+      const devicePreset =
+        targetOs === "macos"
+          ? "macos-sonoma-chrome-apple-m"
+          : "windows-11-chrome-nvidia";
+      const profile = await createWayfernUiFixture(app, profileName, {
+        os: targetOs,
+        device_preset: devicePreset,
+        fingerprint: JSON.stringify({ devicePixelRatio: 1.75 }),
+        expected_device_pixel_ratio: 1.75,
+      });
+      await app.waitForText(profileName);
+
+      await app.clickText(en.profiles.aria.profileInfo, { roles: ["button"] });
+      await app.waitForText(en.profileInfo.title);
+      await app.clickText(en.profileInfo.sections.fingerprint, {
+        roles: ["button"],
+      });
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return Boolean(document.querySelector("#advanced-device-preset"));`,
+          ),
+        { description: "fingerprint device preset control" },
+      );
+      await app.clickSelector("#advanced-device-preset");
+      await app.clickText(en.devicePresets.none, { roles: ["option"] });
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return [...document.querySelectorAll('button')].some((button) =>
+              button.textContent?.trim() === arguments[0] && !button.disabled
+            );`,
+            [en.common.buttons.save],
+          ),
+        { description: "enabled fingerprint Save button" },
+      );
+      assert.equal(
+        await app.execute(
+          `const button = [...document.querySelectorAll('button')].find((candidate) =>
+            candidate.textContent?.trim() === arguments[0] && !candidate.disabled
+          );
+          button?.click();
+          return Boolean(button);`,
+          [en.common.buttons.save],
+        ),
+        true,
+      );
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return document.querySelector('[role="dialog"]') === null;`,
+          ),
+        { description: "profile info dialog to close after save" },
+      );
+
+      const saved = (await app.invoke("list_browser_profiles")).find(
+        (candidate) => candidate.id === profile.id,
+      );
+      assert.ok(saved);
+      assert.equal(saved.wayfern_config.os, targetOs);
+      assert.equal(saved.wayfern_config.device_preset ?? null, null);
+      assert.equal(saved.wayfern_config.fingerprint ?? null, null);
+      assert.equal(
+        saved.wayfern_config.expected_device_pixel_ratio ?? null,
+        null,
+      );
+    },
+    { seedDownloadedBrowser: true },
+  );
+});
+
+test("profile rows track column visibility across exact resize thresholds", async () => {
+  await withApp(
+    "ui-profile-column-threshold",
+    async (app) => {
+      const profileName = "Responsive row fixture";
+      await createWayfernUiFixture(app, profileName, {
+        os:
+          process.platform === "darwin"
+            ? "macos"
+            : process.platform === "win32"
+              ? "windows"
+              : "linux",
+        fingerprint: "{}",
+      });
+      await app.waitForText(profileName);
+
+      const setTableWidth = async (width) => {
+        await app.execute(
+          `
+            const container = document.querySelector('[data-slot="table-container"]');
+            const scrollParent = container?.parentElement;
+            if (!scrollParent) return false;
+            scrollParent.style.flex = "none";
+            scrollParent.style.width = arguments[0] + "px";
+            return true;
+          `,
+          [width],
+        );
+      };
+      const tableCounts = () =>
+        app.execute(
+          `
+            const table = document.querySelector('[data-slot="table"]');
+            const row = [...(table?.querySelectorAll('tbody tr') ?? [])].find((candidate) =>
+              (candidate.textContent || "").includes(arguments[0])
+            );
+            const headerCells = [...(table?.querySelectorAll('thead tr:first-child th') ?? [])];
+            return {
+              headers: headerCells.length,
+              headerLabels: headerCells.map((cell) => cell.textContent?.trim()),
+              cells: row?.querySelectorAll(':scope > td').length ?? 0,
+            };
+          `,
+          [profileName],
+        );
+
+      await setTableWidth(671);
+      const narrow = await app.waitFor(
+        async () => {
+          const counts = await tableCounts();
+          return counts.headers > 0 &&
+            counts.cells > 0 &&
+            !counts.headerLabels.includes(en.profiles.table.ext)
+            ? counts
+            : false;
+        },
+        { description: "narrow profile row" },
+      );
+      assert.equal(narrow.cells, narrow.headers);
+
+      await setTableWidth(673);
+      const wide = await app.waitFor(
+        async () => {
+          const counts = await tableCounts();
+          return counts.headers === narrow.headers + 1 &&
+            counts.headerLabels.includes(en.profiles.table.ext)
+            ? counts
+            : false;
+        },
+        { description: "extension column to enter at its resize threshold" },
+      );
+      assert.equal(wide.cells, wide.headers);
+    },
+    { seedDownloadedBrowser: true },
+  );
 });
 
 test("every custom theme keeps tabs, counts, group pills, and rail states readable", async () => {

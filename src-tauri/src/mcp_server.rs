@@ -1241,7 +1241,7 @@ impl McpServer {
       },
       McpTool {
         name: "run_fingerprint_audit".to_string(),
-        description: "Run a live fingerprint audit and compare a Wayfern profile's stored values with browser observations. Requires an active Pro subscription.".to_string(),
+        description: "Run a local live fingerprint audit and compare a Wayfern profile's stored values with browser observations.".to_string(),
         input_schema: serde_json::json!({
           "type": "object",
           "properties": {
@@ -2287,14 +2287,7 @@ impl McpServer {
         .await?;
         self.handle_update_profile_fingerprint(arguments).await
       }
-      "run_fingerprint_audit" => {
-        Self::require_capability(
-          "Fingerprint auditing",
-          CLOUD_AUTH.can_use_browser_automation().await,
-        )
-        .await?;
-        self.handle_run_fingerprint_audit(arguments).await
-      }
+      "run_fingerprint_audit" => self.handle_run_fingerprint_audit(arguments).await,
       "update_profile_proxy_bypass_rules" => {
         self
           .handle_update_profile_proxy_bypass_rules(arguments)
@@ -2495,28 +2488,7 @@ impl McpServer {
         message: "Missing profile_id".to_string(),
       })?;
 
-    let profiles = ProfileManager::instance()
-      .list_profiles()
-      .map_err(|e| McpError {
-        code: -32000,
-        message: format!("Failed to list profiles: {e}"),
-      })?;
-
-    let profile = profiles
-      .iter()
-      .find(|p| p.id.to_string() == profile_id)
-      .ok_or_else(|| McpError {
-        code: -32000,
-        message: format!("Profile not found: {profile_id}"),
-      })?;
-
-    // Check if it's a Wayfern profile
-    if profile.browser != "wayfern" {
-      return Err(McpError {
-        code: -32000,
-        message: "MCP only supports Wayfern profiles".to_string(),
-      });
-    }
+    let profile = self.get_wayfern_profile(profile_id)?;
 
     Ok(serde_json::json!({
       "content": [{
@@ -2552,31 +2524,10 @@ impl McpServer {
       .unwrap_or(false);
 
     // Get the profile
-    let profiles = ProfileManager::instance()
-      .list_profiles()
-      .map_err(|e| McpError {
-        code: -32000,
-        message: format!("Failed to list profiles: {e}"),
-      })?;
-
-    let profile = profiles
-      .iter()
-      .find(|p| p.id.to_string() == profile_id)
-      .ok_or_else(|| McpError {
-        code: -32000,
-        message: format!("Profile not found: {profile_id}"),
-      })?;
-
-    // Check if it's a Wayfern profile
-    if profile.browser != "wayfern" {
-      return Err(McpError {
-        code: -32000,
-        message: "MCP only supports Wayfern profiles".to_string(),
-      });
-    }
+    let profile = self.get_wayfern_profile(profile_id)?;
 
     // Team lock check
-    crate::team_lock::acquire_team_lock_if_needed(profile)
+    crate::team_lock::acquire_team_lock_if_needed(&profile)
       .await
       .map_err(|e| McpError {
         code: -32000,
@@ -2632,28 +2583,7 @@ impl McpServer {
       })?;
 
     // Get the profile
-    let profiles = ProfileManager::instance()
-      .list_profiles()
-      .map_err(|e| McpError {
-        code: -32000,
-        message: format!("Failed to list profiles: {e}"),
-      })?;
-
-    let profile = profiles
-      .iter()
-      .find(|p| p.id.to_string() == profile_id)
-      .ok_or_else(|| McpError {
-        code: -32000,
-        message: format!("Profile not found: {profile_id}"),
-      })?;
-
-    // Check if it's a Wayfern profile
-    if profile.browser != "wayfern" {
-      return Err(McpError {
-        code: -32000,
-        message: "MCP only supports Wayfern profiles".to_string(),
-      });
-    }
+    let profile = self.get_wayfern_profile(profile_id)?;
 
     // Get app handle to kill
     let inner = self.inner.lock().await;
@@ -2664,14 +2594,14 @@ impl McpServer {
 
     // Kill the browser
     crate::browser_runner::BrowserRunner::instance()
-      .kill_browser_process(app_handle.clone(), profile)
+      .kill_browser_process(app_handle.clone(), &profile)
       .await
       .map_err(|e| McpError {
         code: -32000,
         message: format!("Failed to kill browser: {e}"),
       })?;
 
-    crate::team_lock::release_team_lock_if_needed(profile).await;
+    crate::team_lock::release_team_lock_if_needed(&profile).await;
 
     Ok(serde_json::json!({
       "content": [{
@@ -2928,11 +2858,6 @@ impl McpServer {
       let _ =
         ProfileManager::instance().update_profile_tags(app_handle, &profile.name, tags.clone());
       profile.tags = tags;
-      if let Ok(profiles) = ProfileManager::instance().list_profiles() {
-        let _ = crate::tag_manager::TAG_MANAGER
-          .lock()
-          .map(|manager| manager.rebuild_from_profiles(&profiles));
-      }
     }
 
     Ok(serde_json::json!({
@@ -3020,11 +2945,6 @@ impl McpServer {
           code: -32000,
           message: format!("Failed to update tags: {e}"),
         })?;
-      if let Ok(profiles) = pm.list_profiles() {
-        let _ = crate::tag_manager::TAG_MANAGER
-          .lock()
-          .map(|manager| manager.rebuild_from_profiles(&profiles));
-      }
     }
 
     if let Some(ext_group_id) = arguments.get("extension_group_id").and_then(|v| v.as_str()) {
@@ -4377,8 +4297,17 @@ impl McpServer {
         message: "Missing profile_id".to_string(),
       })?;
     let profile = self.get_wayfern_profile(profile_id)?;
-    let target = self.resolve_cdp_target(profile_id).await?;
-    let report = crate::fingerprint_audit::run(&profile, &target)
+    let app_handle = self
+      .inner
+      .lock()
+      .await
+      .app_handle
+      .clone()
+      .ok_or_else(|| McpError {
+        code: -32000,
+        message: "MCP server not properly initialized".to_string(),
+      })?;
+    let report = crate::fingerprint_audit::run(&app_handle, profile)
       .await
       .map_err(|error| McpError {
         code: -32000,
@@ -5022,19 +4951,17 @@ impl McpServer {
   /// the session. Whether a browser exists at all is [`resolve_cdp_target`]'s
   /// answer to give, because only it can see both places one could be.
   fn get_wayfern_profile(&self, profile_id: &str) -> Result<BrowserProfile, McpError> {
-    let profiles = ProfileManager::instance()
-      .list_profiles()
-      .map_err(|e| McpError {
+    let profile = ProfileManager::instance()
+      .load_profile(profile_id)
+      .map_err(|error| McpError {
         code: -32000,
-        message: format!("Failed to list profiles: {e}"),
-      })?;
-
-    let profile = profiles
-      .into_iter()
-      .find(|p| p.id.to_string() == profile_id)
-      .ok_or_else(|| McpError {
-        code: -32000,
-        message: format!("Profile not found: {profile_id}"),
+        message: if error.to_string().contains("not found")
+          || error.to_string().contains("Invalid profile ID")
+        {
+          format!("Profile not found: {profile_id}")
+        } else {
+          format!("Failed to load profile: {error}")
+        },
       })?;
 
     if profile.browser != "wayfern" {

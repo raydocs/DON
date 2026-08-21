@@ -4,23 +4,23 @@ import {
 } from "@/lib/wayfern-defaults";
 import type { BrowserProfile, StoredProxy, WayfernConfig } from "@/types";
 
+/** Days a residential node stays reserved for one Claude profile. */
+export const PROXY_REUSE_COOLDOWN_DAYS = 3;
+
+export const PROXY_REUSE_COOLDOWN_SECS =
+  PROXY_REUSE_COOLDOWN_DAYS * 24 * 60 * 60;
+
 /** Hard isolation model for Claude accounts on DON. */
 export const CLAUDE_ISOLATION_RULES = [
   "1 profile = 1 Claude account",
   "1 profile = 1 residential (家宽) sticky IP (active lease)",
-  "Same node may be reused only after 7 days",
+  `Same node may be reused only after ${PROXY_REUSE_COOLDOWN_DAYS} days`,
   "1 profile = 1 timezone matching that IP",
   "1 profile = 1 payment card (do not share cards across profiles)",
   "Fingerprint stays fixed (never randomize on launch)",
   "devicePixelRatio must match this host (payment iframe safety)",
   "Default start page: https://claude.com",
 ] as const;
-
-/** Days a residential node stays reserved for one Claude profile. */
-export const PROXY_REUSE_COOLDOWN_DAYS = 7;
-
-export const PROXY_REUSE_COOLDOWN_SECS =
-  PROXY_REUSE_COOLDOWN_DAYS * 24 * 60 * 60;
 
 /** Default page opened when launching a Claude isolation profile. */
 export const CLAUDE_DEFAULT_START_URL = "https://claude.com";
@@ -97,7 +97,7 @@ export function buildClaudeNote(fields: ClaudeCreateFields): string {
       : "card: (set unique card label — never share cards)",
     `start_url: ${startUrl}`,
     `proxy_lease_days: ${PROXY_REUSE_COOLDOWN_DAYS}`,
-    "rule: 1 profile · 1 家宽 IP · 1 timezone · 1 card · reuse node after 7d",
+    `rule: 1 profile · 1 家宽 IP · 1 timezone · 1 card · reuse node after ${PROXY_REUSE_COOLDOWN_DAYS}d`,
   ];
   return lines.join("\n");
 }
@@ -148,7 +148,7 @@ export function profilesSharingProxy(
   );
 }
 
-/** Profiles whose 7-day lease on this proxy is still active. */
+/** Profiles whose lease on this proxy is still active. */
 export function profilesHoldingProxy(
   proxyId: string | undefined | null,
   profiles: BrowserProfile[],
@@ -173,7 +173,7 @@ export function isProxyReusable(
   );
 }
 
-/** First free SOCKS5 residential proxy (no active 7-day hold). */
+/** First free SOCKS5 residential proxy (no active hold). */
 export function pickAvailableProxy(
   proxies: StoredProxy[],
   profiles: BrowserProfile[],
@@ -524,7 +524,7 @@ export function claudeCreateBlockers(args: {
   return blockers;
 }
 
-/** proxyId → list of profile names with an active 7-day lease. */
+/** proxyId → list of profile names with an active lease. */
 export function buildProxyOccupancy(
   profiles: BrowserProfile[],
   nowSecs: number = Math.floor(Date.now() / 1000),

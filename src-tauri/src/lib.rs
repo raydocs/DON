@@ -1316,68 +1316,12 @@ async fn run_fingerprint_audit(
   app_handle: tauri::AppHandle,
   profile_id: String,
 ) -> Result<crate::fingerprint_audit::FingerprintAuditReport, String> {
-  let profiles = crate::profile::ProfileManager::instance()
-    .list_profiles()
-    .map_err(|error| fingerprint_audit_error(format!("failed to list profiles: {error}")))?;
-  let mut profile = profiles
-    .into_iter()
-    .find(|candidate| candidate.id.to_string() == profile_id)
-    .ok_or_else(|| backend_error("PROFILE_NOT_FOUND"))?;
-
-  if profile.browser != "wayfern" {
-    return Err(fingerprint_audit_error(
-      "fingerprint auditing only supports Wayfern profiles",
-    ));
-  }
-
-  let mut launched_for_audit = None;
-  let target = match crate::cdp_target::resolve(&profile).await {
-    Ok(target) => target,
-    Err(crate::cdp_target::ResolveError::NotRunning(_)) => {
-      let launched = crate::browser_runner::launch_browser_profile_impl(
-        app_handle.clone(),
-        profile.clone(),
-        None,
-        crate::browser_runner::LaunchOptions::automation(None, true),
-      )
-      .await
-      .map_err(|error| {
-        fingerprint_audit_error(format!("failed to launch audit browser: {error}"))
-      })?;
-      profile = launched.clone();
-      launched_for_audit = Some(launched);
-      match crate::cdp_target::resolve(&profile).await {
-        Ok(target) => target,
-        Err(error) => {
-          if let Some(launched) = launched_for_audit.take() {
-            if let Err(cleanup_error) =
-              crate::browser_runner::kill_browser_profile(app_handle.clone(), launched).await
-            {
-              log::warn!(
-                "Fingerprint audit browser cleanup failed after CDP connection error: {cleanup_error}"
-              );
-            }
-          }
-          return Err(fingerprint_audit_error(format!(
-            "failed to connect to audit browser: {error}"
-          )));
-        }
-      }
-    }
-    Err(error) => {
-      return Err(fingerprint_audit_error(format!(
-        "failed to connect to running browser: {error}"
-      )))
-    }
-  };
-
-  let report = crate::fingerprint_audit::run(&profile, &target).await;
-  if let Some(launched) = launched_for_audit {
-    if let Err(error) = crate::browser_runner::kill_browser_profile(app_handle, launched).await {
-      log::warn!("Fingerprint audit browser cleanup failed: {error}");
-    }
-  }
-  report.map_err(fingerprint_audit_error)
+  let profile = crate::profile::ProfileManager::instance()
+    .load_profile(&profile_id)
+    .map_err(|_| backend_error("PROFILE_NOT_FOUND"))?;
+  crate::fingerprint_audit::run(&app_handle, profile)
+    .await
+    .map_err(fingerprint_audit_error)
 }
 
 // --- Remote sessions --------------------------------------------------------
@@ -2419,76 +2363,40 @@ pub fn run_with_builder(
         }
       });
 
-      // Periodically broadcast browser running status to the frontend.
-      // When no profiles have stored PIDs (nothing was ever launched this
-      // session), we use a long interval (30s) to avoid burning CPU on
-      // full process-table scans via sysinfo. Once any profile is running
-      // we switch to the fast interval (5s) for responsive UI updates.
+      // Periodically broadcast browser running status to the frontend. The
+      // watch is hydrated once at startup and updated by launch/stop paths, so
+      // each tick reads only metadata for profiles that may actually be live.
       let app_handle_status = app.handle().clone();
       tauri::async_runtime::spawn(async move {
-        const FAST_INTERVAL_SECS: u64 = 5;
-        const IDLE_INTERVAL_SECS: u64 = 30;
+        const STATUS_INTERVAL_SECS: u64 = 5;
+
+        let runner = crate::browser_runner::BrowserRunner::instance();
+        match runner.hydrate_running_profile_watch() {
+          Ok(count) => log::debug!("Hydrated status watch with {count} profile(s)"),
+          Err(error) => log::warn!("Failed to hydrate profile status watch: {error}"),
+        }
 
         let mut interval =
-          tokio::time::interval(tokio::time::Duration::from_secs(FAST_INTERVAL_SECS));
+          tokio::time::interval(tokio::time::Duration::from_secs(STATUS_INTERVAL_SECS));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut last_running_states: std::collections::HashMap<String, bool> =
           std::collections::HashMap::new();
-        let mut current_interval_secs = FAST_INTERVAL_SECS;
 
         loop {
           interval.tick().await;
 
-          let runner = crate::browser_runner::BrowserRunner::instance();
-          let profiles = match runner.profile_manager.list_profiles() {
-            Ok(p) => p,
-            Err(e) => {
-              log::warn!("Failed to list profiles in status checker: {e}");
-              continue;
-            }
-          };
-
-          // If no profile has a stored PID and we have no previously-known
-          // running states, there's nothing to check — skip the expensive
-          // process scan entirely.
-          let any_has_pid = profiles.iter().any(|p| p.process_id.is_some());
-          let any_was_running = last_running_states.values().any(|&v| v);
-
-          if !any_has_pid && !any_was_running {
-            // Switch to the idle interval to reduce CPU
-            if current_interval_secs != IDLE_INTERVAL_SECS {
-              current_interval_secs = IDLE_INTERVAL_SECS;
-              interval =
-                tokio::time::interval(tokio::time::Duration::from_secs(IDLE_INTERVAL_SECS));
-              interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            }
-            continue;
-          }
-
-          // At least one profile might be running — use the fast interval
-          if current_interval_secs != FAST_INTERVAL_SECS {
-            current_interval_secs = FAST_INTERVAL_SECS;
-            interval = tokio::time::interval(tokio::time::Duration::from_secs(FAST_INTERVAL_SECS));
-            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-          }
-
-          // Only walk profiles that either have a stored PID or that we last
-          // saw as running — for users with hundreds of idle profiles this
-          // turns an O(N) sysinfo scan into an O(running) scan. The Rust
-          // launch path always emits profile-running-changed when a profile
-          // STARTS, so newly-running profiles still get tracked here.
-          let profiles_to_check: Vec<_> = profiles
-            .into_iter()
-            .filter(|p| {
-              p.process_id.is_some()
-                || last_running_states
-                  .get(&p.id.to_string())
-                  .copied()
-                  .unwrap_or(false)
-            })
-            .collect();
-
-          for profile in profiles_to_check {
+          for profile_id in runner.watched_running_profile_ids() {
+            let profile = match runner.profile_manager.load_profile(&profile_id) {
+              Ok(profile) => profile,
+              Err(error) => {
+                log::warn!("Failed to load watched profile {profile_id}: {error}");
+                if error.to_string().contains("not found") {
+                  runner.unwatch_running_profile(&profile_id);
+                  last_running_states.remove(&profile_id);
+                }
+                continue;
+              }
+            };
             let had_pid = profile.process_id.is_some();
             // Check browser status and track changes
             match runner
@@ -2496,7 +2404,6 @@ pub fn run_with_builder(
               .await
             {
               Ok(is_running) => {
-                let profile_id = profile.id.to_string();
                 let last_state = last_running_states
                   .get(&profile_id)
                   .copied()
@@ -2581,10 +2488,17 @@ pub fn run_with_builder(
                     crate::team_lock::release_team_lock_if_needed(&profile).await;
                   }
 
-                  last_running_states.insert(profile_id, is_running);
+                  if is_running {
+                    last_running_states.insert(profile_id, true);
+                  } else {
+                    runner.unwatch_running_profile(&profile_id);
+                    last_running_states.remove(&profile_id);
+                  }
+                } else if is_running {
+                  last_running_states.insert(profile_id, true);
                 } else {
-                  // Update the state even if unchanged to ensure we have it tracked
-                  last_running_states.insert(profile_id, is_running);
+                  runner.unwatch_running_profile(&profile_id);
+                  last_running_states.remove(&profile_id);
                 }
               }
               Err(e) => {

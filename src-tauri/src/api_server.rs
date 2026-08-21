@@ -1,7 +1,7 @@
 use crate::browser::ProxySettings;
 use crate::events;
 use crate::group_manager::GROUP_MANAGER;
-use crate::profile::manager::ProfileManager;
+use crate::profile::{manager::ProfileManager, BrowserProfile};
 use crate::proxy_manager::PROXY_MANAGER;
 use crate::tag_manager::TAG_MANAGER;
 use axum::{
@@ -1247,6 +1247,19 @@ fn manager_error_response(err: impl std::fmt::Display) -> (StatusCode, String) {
   (status, msg)
 }
 
+fn load_profile_for_endpoint(profile_id: &str) -> Result<BrowserProfile, (StatusCode, String)> {
+  ProfileManager::instance()
+    .load_profile(profile_id)
+    .map_err(|error| {
+      let message = error.to_string();
+      if message.contains("not found") || message.contains("Invalid profile ID") {
+        (StatusCode::NOT_FOUND, "profile not found".to_string())
+      } else {
+        manager_error_response(error)
+      }
+    })
+}
+
 /// Real per-group profile counts, computed from the profile list (the same
 /// source of truth the GUI uses).
 fn group_profile_counts() -> std::collections::HashMap<String, usize> {
@@ -1480,13 +1493,6 @@ async fn create_profile(
         profile.tags = tags.clone();
       }
 
-      // Update tag manager with new tags
-      if let Ok(profiles) = profile_manager.list_profiles() {
-        let _ = crate::tag_manager::TAG_MANAGER
-          .lock()
-          .map(|manager| manager.rebuild_from_profiles(&profiles));
-      }
-
       Ok(Json(ApiProfileResponse {
         profile: ApiProfile::from(&profile),
       }))
@@ -1592,13 +1598,6 @@ async fn update_profile(
   if let Some(tags) = request.tags {
     if let Err(e) = profile_manager.update_profile_tags(&state.app_handle, &id, tags) {
       return Err(manager_error_response(e));
-    }
-
-    // Update tag manager with new tags from all profiles
-    if let Ok(profiles) = profile_manager.list_profiles() {
-      let _ = crate::tag_manager::TAG_MANAGER
-        .lock()
-        .map(|manager| manager.rebuild_from_profiles(&profiles));
     }
   }
 
@@ -2793,15 +2792,7 @@ async fn run_profile(
   let headless = request.headless.unwrap_or(false);
   let url = request.url;
 
-  let profile_manager = ProfileManager::instance();
-  let profiles = profile_manager
-    .list_profiles()
-    .map_err(manager_error_response)?;
-
-  let profile = profiles
-    .iter()
-    .find(|p| p.id.to_string() == id)
-    .ok_or((StatusCode::NOT_FOUND, "profile not found".to_string()))?;
+  let profile = load_profile_for_endpoint(&id)?;
 
   if profile.is_cross_os() {
     return Err((
@@ -2813,7 +2804,7 @@ async fn run_profile(
   // Team lock check. Routed through the shared mapper so a profile held by the
   // user's OWN remote session is a 409 that says so, rather than a bare status
   // with no body, which is what an automation client had to guess from.
-  crate::team_lock::acquire_team_lock_if_needed(profile)
+  crate::team_lock::acquire_team_lock_if_needed(&profile)
     .await
     .map_err(manager_error_response)?;
 
@@ -2883,19 +2874,12 @@ async fn run_profile_remote(
     return Err((StatusCode::PAYMENT_REQUIRED, String::new()));
   }
 
-  let profile_manager = ProfileManager::instance();
-  let profiles = profile_manager
-    .list_profiles()
-    .map_err(manager_error_response)?;
-  let profile = profiles
-    .iter()
-    .find(|p| p.id.to_string() == id)
-    .ok_or((StatusCode::NOT_FOUND, "profile not found".to_string()))?;
+  let profile = load_profile_for_endpoint(&id)?;
 
   // The profile must exist in cloud storage before a remote host can open it —
   // the VM pulls it from donut-sync, and a profile that has never synced would
   // launch an empty browser and then push that emptiness back over the real one.
-  if let Err(reason) = remote_launch_precondition(profile).await {
+  if let Err(reason) = remote_launch_precondition(&profile).await {
     return Err((StatusCode::BAD_REQUEST, reason));
   }
 
@@ -2903,7 +2887,7 @@ async fn run_profile_remote(
   // profile because this machine is the wrong OS; running it remotely on a host
   // of its OWN OS is precisely what this endpoint exists for.
   let outcome =
-    crate::remote_session::start_remote_session(state.app_handle.clone(), profile, request.url)
+    crate::remote_session::start_remote_session(state.app_handle.clone(), &profile, request.url)
       .await
       .map_err(remote_session_error_response)?;
 
@@ -3959,19 +3943,11 @@ async fn kill_profile(
     return Err((StatusCode::PAYMENT_REQUIRED, String::new()));
   }
 
-  let profile_manager = ProfileManager::instance();
-  let profiles = profile_manager
-    .list_profiles()
-    .map_err(manager_error_response)?;
-
-  let profile = profiles
-    .iter()
-    .find(|p| p.id.to_string() == id)
-    .ok_or((StatusCode::NOT_FOUND, "profile not found".to_string()))?;
+  let profile = load_profile_for_endpoint(&id)?;
 
   let browser_runner = crate::browser_runner::BrowserRunner::instance();
   browser_runner
-    .kill_browser_process(state.app_handle.clone(), profile)
+    .kill_browser_process(state.app_handle.clone(), &profile)
     .await
     .map_err(|e| {
       let message = e.to_string();
@@ -3985,7 +3961,7 @@ async fn kill_profile(
       }
     })?;
 
-  crate::team_lock::release_team_lock_if_needed(profile).await;
+  crate::team_lock::release_team_lock_if_needed(&profile).await;
 
   Ok(StatusCode::NO_CONTENT)
 }

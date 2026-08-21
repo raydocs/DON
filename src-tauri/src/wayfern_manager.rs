@@ -25,6 +25,20 @@ fn select_new_wayfern_process(
     .map(|(pid, _)| *pid)
 }
 
+#[cfg(any(target_os = "macos", test))]
+fn parse_lsof_listener_pids(output: &str) -> Vec<u32> {
+  let mut pids = Vec::new();
+  for line in output.lines() {
+    let Some(pid) = line.trim().parse::<u32>().ok().filter(|pid| *pid > 0) else {
+      continue;
+    };
+    if !pids.contains(&pid) {
+      pids.push(pid);
+    }
+  }
+  pids
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WayfernConfig {
   #[serde(default)]
@@ -84,7 +98,7 @@ const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disabl
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
 fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
-  vec![
+  let mut args = vec![
     format!("--remote-debugging-port={port}"),
     "--remote-debugging-address=127.0.0.1".to_string(),
     format!("--user-data-dir={profile_path}"),
@@ -105,7 +119,10 @@ fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
     "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,Prefetch,PrefetchProxy,SpeculationRulesPrefetchFuture,NoStatePrefetch".to_string(),
     "--use-mock-keychain".to_string(),
     "--password-store=basic".to_string(),
-  ]
+  ];
+  #[cfg(target_os = "macos")]
+  args.push("--use-angle=default".to_string());
+  args
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,6 +178,15 @@ fn contains_all_tokens(value: &str, tokens: &[String]) -> bool {
   tokens
     .iter()
     .all(|token| value.contains(&token.to_ascii_lowercase()))
+}
+
+fn stored_fingerprint_format_mismatch(fingerprint: &serde_json::Value) -> Option<&'static str> {
+  let fingerprint = fingerprint.get("fingerprint").unwrap_or(fingerprint);
+  (fingerprint
+    .get("deviceProfileApplied")
+    .and_then(serde_json::Value::as_bool)
+    != Some(true))
+  .then_some("fingerprint predates complete device-profile application")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -394,13 +420,18 @@ impl WayfernConfig {
       (configured, live) => configured.or(live),
     };
     let mut resolved = config.clone();
-    // The live display wins over a stale or preset value stored on a different
-    // machine or monitor. DON targets real macOS and Windows desktops rather
-    // than mobile-device emulation, so every launch must remain physically
-    // consistent with the host scale.
-    resolved.expected_device_pixel_ratio = host
-      .device_pixel_ratio
-      .or(resolved.expected_device_pixel_ratio);
+    // Native fingerprints must match the live display scale. An explicitly
+    // selected cross-OS or mobile identity keeps its simulated DPR, while its
+    // browser window still has to fit within the host's logical screen bounds.
+    let target_matches_host = config
+      .os
+      .as_deref()
+      .is_none_or(|target| target == crate::profile::types::get_host_os());
+    if target_matches_host {
+      resolved.expected_device_pixel_ratio = host
+        .device_pixel_ratio
+        .or(resolved.expected_device_pixel_ratio);
+    }
     resolved.screen_max_width = strictest_max(resolved.screen_max_width, host.screen_max_width);
     resolved.screen_max_height = strictest_max(resolved.screen_max_height, host.screen_max_height);
 
@@ -463,6 +494,74 @@ struct WayfernInstance {
   cdp_port: Option<u16>,
 }
 
+pub(crate) struct WayfernTab {
+  port: u16,
+  target_id: String,
+  armed: bool,
+}
+
+struct PendingWayfernTabGuard {
+  port: u16,
+  url: String,
+  armed: bool,
+}
+
+impl PendingWayfernTabGuard {
+  fn new(port: u16, url: &str) -> Self {
+    Self {
+      port,
+      url: url.to_string(),
+      armed: true,
+    }
+  }
+
+  fn disarm(&mut self) {
+    self.armed = false;
+  }
+}
+
+impl Drop for PendingWayfernTabGuard {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    let port = self.port;
+    let url = self.url.clone();
+    tauri::async_runtime::spawn(async move {
+      let manager = WayfernManager::instance();
+      let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+      loop {
+        if manager.close_tab_by_url(port, &url).await.is_ok() {
+          return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+          break;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+      }
+      log::warn!("Failed to reconcile dropped temporary Wayfern tab");
+    });
+  }
+}
+
+impl Drop for WayfernTab {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    let port = self.port;
+    let target_id = self.target_id.clone();
+    tauri::async_runtime::spawn(async move {
+      if let Err(error) = WayfernManager::instance()
+        .close_tab_by_id(port, &target_id)
+        .await
+      {
+        log::warn!("Failed to close dropped temporary Wayfern tab: {error}");
+      }
+    });
+  }
+}
+
 struct WayfernManagerInner {
   instances: HashMap<String, WayfernInstance>,
 }
@@ -470,6 +569,46 @@ struct WayfernManagerInner {
 pub struct WayfernManager {
   inner: Arc<AsyncMutex<WayfernManagerInner>>,
   http_client: Client,
+}
+
+struct SpawnedWayfernGuard {
+  process_id: Option<u32>,
+  launcher_process_id: Option<u32>,
+  profile_path: PathBuf,
+  port: u16,
+  armed: bool,
+}
+
+impl SpawnedWayfernGuard {
+  fn new(process_id: Option<u32>, profile_path: PathBuf, port: u16) -> Self {
+    Self {
+      process_id,
+      launcher_process_id: None,
+      profile_path,
+      port,
+      armed: true,
+    }
+  }
+
+  fn disarm(&mut self) {
+    self.armed = false;
+  }
+}
+
+impl Drop for SpawnedWayfernGuard {
+  fn drop(&mut self) {
+    if !self.armed {
+      return;
+    }
+    WayfernManager::terminate_process(self.process_id);
+    WayfernManager::terminate_process(self.launcher_process_id);
+    for (pid, _, cdp_port) in WayfernManager::find_wayfern_processes_by_profile(&self.profile_path)
+    {
+      if cdp_port == Some(self.port) && Some(pid) != self.process_id {
+        WayfernManager::terminate_process(Some(pid));
+      }
+    }
+  }
 }
 
 #[derive(Debug, Deserialize)]
@@ -542,11 +681,14 @@ impl WayfernManager {
 
   /// Normalize fingerprint data from Wayfern CDP format to our storage format.
   /// Wayfern returns fields like fonts, webglParameters as JSON strings which we keep as-is.
-  fn normalize_fingerprint(fingerprint: serde_json::Value) -> serde_json::Value {
+  fn normalize_fingerprint(mut fingerprint: serde_json::Value) -> serde_json::Value {
     // Our storage format matches what Wayfern returns:
     // - fonts, plugins, mimeTypes, voices are JSON strings
     // - webglParameters, webgl2Parameters, etc. are JSON strings
     // The form displays them as JSON text areas, so no conversion needed.
+    if let Some(device_memory) = fingerprint.get_mut("deviceMemory") {
+      *device_memory = page_visible_device_memory(device_memory);
+    }
     fingerprint
   }
 
@@ -597,6 +739,9 @@ impl WayfernManager {
       Ok(fingerprint) => fingerprint,
       Err(error) => return Some(format!("fingerprint JSON is invalid: {error}")),
     };
+    if let Some(reason) = stored_fingerprint_format_mismatch(&fingerprint) {
+      return Some(reason.to_string());
+    }
     WayfernConfig::fingerprint_satisfies_host_constraints(
       &fingerprint,
       config,
@@ -680,6 +825,40 @@ impl WayfernManager {
     Err(format!("CDP not ready after {max_attempts} attempts on port {port}: {detail}").into())
   }
 
+  #[cfg(target_os = "macos")]
+  async fn listener_pid_for_launch(port: u16, profile_path: &str) -> Option<u32> {
+    let lsof_output = TokioCommand::new("/usr/sbin/lsof")
+      .arg("-nP")
+      .arg(format!("-iTCP:{port}"))
+      .arg("-sTCP:LISTEN")
+      .arg("-t")
+      .output()
+      .await
+      .ok()?;
+    if !lsof_output.status.success() {
+      return None;
+    }
+    let output = String::from_utf8_lossy(&lsof_output.stdout);
+    for pid in parse_lsof_listener_pids(&output) {
+      let process_output = TokioCommand::new("/bin/ps")
+        .args(["-ww", "-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .await
+        .ok()?;
+      if !process_output.status.success() {
+        continue;
+      }
+      let command = String::from_utf8_lossy(&process_output.stdout);
+      if command.contains(&format!("--remote-debugging-port={port}"))
+        && command.contains(profile_path)
+        && !command.contains("--type=")
+      {
+        return Some(pid);
+      }
+    }
+    None
+  }
+
   async fn spawn_wayfern_and_wait(
     &self,
     executable_path: &std::path::Path,
@@ -687,17 +866,12 @@ impl WayfernManager {
     wayfern_token: Option<&str>,
     _profile_path: &str,
     port: u16,
-  ) -> Result<Option<u32>, Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<SpawnedWayfernGuard, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(target_os = "macos")]
     if crate::platform_browser::macos::app_bundle_for_executable(executable_path).is_some() {
       let target_path = std::path::Path::new(_profile_path)
         .canonicalize()
         .unwrap_or_else(|_| std::path::Path::new(_profile_path).to_path_buf());
-      let existing: std::collections::HashSet<u32> =
-        Self::find_wayfern_processes_by_profile(&target_path)
-          .into_iter()
-          .map(|(pid, _, _)| pid)
-          .collect();
       let environment: Vec<(&str, &str)> = wayfern_token
         .map(|token| vec![("WAYFERN_TOKEN", token)])
         .unwrap_or_default();
@@ -707,7 +881,10 @@ impl WayfernManager {
         &environment,
       )
       .await?;
+      let mut process_guard = SpawnedWayfernGuard::new(None, target_path.clone(), port);
+      process_guard.launcher_process_id = Some(launcher.id());
       let launcher_status = tokio::task::spawn_blocking(move || launcher.wait()).await??;
+      process_guard.launcher_process_id = None;
       if !launcher_status.success() {
         return Err(
           format!("macOS Launch Services failed to start Wayfern with status {launcher_status}")
@@ -715,34 +892,22 @@ impl WayfernManager {
         );
       }
 
-      if let Err(error) = self.wait_for_cdp_ready(port).await {
-        for _ in 0..20 {
-          for (pid, _, _) in Self::find_wayfern_processes_by_profile(&target_path) {
-            if !existing.contains(&pid) {
-              Self::terminate_process(Some(pid));
-            }
-          }
-          tokio::time::sleep(Duration::from_millis(100)).await;
-        }
-        return Err(error);
+      self.wait_for_cdp_ready(port).await?;
+
+      if let Some(pid) = Self::listener_pid_for_launch(port, _profile_path).await {
+        process_guard.process_id = Some(pid);
+        return Ok(process_guard);
       }
 
-      for _ in 0..20 {
-        let candidates: Vec<(u32, Option<u16>)> =
-          Self::find_wayfern_processes_by_profile(&target_path)
-            .into_iter()
-            .map(|(pid, _, cdp_port)| (pid, cdp_port))
-            .collect();
-        if let Some(pid) = select_new_wayfern_process(&candidates, &existing, port) {
-          return Ok(Some(pid));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-      }
-
-      for (pid, _, _) in Self::find_wayfern_processes_by_profile(&target_path) {
-        if !existing.contains(&pid) {
-          Self::terminate_process(Some(pid));
-        }
+      let candidates: Vec<(u32, Option<u16>)> =
+        Self::find_wayfern_processes_by_profile(&target_path)
+          .into_iter()
+          .map(|(pid, _, cdp_port)| (pid, cdp_port))
+          .collect();
+      let existing = std::collections::HashSet::new();
+      if let Some(pid) = select_new_wayfern_process(&candidates, &existing, port) {
+        process_guard.process_id = Some(pid);
+        return Ok(process_guard);
       }
       return Err("Wayfern launched through macOS Launch Services, but its real process could not be identified".into());
     }
@@ -769,11 +934,12 @@ impl WayfernManager {
       })?;
     let process_id = child.id();
     drop(child);
-    if let Err(error) = self.wait_for_cdp_ready(port).await {
-      Self::terminate_process(process_id);
-      return Err(error);
-    }
-    Ok(process_id)
+    let target_path = std::path::Path::new(_profile_path)
+      .canonicalize()
+      .unwrap_or_else(|_| std::path::Path::new(_profile_path).to_path_buf());
+    let process_guard = SpawnedWayfernGuard::new(process_id, target_path, port);
+    self.wait_for_cdp_ready(port).await?;
+    Ok(process_guard)
   }
 
   async fn get_cdp_targets(
@@ -1422,7 +1588,7 @@ impl WayfernManager {
     if wayfern_token.is_some() {
       log::info!("Wayfern authorization configured for browser process");
     }
-    let process_id = self
+    let mut process_guard = self
       .spawn_wayfern_and_wait(
         &executable_path,
         &args,
@@ -1431,6 +1597,7 @@ impl WayfernManager {
         port,
       )
       .await?;
+    let process_id = process_guard.process_id;
 
     let targets = self.get_cdp_targets(port).await?;
     log::info!("Found {} CDP targets", targets.len());
@@ -1538,7 +1705,6 @@ impl WayfernManager {
                     config,
                     host_constraints,
                   ) {
-                    Self::terminate_process(process_id);
                     return Err(
                       format!(
                         "Wayfern applied a fingerprint that violates display constraints: {reason}"
@@ -1561,7 +1727,6 @@ impl WayfernManager {
       }
 
       if used_fingerprint.is_none() {
-        Self::terminate_process(process_id);
         return Err("Wayfern did not return a complete applied fingerprint for validation".into());
       }
     } else {
@@ -1617,6 +1782,7 @@ impl WayfernManager {
 
     let mut inner = self.inner.lock().await;
     inner.instances.insert(id.clone(), instance);
+    process_guard.disarm();
 
     Ok(WayfernLaunchResult {
       id,
@@ -1646,11 +1812,28 @@ impl WayfernManager {
   }
 
   /// Opens a URL in a new tab for an existing Wayfern instance.
-  pub async fn open_url_in_tab(
+  pub(crate) async fn open_url_in_tab(
     &self,
     profile_path: &str,
     url: &str,
-  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<WayfernTab, Box<dyn std::error::Error + Send + Sync>> {
+    self.open_url_in_tab_inner(profile_path, url, false).await
+  }
+
+  pub(crate) async fn open_temporary_url_in_tab(
+    &self,
+    profile_path: &str,
+    url: &str,
+  ) -> Result<WayfernTab, Box<dyn std::error::Error + Send + Sync>> {
+    self.open_url_in_tab_inner(profile_path, url, true).await
+  }
+
+  async fn open_url_in_tab_inner(
+    &self,
+    profile_path: &str,
+    url: &str,
+    temporary: bool,
+  ) -> Result<WayfernTab, Box<dyn std::error::Error + Send + Sync>> {
     let inner = self.inner.lock().await;
     let target_path = std::path::Path::new(profile_path)
       .canonicalize()
@@ -1679,6 +1862,7 @@ impl WayfernManager {
       "http://127.0.0.1:{port}/json/new?{}",
       urlencoding::encode(url)
     );
+    let mut pending_tab = temporary.then(|| PendingWayfernTabGuard::new(port, url));
     let resp = self
       .http_client
       .put(&new_tab_url)
@@ -1686,11 +1870,121 @@ impl WayfernManager {
       .await
       .map_err(|e| format!("Failed to open new tab: {e}"))?;
     if !resp.status().is_success() {
+      if let Some(pending_tab) = pending_tab.as_mut() {
+        pending_tab.disarm();
+      }
       return Err(format!("CDP /json/new returned HTTP {}", resp.status()).into());
+    }
+    let response = match resp.json::<serde_json::Value>().await {
+      Ok(response) => response,
+      Err(error) => {
+        let cleanup = if temporary {
+          self.close_tab_by_url(port, url).await
+        } else {
+          Ok(())
+        };
+        if cleanup.is_ok() {
+          if let Some(pending_tab) = pending_tab.as_mut() {
+            pending_tab.disarm();
+          }
+        }
+        return Err(match cleanup {
+          Ok(()) => format!("CDP /json/new returned invalid JSON: {error}"),
+          Err(cleanup_error) => format!(
+            "CDP /json/new returned invalid JSON: {error}; temporary tab cleanup failed: {cleanup_error}"
+          ),
+        }
+        .into());
+      }
+    };
+    let target_id = response
+      .get("id")
+      .and_then(serde_json::Value::as_str)
+      .filter(|id| !id.is_empty())
+      .map(str::to_string);
+    let target_id = match target_id {
+      Some(target_id) => target_id,
+      None => {
+        let cleanup = if temporary {
+          self.close_tab_by_url(port, url).await
+        } else {
+          Ok(())
+        };
+        if cleanup.is_ok() {
+          if let Some(pending_tab) = pending_tab.as_mut() {
+            pending_tab.disarm();
+          }
+        }
+        return Err(match cleanup {
+          Ok(()) => "CDP /json/new response omitted the target ID".to_string(),
+          Err(cleanup_error) => format!(
+            "CDP /json/new response omitted the target ID; temporary tab cleanup failed: {cleanup_error}"
+          ),
+        }
+        .into());
+      }
+    };
+    if let Some(pending_tab) = pending_tab.as_mut() {
+      pending_tab.disarm();
     }
 
     log::info!("Opened URL in new tab via CDP");
+    Ok(WayfernTab {
+      port,
+      target_id,
+      armed: temporary,
+    })
+  }
+
+  pub(crate) async fn close_tab(
+    &self,
+    mut tab: WayfernTab,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    self.close_tab_by_id(tab.port, &tab.target_id).await?;
+    tab.armed = false;
     Ok(())
+  }
+
+  async fn close_tab_by_id(
+    &self,
+    port: u16,
+    target_id: &str,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let response = self
+      .http_client
+      .get(format!(
+        "http://127.0.0.1:{}/json/close/{}",
+        port,
+        urlencoding::encode(target_id)
+      ))
+      .send()
+      .await
+      .map_err(|error| format!("Failed to close temporary tab: {error}"))?;
+    if !response.status().is_success() {
+      return Err(format!("CDP /json/close returned HTTP {}", response.status()).into());
+    }
+    Ok(())
+  }
+
+  async fn close_tab_by_url(
+    &self,
+    port: u16,
+    url: &str,
+  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let targets = self
+      .http_client
+      .get(format!("http://127.0.0.1:{port}/json/list"))
+      .send()
+      .await?
+      .json::<Vec<serde_json::Value>>()
+      .await?;
+    let target_id = targets
+      .iter()
+      .find(|target| target.get("url").and_then(serde_json::Value::as_str) == Some(url))
+      .and_then(|target| target.get("id"))
+      .and_then(serde_json::Value::as_str)
+      .ok_or("Temporary Wayfern tab was not present in /json/list")?;
+    self.close_tab_by_id(port, target_id).await
   }
 
   pub async fn get_cdp_port(&self, profile_path: &str) -> Option<u16> {
@@ -1936,6 +2230,14 @@ impl WayfernManager {
   }
 }
 
+pub(crate) fn page_visible_device_memory(value: &serde_json::Value) -> serde_json::Value {
+  if value.as_f64().is_some_and(|memory| memory >= 8.0) {
+    serde_json::json!(8)
+  } else {
+    value.clone()
+  }
+}
+
 lazy_static::lazy_static! {
   static ref WAYFERN_MANAGER: WayfernManager = WayfernManager::new();
 }
@@ -1990,6 +2292,23 @@ mod tests {
       .any(|arg| arg == "--disable-background-timer-throttling"));
   }
 
+  #[cfg(target_os = "macos")]
+  #[test]
+  fn production_launch_requests_the_native_macos_angle_backend() {
+    let args = base_wayfern_launch_args(9222, "/tmp/profile");
+
+    assert!(args.iter().any(|arg| arg == "--use-angle=default"));
+  }
+
+  #[test]
+  fn fingerprint_memory_is_normalized_to_the_page_visible_limit() {
+    let fingerprint = WayfernManager::normalize_fingerprint(serde_json::json!({
+      "deviceMemory": 32
+    }));
+
+    assert_eq!(fingerprint["deviceMemory"], serde_json::json!(8));
+  }
+
   #[test]
   fn launch_services_pid_recovery_excludes_existing_and_wrong_cdp_processes() {
     let existing = HashSet::from([100]);
@@ -1998,6 +2317,14 @@ mod tests {
     assert_eq!(
       select_new_wayfern_process(&candidates, &existing, 9222),
       Some(300)
+    );
+  }
+
+  #[test]
+  fn lsof_listener_pid_parser_ignores_noise_and_duplicates() {
+    assert_eq!(
+      parse_lsof_listener_pids(" 321\nnot-a-pid\n654\n321\n0\n"),
+      vec![321, 654]
     );
   }
 
@@ -2219,6 +2546,16 @@ mod tests {
   }
 
   #[test]
+  fn legacy_fingerprint_without_applied_device_profile_is_regenerated() {
+    let legacy = complete_desktop_fingerprint(2.0);
+    assert!(stored_fingerprint_format_mismatch(&legacy).is_some());
+
+    let mut current = legacy;
+    current["deviceProfileApplied"] = serde_json::json!(true);
+    assert_eq!(stored_fingerprint_format_mismatch(&current), None);
+  }
+
+  #[test]
   fn fingerprint_constraints_reject_internally_inconsistent_dimensions() {
     let available_exceeds_screen = serde_json::json!({
       "devicePixelRatio": 2,
@@ -2316,7 +2653,7 @@ mod tests {
   }
 
   #[test]
-  fn device_presets_cannot_override_the_live_display_scale() {
+  fn cross_os_device_presets_use_the_simulated_display_scale() {
     let mut fingerprint = complete_desktop_fingerprint(3.0);
     fingerprint["screenWidth"] = serde_json::json!(393);
     fingerprint["screenHeight"] = serde_json::json!(852);
@@ -2335,6 +2672,7 @@ mod tests {
     fingerprint["webglRenderer"] = serde_json::json!("Apple A17 Pro GPU, Metal");
     let config = WayfernConfig {
       device_preset: Some("iphone-15-pro".to_string()),
+      os: Some("ios".to_string()),
       expected_device_pixel_ratio: Some(3.0),
       ..Default::default()
     };
@@ -2347,7 +2685,7 @@ mod tests {
     };
 
     assert!(
-      WayfernConfig::fingerprint_satisfies_host_constraints(&fingerprint, &config, host).is_err()
+      WayfernConfig::fingerprint_satisfies_host_constraints(&fingerprint, &config, host).is_ok()
     );
   }
 }

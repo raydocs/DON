@@ -1,7 +1,6 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { emit } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useId, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuCheck, LuChevronsUpDown } from "react-icons/lu";
@@ -106,7 +105,6 @@ export function ProxyAssignmentDialog({
         }
       }
 
-      await emit("profile-updated");
       onAssignmentComplete();
       onClose();
     } catch (err) {

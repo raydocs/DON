@@ -1,7 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
+import { upsertProfileById } from "@/lib/profile-event-state";
 import type { BrowserProfile, GroupWithCount } from "@/types";
 
 interface UseProfileEventsReturn {
@@ -28,16 +29,44 @@ export function useProfileEvents(): UseProfileEventsReturn {
   );
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const profileUpdateVersions = useRef(new Map<string, number>());
+  const profileLoadVersion = useRef(0);
 
   // Load profiles from backend
   const loadProfiles = useCallback(async () => {
+    const loadVersion = ++profileLoadVersion.current;
+    const versionsAtStart = new Map(profileUpdateVersions.current);
     try {
       const profileList = await invoke<BrowserProfile[]>(
         "list_browser_profiles",
       );
-      setProfiles(profileList);
+      if (loadVersion !== profileLoadVersion.current) return;
+      setProfiles((current) => {
+        const currentById = new Map(
+          current.map((profile) => [profile.id, profile]),
+        );
+        const loadedIds = new Set(profileList.map((profile) => profile.id));
+        const reconciled = profileList.map((loaded) => {
+          const before = versionsAtStart.get(loaded.id) ?? 0;
+          const after = profileUpdateVersions.current.get(loaded.id) ?? 0;
+          return after === before
+            ? loaded
+            : (currentById.get(loaded.id) ?? loaded);
+        });
+        for (const existing of current) {
+          if (
+            !loadedIds.has(existing.id) &&
+            (profileUpdateVersions.current.get(existing.id) ?? 0) >
+              (versionsAtStart.get(existing.id) ?? 0)
+          ) {
+            reconciled.push(existing);
+          }
+        }
+        return reconciled;
+      });
       setError(null);
     } catch (err: unknown) {
+      if (loadVersion !== profileLoadVersion.current) return;
       console.error("Failed to load profiles:", err);
       setError(
         i18n.t("errors.loadProfilesFailed", { error: JSON.stringify(err) }),
@@ -67,13 +96,11 @@ export function useProfileEvents(): UseProfileEventsReturn {
   // Initial load and event listeners setup
   useEffect(() => {
     let profilesUnlisten: (() => void) | undefined;
+    let profileUpdatedUnlisten: (() => void) | undefined;
     let runningUnlisten: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
-        // Initial load
-        await Promise.all([loadProfiles(), loadGroups()]);
-
         // Listen for profile changes (create, delete, rename, update, etc.)
         profilesUnlisten = await listen("profiles-changed", () => {
           console.log(
@@ -82,6 +109,18 @@ export function useProfileEvents(): UseProfileEventsReturn {
           void loadProfiles();
           void loadGroups();
         });
+
+        profileUpdatedUnlisten = await listen<BrowserProfile>(
+          "profile-updated",
+          (event) => {
+            const updated = event.payload;
+            profileUpdateVersions.current.set(
+              updated.id,
+              (profileUpdateVersions.current.get(updated.id) ?? 0) + 1,
+            );
+            setProfiles((current) => upsertProfileById(current, updated));
+          },
+        );
 
         // Listen for profile running state changes
         runningUnlisten = await listen<{ id: string; is_running: boolean }>(
@@ -99,6 +138,10 @@ export function useProfileEvents(): UseProfileEventsReturn {
             });
           },
         );
+
+        // Subscribe before loading so no mutation can land in the gap between
+        // the initial snapshot and listener registration.
+        await Promise.all([loadProfiles(), loadGroups()]);
 
         console.log("Profile event listeners set up successfully");
       } catch (err) {
@@ -118,6 +161,7 @@ export function useProfileEvents(): UseProfileEventsReturn {
     // Cleanup listeners on unmount
     return () => {
       if (profilesUnlisten) profilesUnlisten();
+      if (profileUpdatedUnlisten) profileUpdatedUnlisten();
       if (runningUnlisten) runningUnlisten();
     };
   }, [loadProfiles, loadGroups]);

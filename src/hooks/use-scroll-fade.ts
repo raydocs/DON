@@ -6,9 +6,9 @@ import { type RefObject, useEffect } from "react";
  * `.scroll-fade` CSS utility in `globals.css` reads these attributes and
  * shows fade gradients only in directions that are actually scrollable.
  *
- * A ResizeObserver watches the container AND its direct children so internal
- * content height changes (e.g. virtualizer padding rows growing/shrinking
- * as the user scrolls) recompute the fade state automatically.
+ * A ResizeObserver watches the container and its direct content roots so
+ * internal content height changes recompute the fade state without observing
+ * every row mutation in large or virtualized lists.
  */
 export function useScrollFade<T extends HTMLElement>(
   ref: RefObject<T | null>,
@@ -29,27 +29,11 @@ export function useScrollFade<T extends HTMLElement>(
 
     const ro = new ResizeObserver(update);
     ro.observe(el);
-    for (const child of Array.from(el.children)) {
-      ro.observe(child);
-    }
-
-    // MutationObserver picks up DOM additions (virtualizer mounts new rows)
-    // and re-attaches the ResizeObserver to the new children. Without this,
-    // newly inserted rows wouldn't trigger a fade recompute.
-    const mo = new MutationObserver(() => {
-      ro.disconnect();
-      ro.observe(el);
-      for (const child of Array.from(el.children)) {
-        ro.observe(child);
-      }
-      update();
-    });
-    mo.observe(el, { childList: true, subtree: true });
+    for (const child of el.children) ro.observe(child);
 
     return () => {
       el.removeEventListener("scroll", update);
       ro.disconnect();
-      mo.disconnect();
     };
   }, [ref]);
 }

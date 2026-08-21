@@ -8,7 +8,7 @@ This is operational isolation for multi-account stability. It does **not** guara
 
 1. **1 profile ↔ 1 Claude account** — never log two Claude accounts into the same profile.
 2. **1 profile ↔ 1 residential IP (active lease)** — assign a dedicated sticky 家宽/residential proxy.
-3. **7-day node reuse** — the same proxy may be claimed by a *new* Claude profile only after **7 days** from the previous profile’s `created_at` (lease window). Concurrent active leases still block.
+3. **3-day node reuse** — the same proxy may be claimed by a *new* Claude profile only after **3 days** from the previous profile’s `created_at` (lease window). Concurrent active leases still block.
 4. **1 profile ↔ 1 timezone story** — geoip follows the proxy exit (timezone/language stamped from that IP).
 5. **1 profile ↔ 1 card** — use a unique payment instrument per account. DON only stores a **label** (e.g. `card-A`), never a full card number.
 6. **Fingerprint fixed** — `randomize_fingerprint_on_launch` stays off.
@@ -26,7 +26,7 @@ This is operational isolation for multi-account stability. It does **not** guara
 ### Create (auto)
 
 1. Open **Claude** (header) → **Auto-create Claude profile**.
-2. DON picks the first free node (no active 7-day lease), auto name / 家宽 label / `card-A…`, stamps note with `start_url: https://claude.com` and `proxy_lease_days: 7`.
+2. DON picks the first free node (no active 3-day lease), auto name / 家宽 label / `card-A…`, stamps note with `start_url: https://claude.com` and `proxy_lease_days: 3`.
 3. Isolation flags applied: `geoip`, `block_webrtc`, fixed FP, host DPR.
 
 ### Create (manual)
@@ -40,7 +40,7 @@ This is operational isolation for multi-account stability. It does **not** guara
 2. Confirm WebRTC/public IP = the residential exit (not home real IP).
 3. Warm up briefly, then log into Claude **only on this profile**.
 4. Pay only from this profile with its dedicated card.
-5. Reuse the same node for another profile only after the **7-day** lease ends (prefer unbinding the old profile).
+5. Reuse the same node for another profile only after the **3-day** lease ends (prefer unbinding the old profile).
 
 Every profile ships with the **Session Key for Claude** extension preloaded (reserved **DON Default** group, attached automatically at creation): on claude.ai, click the toolbar icon to copy that profile's session key.
 
@@ -51,7 +51,7 @@ Header **Claude** panel:
 | Severity | Examples |
 |----------|----------|
 | **BLOCK** | No proxy; active shared lease; randomize on; DPR mismatch vs host |
-| **WARN** | geoip off; WebRTC open; missing card/家宽 note; missing `claude` tag; node reused after 7d still bound on old profile |
+| **WARN** | geoip off; WebRTC open; missing card/家宽 note; missing `claude` tag; node reused after 3d still bound on old profile |
 | **OK** | Isolation checks pass |
 
 ## Out of scope (still your responsibility)

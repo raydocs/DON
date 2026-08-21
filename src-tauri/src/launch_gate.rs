@@ -308,11 +308,8 @@ pub struct PreLaunchChecks {
 
 fn load_profile(profile_id: &str) -> Result<BrowserProfile, String> {
   crate::profile::ProfileManager::instance()
-    .list_profiles()
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .find(|p| p.id.to_string() == profile_id)
-    .ok_or_else(|| crate::backend_error("PROFILE_NOT_FOUND"))
+    .load_profile(profile_id)
+    .map_err(|_| crate::backend_error("PROFILE_NOT_FOUND"))
 }
 
 #[tauri::command]

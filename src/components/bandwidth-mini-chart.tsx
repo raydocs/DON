@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Area, AreaChart, ResponsiveContainer } from "recharts";
+import { buildBandwidthSeries } from "@/lib/traffic-snapshots";
 import { cn } from "@/lib/utils";
 import type { BandwidthDataPoint } from "@/types";
 
@@ -18,37 +18,26 @@ export function BandwidthMiniChart({
   onClick,
   className,
 }: BandwidthMiniChartProps) {
-  // Transform data for the chart - combine sent and received for total bandwidth
-  const chartData = React.useMemo(() => {
-    // Fill in missing seconds with zeros for smooth chart
-    if (data.length === 0) {
-      // Create 60 seconds of zero data for the past minute
-      const now = Math.floor(Date.now() / 1000);
-      return Array.from({ length: 60 }, (_, i) => ({
-        time: now - (59 - i),
-        bandwidth: 0,
-      }));
-    }
-
+  const bandwidthSeries = React.useMemo(() => {
     const now = Math.floor(Date.now() / 1000);
-    const result: { time: number; bandwidth: number }[] = [];
-
-    // Get the last 60 seconds
-    for (let i = 59; i >= 0; i--) {
-      const targetTime = now - i;
-      const point = data.find((d) => d.timestamp === targetTime);
-      result.push({
-        time: targetTime,
-        bandwidth: point ? point.bytes_sent + point.bytes_received : 0,
-      });
-    }
-
-    return result;
+    return buildBandwidthSeries(data, now);
   }, [data]);
+  const { linePoints, areaPoints } = React.useMemo(() => {
+    const maxBandwidth = Math.max(1, ...bandwidthSeries);
+    const points = bandwidthSeries.map((bandwidth, index) => {
+      const x = (index / (bandwidthSeries.length - 1)) * 100;
+      const y = 11 - (bandwidth / maxBandwidth) * 10;
+      return `${x.toFixed(2)},${y.toFixed(2)}`;
+    });
+    return {
+      linePoints: points.join(" "),
+      areaPoints: `0,11 ${points.join(" ")} 100,11`,
+    };
+  }, [bandwidthSeries]);
 
   // Use external bandwidth if provided, otherwise calculate from last data point
   const currentBandwidth =
-    externalBandwidth ?? chartData[chartData.length - 1]?.bandwidth ?? 0;
+    externalBandwidth ?? bandwidthSeries[bandwidthSeries.length - 1] ?? 0;
 
   // Format bytes to human readable
   const formatBytes = (bytes: number): string => {
@@ -68,48 +57,25 @@ export function BandwidthMiniChart({
       )}
     >
       <div className="pointer-events-none h-3 min-w-0 flex-1">
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={1}
-          minHeight={1}
+        <svg
+          viewBox="0 0 100 12"
+          preserveAspectRatio="none"
+          className="block size-full"
+          aria-hidden="true"
         >
-          <AreaChart
-            data={chartData}
-            margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
-          >
-            <defs>
-              <linearGradient
-                id="bandwidthGradient"
-                x1="0"
-                y1="0"
-                x2="0"
-                y2="1"
-              >
-                <stop
-                  offset="0%"
-                  stopColor="var(--chart-1)"
-                  stopOpacity={0.6}
-                />
-                <stop
-                  offset="100%"
-                  stopColor="var(--chart-1)"
-                  stopOpacity={0.1}
-                />
-              </linearGradient>
-            </defs>
-            <Area
-              type="monotone"
-              dataKey="bandwidth"
-              stroke="var(--chart-1)"
-              strokeWidth={1}
-              fill="url(#bandwidthGradient)"
-              isAnimationActive={false}
-              dot={false}
-              activeDot={false}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
+          <polygon
+            points={areaPoints}
+            fill="var(--chart-1)"
+            fillOpacity="0.16"
+          />
+          <polyline
+            points={linePoints}
+            fill="none"
+            stroke="var(--chart-1)"
+            strokeWidth="1"
+            vectorEffect="non-scaling-stroke"
+          />
+        </svg>
       </div>
       <span className="min-w-[60px] shrink-0 text-right text-xs whitespace-nowrap text-muted-foreground">
         {formatBytes(currentBandwidth)}

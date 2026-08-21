@@ -209,8 +209,8 @@ fn profile_data_dir(profile: &crate::profile::BrowserProfile) -> PathBuf {
   profile.get_profile_data_path(&ProfileManager::instance().get_profiles_dir())
 }
 
-fn emit_profiles_changed() {
-  let _ = events::emit_empty("profiles-changed");
+fn emit_profile_updated(profile: &crate::profile::BrowserProfile) {
+  let _ = events::emit("profile-updated", profile);
 }
 
 #[tauri::command]
@@ -296,7 +296,7 @@ pub async fn set_profile_password(profile_id: String, password: String) -> Resul
 
   cache_key(id, key);
   crate::sync::queue_profile_sync_if_eligible(&profile);
-  emit_profiles_changed();
+  emit_profile_updated(&profile);
   Ok(())
 }
 
@@ -378,7 +378,6 @@ pub async fn lock_profile(profile_id: String) -> Result<(), String> {
   drop_cached_key(&id);
   // Purge any leftover ephemeral dir in case keep_decrypted_profiles_in_ram was on.
   crate::ephemeral_dirs::remove_ephemeral_dir(&id.to_string());
-  emit_profiles_changed();
   Ok(())
 }
 
@@ -438,7 +437,7 @@ pub async fn change_profile_password(
   drop_cached_key(&id);
   cache_key(id, new_key);
   crate::sync::queue_profile_sync_if_eligible(&profile);
-  emit_profiles_changed();
+  emit_profile_updated(&profile);
   Ok(())
 }
 
@@ -510,7 +509,7 @@ pub async fn remove_profile_password(profile_id: String, password: String) -> Re
 
   drop_cached_key(&id);
   crate::sync::queue_profile_sync_if_eligible(&profile);
-  emit_profiles_changed();
+  emit_profile_updated(&profile);
   Ok(())
 }
 

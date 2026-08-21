@@ -446,8 +446,8 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     await writeFile(migrationSentinel, "profile-data-must-survive", "utf8");
     const incompatibleFingerprint = {
       ...JSON.parse(profileBeforeMigration.wayfern_config.fingerprint),
-      devicePixelRatio: display.devicePixelRatio === 1 ? 2 : 1,
     };
+    delete incompatibleFingerprint.deviceProfileApplied;
     await app.invoke("update_wayfern_config", {
       profileId: profile.id,
       config: {
@@ -475,6 +475,7 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
       migratedFingerprint.devicePixelRatio,
       display.devicePixelRatio,
     );
+    assert.equal(migratedFingerprint.deviceProfileApplied, true);
     assert.ok(migratedFingerprint.screenWidth <= display.screenWidth);
     assert.ok(migratedFingerprint.screenHeight <= display.screenHeight);
     assert.equal(

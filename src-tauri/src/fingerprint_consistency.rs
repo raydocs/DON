@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::profile::types::BrowserProfile;
 use crate::proxy_manager::PROXY_MANAGER;
@@ -53,7 +53,7 @@ struct CachedExit {
 /// key changed. Cloud-derived proxies inject a per-profile sticky-session id,
 /// so two profiles sharing one stored proxy correctly get different identities
 /// and never inherit each other's verdict.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExitCacheKey {
   pub scope: String,
   pub identity: String,
@@ -85,8 +85,22 @@ pub fn exit_cache_key(profile: &BrowserProfile) -> Option<ExitCacheKey> {
   None
 }
 
+type ExitProbeResult = Result<Option<CachedExit>, String>;
+
+struct InFlightExitProbe {
+  generation: u64,
+  result: Arc<tokio::sync::OnceCell<ExitProbeResult>>,
+}
+
+#[derive(Default)]
+struct ExitCacheState {
+  cache: HashMap<ExitCacheKey, CachedExit>,
+  generations: HashMap<String, u64>,
+  in_flight: HashMap<ExitCacheKey, InFlightExitProbe>,
+}
+
 lazy_static::lazy_static! {
-  static ref EXIT_CACHE: Mutex<HashMap<String, CachedExit>> = Mutex::new(HashMap::new());
+  static ref EXIT_CACHE: Mutex<ExitCacheState> = Mutex::new(ExitCacheState::default());
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -173,7 +187,7 @@ fn fingerprint_locale(profile: &BrowserProfile) -> (Option<String>, Option<Strin
 /// A panic anywhere under this lock used to brick the check process-wide.
 /// That was tolerable when a failed check only skipped a warning; now a launch
 /// consults it, so a poisoned lock must degrade rather than propagate.
-fn exit_cache() -> std::sync::MutexGuard<'static, HashMap<String, CachedExit>> {
+fn exit_cache() -> std::sync::MutexGuard<'static, ExitCacheState> {
   EXIT_CACHE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -214,12 +228,78 @@ pub fn compare_exit_to_fingerprint(
 /// Look up a still-valid cached exit for this profile.
 fn cached_exit(key: &ExitCacheKey) -> Option<CachedExit> {
   let now = crate::proxy_manager::now_secs();
-  exit_cache()
-    .get(&key.scope)
-    .filter(|c| {
-      c.identity == key.identity && now.saturating_sub(c.fetched_at) < EXIT_CACHE_TTL_SECS
+  let mut state = exit_cache();
+  let cached = state
+    .cache
+    .get(key)
+    .filter(|cached| {
+      cached.identity == key.identity && now.saturating_sub(cached.fetched_at) < EXIT_CACHE_TTL_SECS
     })
-    .cloned()
+    .cloned();
+  if cached.is_none() {
+    state.cache.remove(key);
+  }
+  cached
+}
+
+async fn cached_or_probe_exit<F, Fut>(
+  key: &ExitCacheKey,
+  probe: F,
+) -> Result<Option<CachedExit>, String>
+where
+  F: FnOnce() -> Fut,
+  Fut: std::future::Future<Output = Result<Option<CachedExit>, String>>,
+{
+  let (generation, result_cell) = {
+    let now = crate::proxy_manager::now_secs();
+    let mut state = exit_cache();
+    if let Some(cached) = state
+      .cache
+      .get(key)
+      .filter(|cached| {
+        cached.identity == key.identity
+          && now.saturating_sub(cached.fetched_at) < EXIT_CACHE_TTL_SECS
+      })
+      .cloned()
+    {
+      return Ok(Some(cached));
+    }
+    state.cache.remove(key);
+
+    let generation = *state.generations.get(&key.scope).unwrap_or(&0);
+    let result_cell = state
+      .in_flight
+      .entry(key.clone())
+      .or_insert_with(|| InFlightExitProbe {
+        generation,
+        result: Arc::new(tokio::sync::OnceCell::new()),
+      })
+      .result
+      .clone();
+    (generation, result_cell)
+  };
+
+  let result = result_cell.get_or_init(probe).await.clone();
+
+  let mut state = exit_cache();
+  let current_generation = *state.generations.get(&key.scope).unwrap_or(&0);
+  let is_current = state.in_flight.get(key).is_some_and(|in_flight| {
+    in_flight.generation == generation && Arc::ptr_eq(&in_flight.result, &result_cell)
+  });
+  if is_current {
+    state.in_flight.remove(key);
+    if current_generation == generation {
+      if let Ok(Some(cached)) = &result {
+        state.cache.insert(key.clone(), cached.clone());
+      }
+    }
+  }
+
+  if current_generation != generation {
+    Ok(None)
+  } else {
+    result
+  }
 }
 
 /// Cache-only check. Never performs I/O, so it is safe to call before a launch
@@ -237,8 +317,20 @@ pub fn check_profile_consistency_cached(profile: &BrowserProfile) -> Consistency
 /// Drop any cached exit for this profile, so the next check re-measures.
 pub fn invalidate_exit_cache(profile: &BrowserProfile) {
   if let Some(key) = exit_cache_key(profile) {
-    exit_cache().remove(&key.scope);
+    invalidate_exit_cache_key(&key);
   }
+}
+
+fn invalidate_exit_cache_key(key: &ExitCacheKey) {
+  let mut state = exit_cache();
+  let generation = state.generations.entry(key.scope.clone()).or_default();
+  *generation = generation.wrapping_add(1);
+  state
+    .cache
+    .retain(|cached_key, _| cached_key.scope != key.scope);
+  state
+    .in_flight
+    .retain(|probe_key, _| probe_key.scope != key.scope);
 }
 
 /// Measure the exit through an already-normalized upstream and compare it to
@@ -269,46 +361,82 @@ pub async fn probe_and_check_consistency(
     return Ok(ConsistencyResult::skip());
   };
 
-  // Resolve the exit IP through the proxy, then geolocate it with the SAME
-  // bundled MaxMind database the fingerprint generator (and the on-demand
-  // match) use. Using one geo source everywhere means the check can never
-  // disagree with what generation produced — a second source (e.g. ip-api)
-  // routinely reports a different IANA zone for the same IP in multi-zone
-  // countries, which would flag correctly-generated fingerprints and would
-  // leave the "match to proxy" fix unable to satisfy the check.
-  //
-  // Bounded independently of fetch_public_ip's own per-request timeout: that
-  // one races six endpoints and can add up to far longer than a user will wait
-  // in front of a launch.
-  let fetched = tokio::time::timeout(PROBE_TIMEOUT, crate::ip_utils::fetch_public_ip(Some(&url)))
-    .await
-    .map_err(|_| crate::backend_error("EXIT_PROBE_FAILED"))?;
-  let exit_ip = fetched.map_err(|e| crate::backend_error_with_detail("EXIT_PROBE_FAILED", e))?;
+  let identity = key.identity.clone();
+  let cached = cached_or_probe_exit(key, || async move {
+    // Resolve the exit IP through the proxy, then geolocate it with the SAME
+    // bundled MaxMind database the fingerprint generator (and the on-demand
+    // match) use. Using one geo source everywhere means the check can never
+    // disagree with what generation produced — a second source (e.g. ip-api)
+    // routinely reports a different IANA zone for the same IP in multi-zone
+    // countries, which would flag correctly-generated fingerprints and would
+    // leave the "match to proxy" fix unable to satisfy the check.
+    //
+    // Bounded independently of fetch_public_ip's own per-request timeout: that
+    // one races six endpoints and can add up to far longer than a user will wait
+    // in front of a launch.
+    let fetched = tokio::time::timeout(PROBE_TIMEOUT, crate::ip_utils::fetch_public_ip(Some(&url)))
+      .await
+      .map_err(|_| crate::backend_error("EXIT_PROBE_FAILED"))?;
+    let exit_ip = fetched.map_err(|e| crate::backend_error_with_detail("EXIT_PROBE_FAILED", e))?;
 
-  match crate::geolocation::get_geolocation(&exit_ip) {
-    Ok(geo) => {
-      let tz = Some(geo.timezone);
-      let cc = geo.locale.region.clone();
-      exit_cache().insert(
-        key.scope.clone(),
-        CachedExit {
-          fetched_at: crate::proxy_manager::now_secs(),
-          identity: key.identity.clone(),
-          timezone: tz.clone(),
-          country_code: cc.clone(),
-          ip: Some(exit_ip.clone()),
-        },
-      );
-      Ok(compare_exit_to_fingerprint(profile, tz, cc, Some(exit_ip)))
+    match crate::geolocation::get_geolocation(&exit_ip) {
+      Ok(geo) => Ok(Some(CachedExit {
+        fetched_at: crate::proxy_manager::now_secs(),
+        identity,
+        timezone: Some(geo.timezone),
+        country_code: geo.locale.region.clone(),
+        ip: Some(exit_ip),
+      })),
+      // Reached the exit but couldn't place it (database missing, or a private
+      // exit IP). Skip rather than warn on an unknown location — the same
+      // database gates fingerprint geo, so there's nothing to disagree with.
+      Err(e) => {
+        log::debug!("Consistency check: could not geolocate exit IP: {e}");
+        Ok(None)
+      }
     }
-    // Reached the exit but couldn't place it (database missing, or a private
-    // exit IP). Skip rather than warn on an unknown location — the same
-    // database gates fingerprint geo, so there's nothing to disagree with.
-    Err(e) => {
-      log::debug!("Consistency check: could not geolocate exit IP: {e}");
-      Ok(ConsistencyResult::skip())
-    }
+  })
+  .await?;
+
+  let Some(cached) = cached else {
+    return Ok(ConsistencyResult::skip());
+  };
+  Ok(compare_exit_to_fingerprint(
+    profile,
+    cached.timezone,
+    cached.country_code,
+    cached.ip,
+  ))
+}
+
+/// Warm one directly-dialable stored proxy in the background. VPN and VLESS
+/// routes require launch-scoped workers, so attempting them here would add
+/// process churn instead of reducing launch latency.
+pub fn prewarm_profile_exit(profile: &BrowserProfile) {
+  let Some(proxy_id) = profile.proxy_id.as_deref() else {
+    return;
+  };
+  let Some(settings) = PROXY_MANAGER
+    .resolve_proxy_for_profile(proxy_id, &profile.id.to_string())
+    .or_else(|| PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+  else {
+    return;
+  };
+  if probe_url(&settings).is_none() {
+    return;
   }
+  let Some(key) = exit_cache_key(profile) else {
+    return;
+  };
+  let profile = profile.clone();
+  tauri::async_runtime::spawn(async move {
+    if let Err(error) = probe_and_check_consistency(&profile, Some(&settings), &key).await {
+      log::debug!(
+        "Could not prewarm fingerprint exit consistency: {}",
+        crate::log_redaction::text(&error)
+      );
+    }
+  });
 }
 
 /// Measure the exit this machine reaches without any proxy, and compare it to
@@ -354,11 +482,8 @@ pub async fn match_profile_fingerprint_to_exit(
 ) -> Result<(), String> {
   let manager = crate::profile::ProfileManager::instance();
   let mut profile = manager
-    .list_profiles()
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .find(|p| p.id.to_string() == profile_id)
-    .ok_or_else(|| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
+    .load_profile(&profile_id)
+    .map_err(|_| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
 
   let fingerprint = profile
     .wayfern_config
@@ -410,11 +535,8 @@ pub async fn check_profile_consistency_now(
 ) -> Result<ConsistencyResult, String> {
   let manager = crate::profile::ProfileManager::instance();
   let profile = manager
-    .list_profiles()
-    .map_err(|e| e.to_string())?
-    .into_iter()
-    .find(|p| p.id.to_string() == profile_id)
-    .ok_or_else(|| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
+    .load_profile(&profile_id)
+    .map_err(|_| serde_json::json!({ "code": "PROFILE_NOT_FOUND" }).to_string())?;
 
   let Some(key) = exit_cache_key(&profile) else {
     return Ok(ConsistencyResult::skip());
@@ -509,7 +631,7 @@ mod tests {
   }
 
   #[test]
-  fn probe_url_percent_encodes_credentials_and_skips_shadowsocks() {
+  fn probe_url_percent_encodes_credentials_and_skips_worker_transports() {
     assert_eq!(
       probe_url(&settings("http", Some("u"), Some("p"))).as_deref(),
       Some("http://u:p@gw.provider.io:8080")
@@ -528,9 +650,10 @@ mod tests {
       Some("socks4://justuser@gw.provider.io:8080")
     );
 
-    // Shadowsocks cannot carry a reqwest probe, so it is skipped rather than
-    // guessed at.
+    // Worker-backed transports cannot carry a direct reqwest probe, so they
+    // are skipped rather than starting launch-scoped workers during prewarm.
     assert_eq!(probe_url(&settings("ss", None, None)), None);
+    assert_eq!(probe_url(&settings("vless", None, None)), None);
   }
 
   #[test]
@@ -653,8 +776,8 @@ mod tests {
       scope: "proxy:test-identity-change".into(),
       identity: "http://old@host:1".into(),
     };
-    exit_cache().insert(
-      key.scope.clone(),
+    exit_cache().cache.insert(
+      key.clone(),
       CachedExit {
         fetched_at: crate::proxy_manager::now_secs(),
         identity: key.identity.clone(),
@@ -672,7 +795,7 @@ mod tests {
       ..key.clone()
     };
     assert!(cached_exit(&rotated).is_none());
-    exit_cache().remove(&key.scope);
+    invalidate_exit_cache_key(&key);
   }
 
   #[test]
@@ -681,8 +804,8 @@ mod tests {
       scope: "proxy:test-ttl".into(),
       identity: "http://host:1".into(),
     };
-    exit_cache().insert(
-      key.scope.clone(),
+    exit_cache().cache.insert(
+      key.clone(),
       CachedExit {
         fetched_at: crate::proxy_manager::now_secs() - EXIT_CACHE_TTL_SECS - 1,
         identity: key.identity.clone(),
@@ -692,7 +815,122 @@ mod tests {
       },
     );
     assert!(cached_exit(&key).is_none());
-    exit_cache().remove(&key.scope);
+    invalidate_exit_cache_key(&key);
+  }
+
+  #[tokio::test]
+  async fn concurrent_checks_share_one_exit_probe() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let key = ExitCacheKey {
+      scope: format!("proxy:singleflight-{}", uuid::Uuid::new_v4()),
+      identity: "http://session-a@gateway:8080".into(),
+    };
+    let probes = Arc::new(AtomicUsize::new(0));
+    let make_probe = || {
+      let probes = Arc::clone(&probes);
+      let identity = key.identity.clone();
+      async move {
+        probes.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        Ok(Some(CachedExit {
+          fetched_at: crate::proxy_manager::now_secs(),
+          identity,
+          timezone: Some("Europe/Berlin".into()),
+          country_code: Some("DE".into()),
+          ip: Some("192.0.2.1".into()),
+        }))
+      }
+    };
+
+    let (first, second) = tokio::join!(
+      cached_or_probe_exit(&key, &make_probe),
+      cached_or_probe_exit(&key, make_probe)
+    );
+
+    assert!(first.unwrap().is_some());
+    assert!(second.unwrap().is_some());
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+    invalidate_exit_cache_key(&key);
+  }
+
+  #[tokio::test]
+  async fn failed_exit_probe_is_shared_but_not_cached() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    let key = ExitCacheKey {
+      scope: format!("proxy:singleflight-failure-{}", uuid::Uuid::new_v4()),
+      identity: "http://session-a@gateway:8080".into(),
+    };
+    let probes = Arc::new(AtomicUsize::new(0));
+    let make_probe = || {
+      let probes = Arc::clone(&probes);
+      async move {
+        probes.fetch_add(1, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        Err("probe failed".to_string())
+      }
+    };
+
+    let (first, second) = tokio::join!(
+      cached_or_probe_exit(&key, &make_probe),
+      cached_or_probe_exit(&key, make_probe)
+    );
+    assert!(matches!(first, Err(ref error) if error == "probe failed"));
+    assert!(matches!(second, Err(ref error) if error == "probe failed"));
+    assert_eq!(probes.load(Ordering::SeqCst), 1);
+
+    let retry = cached_or_probe_exit(&key, || {
+      let probes = Arc::clone(&probes);
+      async move {
+        probes.fetch_add(1, Ordering::SeqCst);
+        Err("retry failed".to_string())
+      }
+    })
+    .await;
+    assert!(matches!(retry, Err(ref error) if error == "retry failed"));
+    assert_eq!(probes.load(Ordering::SeqCst), 2);
+    invalidate_exit_cache_key(&key);
+  }
+
+  #[tokio::test]
+  async fn invalidation_during_a_probe_discards_its_stale_result() {
+    use std::sync::Arc;
+
+    let key = ExitCacheKey {
+      scope: format!("proxy:singleflight-invalidate-{}", uuid::Uuid::new_v4()),
+      identity: "http://session-a@gateway:8080".into(),
+    };
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let probe_key = key.clone();
+    let probe = tokio::spawn({
+      let started = Arc::clone(&started);
+      let release = Arc::clone(&release);
+      async move {
+        let identity = probe_key.identity.clone();
+        cached_or_probe_exit(&probe_key, || async move {
+          started.notify_one();
+          release.notified().await;
+          Ok(Some(CachedExit {
+            fetched_at: crate::proxy_manager::now_secs(),
+            identity,
+            timezone: Some("Europe/Berlin".into()),
+            country_code: Some("DE".into()),
+            ip: Some("192.0.2.1".into()),
+          }))
+        })
+        .await
+      }
+    });
+
+    started.notified().await;
+    invalidate_exit_cache_key(&key);
+    release.notify_one();
+    assert!(probe.await.unwrap().unwrap().is_none());
+    assert!(cached_exit(&key).is_none());
   }
 
   #[test]
@@ -705,6 +943,6 @@ mod tests {
     })
     .join();
     assert!(EXIT_CACHE.is_poisoned());
-    exit_cache().remove("nonexistent-scope");
+    exit_cache().generations.remove("nonexistent-scope");
   }
 }

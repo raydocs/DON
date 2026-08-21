@@ -6,9 +6,9 @@ use crate::profile::{BrowserProfile, ProfileManager};
 use crate::proxy_manager::PROXY_MANAGER;
 use crate::wayfern_manager::{WayfernConfig, WayfernManager};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static PROFILE_LAUNCH_LOCKS: LazyLock<
@@ -44,19 +44,105 @@ fn load_profile_for_stop(
   profile_manager: &ProfileManager,
   requested_profile: &BrowserProfile,
 ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
-  let profile_id = requested_profile.id;
+  let profile = profile_manager
+    .load_profile(&requested_profile.id.to_string())
+    .map_err(|error| std::io::Error::other(error.to_string()))?;
+  Ok(profile)
+}
+
+fn load_latest_profile(
+  profile_manager: &ProfileManager,
+  requested_profile: &BrowserProfile,
+) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
   profile_manager
-    .list_profiles()
-    .map_err(|error| std::io::Error::other(error.to_string()))?
-    .into_iter()
-    .find(|profile| profile.id == profile_id)
-    .ok_or_else(|| {
-      std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("Profile {profile_id} no longer exists"),
-      )
-      .into()
-    })
+    .load_profile(&requested_profile.id.to_string())
+    .map_err(|error| std::io::Error::other(error.to_string()).into())
+}
+
+async fn wait_for_process_exit_with<F>(timeout: Duration, is_running: F) -> bool
+where
+  F: Fn() -> bool,
+{
+  let deadline = tokio::time::Instant::now() + timeout;
+  loop {
+    if !is_running() {
+      return true;
+    }
+    let now = tokio::time::Instant::now();
+    if now >= deadline {
+      return false;
+    }
+    tokio::time::sleep(Duration::from_millis(25).min(deadline - now)).await;
+  }
+}
+
+async fn wait_for_process_exit(pid: u32) -> bool {
+  wait_for_process_exit_with(Duration::from_millis(500), || {
+    crate::proxy_storage::is_process_running(pid)
+  })
+  .await
+}
+
+async fn force_kill_wayfern_process(
+  pid: u32,
+  profile_path: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  #[cfg(target_os = "macos")]
+  {
+    crate::platform_browser::macos::kill_browser_process_impl(pid, Some(profile_path)).await
+  }
+  #[cfg(target_os = "linux")]
+  {
+    crate::platform_browser::linux::kill_browser_process_impl(pid, Some(profile_path)).await
+  }
+  #[cfg(target_os = "windows")]
+  {
+    let _ = profile_path;
+    crate::platform_browser::windows::kill_browser_process_impl(pid).await
+  }
+}
+
+#[derive(Default)]
+struct RunningProfileWatch {
+  ids: Mutex<HashSet<String>>,
+}
+
+impl RunningProfileWatch {
+  fn register(&self, profile_id: &str) {
+    self
+      .ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .insert(profile_id.to_string());
+  }
+
+  fn unregister(&self, profile_id: &str) {
+    self
+      .ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(profile_id);
+  }
+
+  fn extend(&self, profile_ids: impl IntoIterator<Item = String>) {
+    self
+      .ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .extend(profile_ids);
+  }
+
+  fn ids(&self) -> Vec<String> {
+    let mut ids: Vec<_> = self
+      .ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .iter()
+      .cloned()
+      .collect();
+    ids.sort();
+    ids
+  }
 }
 
 pub struct BrowserRunner {
@@ -64,6 +150,7 @@ pub struct BrowserRunner {
   pub downloaded_browsers_registry: &'static DownloadedBrowsersRegistry,
   auto_updater: &'static crate::auto_updater::AutoUpdater,
   wayfern_manager: &'static WayfernManager,
+  running_profile_watch: RunningProfileWatch,
 }
 
 impl BrowserRunner {
@@ -73,6 +160,7 @@ impl BrowserRunner {
       downloaded_browsers_registry: DownloadedBrowsersRegistry::instance(),
       auto_updater: crate::auto_updater::AutoUpdater::instance(),
       wayfern_manager: WayfernManager::instance(),
+      running_profile_watch: RunningProfileWatch::default(),
     }
   }
 
@@ -82,6 +170,28 @@ impl BrowserRunner {
 
   pub fn get_binaries_dir(&self) -> PathBuf {
     crate::app_dirs::binaries_dir()
+  }
+
+  pub fn hydrate_running_profile_watch(&self) -> Result<usize, String> {
+    let profile_ids: Vec<_> = self
+      .profile_manager
+      .list_profiles()
+      .map_err(|error| error.to_string())?
+      .into_iter()
+      .filter(|profile| profile.process_id.is_some())
+      .map(|profile| profile.id.to_string())
+      .collect();
+    let count = profile_ids.len();
+    self.running_profile_watch.extend(profile_ids);
+    Ok(count)
+  }
+
+  pub fn watched_running_profile_ids(&self) -> Vec<String> {
+    self.running_profile_watch.ids()
+  }
+
+  pub fn unwatch_running_profile(&self, profile_id: &str) {
+    self.running_profile_watch.unregister(profile_id);
   }
 
   /// Resolve the DNS blocklist level to a cached file path plus whether that
@@ -752,6 +862,9 @@ impl BrowserRunner {
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
           std::io::Error::other(error.to_string()).into()
         })?;
+      self
+        .running_profile_watch
+        .register(&updated_profile.id.to_string());
 
       log::info!(
         "Saving profile {} with wayfern_config fingerprint length: {}",
@@ -763,18 +876,10 @@ impl BrowserRunner {
           .map(|f| f.len())
           .unwrap_or(0)
       );
-      let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
-        let _ = tm.rebuild_from_profiles(&self.profile_manager.list_profiles().unwrap_or_default());
-      });
       log::info!(
         "Successfully saved profile with process info: {}",
         updated_profile.name
       );
-
-      // Emit profiles-changed to trigger frontend to reload profiles from disk
-      if let Err(e) = events::emit_empty("profiles-changed") {
-        log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-      }
 
       log::info!(
         "Emitting profile events for successful Wayfern launch: {}",
@@ -895,15 +1000,7 @@ impl BrowserRunner {
       profile.id
     );
 
-    // Get the most up-to-date profile data
-    let profiles = self
-      .profile_manager
-      .list_profiles()
-      .map_err(|e| format!("Failed to list profiles in launch_or_open_url: {e}"))?;
-    let updated_profile = profiles
-      .into_iter()
-      .find(|p| p.id == profile.id)
-      .unwrap_or_else(|| profile.clone());
+    let updated_profile = load_latest_profile(self.profile_manager, profile)?;
 
     log::info!(
       "Checking browser status for profile: {} (ID: {})",
@@ -917,15 +1014,8 @@ impl BrowserRunner {
       .await
       .map_err(|e| format!("Failed to check browser status: {e}"))?;
 
-    // Get the updated profile again after status check (PID might have been updated)
-    let profiles = self
-      .profile_manager
-      .list_profiles()
-      .map_err(|e| format!("Failed to list profiles after status check: {e}"))?;
-    let final_profile = profiles
-      .into_iter()
-      .find(|p| p.id == profile.id)
-      .unwrap_or_else(|| updated_profile.clone());
+    // Reload after the status check because it may have updated the PID.
+    let final_profile = load_latest_profile(self.profile_manager, &updated_profile)?;
 
     log::info!(
       "Browser status check: running={is_running}, URL requested={}, PID present={}",
@@ -998,10 +1088,14 @@ impl BrowserRunner {
     app_handle: tauri::AppHandle,
     profile: &BrowserProfile,
   ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-    self
+    let is_running = self
       .profile_manager
       .check_browser_status(app_handle, profile)
-      .await
+      .await?;
+    if is_running {
+      self.running_profile_watch.register(&profile.id.to_string());
+    }
+    Ok(is_running)
   }
 
   pub async fn kill_browser_process(
@@ -1029,9 +1123,15 @@ impl BrowserRunner {
       return Ok(());
     }
 
-    self
+    let result = self
       .kill_browser_process_unlocked(app_handle, &current_profile)
-      .await
+      .await;
+    if result.is_ok() {
+      self
+        .running_profile_watch
+        .unregister(&current_profile.id.to_string());
+    }
+    result
   }
 
   /// Stop this profile's fleet session, if it has one. Returns whether it did.
@@ -1131,14 +1231,7 @@ impl BrowserRunner {
           match self.wayfern_manager.stop_wayfern(&wayfern_process.id).await {
             Ok(_) => {
               if let Some(pid) = wayfern_process.processId {
-                // Verify the process actually died by checking after a short delay
-                use tokio::time::{sleep, Duration};
-                sleep(Duration::from_millis(500)).await;
-
-                use sysinfo::{Pid, System};
-                let system = System::new_all();
-                process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-
+                process_actually_stopped = wait_for_process_exit(pid).await;
                 if process_actually_stopped {
                   log::info!(
                     "Successfully stopped Wayfern process: {} (PID: {:?}) - verified process is dead",
@@ -1151,70 +1244,16 @@ impl BrowserRunner {
                     wayfern_process.id,
                     pid
                   );
-                  // Force kill the process
-                  #[cfg(target_os = "macos")]
-                  {
-                    use crate::platform_browser;
-                    if let Err(e) = platform_browser::macos::kill_browser_process_impl(
-                      pid,
-                      Some(&profile_path_str),
-                    )
-                    .await
-                    {
-                      log::error!("Failed to force kill Wayfern process {}: {}", pid, e);
-                    } else {
-                      sleep(Duration::from_millis(500)).await;
-                      let system = System::new_all();
-                      process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                      if process_actually_stopped {
-                        log::info!(
-                          "Successfully force killed Wayfern process {} (PID: {:?})",
-                          wayfern_process.id,
-                          pid
-                        );
-                      }
-                    }
-                  }
-                  #[cfg(target_os = "linux")]
-                  {
-                    use crate::platform_browser;
-                    if let Err(e) = platform_browser::linux::kill_browser_process_impl(
-                      pid,
-                      Some(&profile_path_str),
-                    )
-                    .await
-                    {
-                      log::error!("Failed to force kill Wayfern process {}: {}", pid, e);
-                    } else {
-                      sleep(Duration::from_millis(500)).await;
-                      let system = System::new_all();
-                      process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                      if process_actually_stopped {
-                        log::info!(
-                          "Successfully force killed Wayfern process {} (PID: {:?})",
-                          wayfern_process.id,
-                          pid
-                        );
-                      }
-                    }
-                  }
-                  #[cfg(target_os = "windows")]
-                  {
-                    use crate::platform_browser;
-                    if let Err(e) = platform_browser::windows::kill_browser_process_impl(pid).await
-                    {
-                      log::error!("Failed to force kill Wayfern process {}: {}", pid, e);
-                    } else {
-                      sleep(Duration::from_millis(500)).await;
-                      let system = System::new_all();
-                      process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                      if process_actually_stopped {
-                        log::info!(
-                          "Successfully force killed Wayfern process {} (PID: {:?})",
-                          wayfern_process.id,
-                          pid
-                        );
-                      }
+                  if let Err(error) = force_kill_wayfern_process(pid, &profile_path_str).await {
+                    log::error!("Failed to force kill Wayfern process {}: {}", pid, error);
+                  } else {
+                    process_actually_stopped = wait_for_process_exit(pid).await;
+                    if process_actually_stopped {
+                      log::info!(
+                        "Successfully force killed Wayfern process {} (PID: {:?})",
+                        wayfern_process.id,
+                        pid
+                      );
                     }
                   }
                 }
@@ -1234,52 +1273,14 @@ impl BrowserRunner {
                   "Attempting force kill after stop_wayfern error for PID: {}",
                   pid
                 );
-                #[cfg(target_os = "macos")]
-                {
-                  use crate::platform_browser;
-                  if let Err(kill_err) =
-                    platform_browser::macos::kill_browser_process_impl(pid, Some(&profile_path_str))
-                      .await
-                  {
-                    log::error!("Failed to force kill Wayfern process {}: {}", pid, kill_err);
-                  } else {
-                    use tokio::time::{sleep, Duration};
-                    sleep(Duration::from_millis(500)).await;
-                    use sysinfo::{Pid, System};
-                    let system = System::new_all();
-                    process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                  }
-                }
-                #[cfg(target_os = "linux")]
-                {
-                  use crate::platform_browser;
-                  if let Err(kill_err) =
-                    platform_browser::linux::kill_browser_process_impl(pid, Some(&profile_path_str))
-                      .await
-                  {
-                    log::error!("Failed to force kill Wayfern process {}: {}", pid, kill_err);
-                  } else {
-                    use tokio::time::{sleep, Duration};
-                    sleep(Duration::from_millis(500)).await;
-                    use sysinfo::{Pid, System};
-                    let system = System::new_all();
-                    process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                  }
-                }
-                #[cfg(target_os = "windows")]
-                {
-                  use crate::platform_browser;
-                  if let Err(kill_err) =
-                    platform_browser::windows::kill_browser_process_impl(pid).await
-                  {
-                    log::error!("Failed to force kill Wayfern process {}: {}", pid, kill_err);
-                  } else {
-                    use tokio::time::{sleep, Duration};
-                    sleep(Duration::from_millis(500)).await;
-                    use sysinfo::{Pid, System};
-                    let system = System::new_all();
-                    process_actually_stopped = system.process(Pid::from(pid as usize)).is_none();
-                  }
+                if let Err(kill_error) = force_kill_wayfern_process(pid, &profile_path_str).await {
+                  log::error!(
+                    "Failed to force kill Wayfern process {}: {}",
+                    pid,
+                    kill_error
+                  );
+                } else {
+                  process_actually_stopped = wait_for_process_exit(pid).await;
                 }
               }
             }
@@ -1467,15 +1468,10 @@ impl BrowserRunner {
     url: String,
     gate: crate::launch_gate::FingerprintGate,
   ) -> Result<(), String> {
-    // Get the profile by name
-    let profiles = self
+    let profile = self
       .profile_manager
-      .list_profiles()
-      .map_err(|e| format!("Failed to list profiles: {e}"))?;
-    let profile = profiles
-      .into_iter()
-      .find(|p| p.id.to_string() == profile_id)
-      .ok_or_else(|| format!("Profile '{profile_id}' not found"))?;
+      .load_profile(&profile_id)
+      .map_err(|_| format!("Profile '{profile_id}' not found"))?;
     let _profile_launch_guard = lock_profile_launch(&profile.id.to_string()).await;
 
     // A profile already open on the leased fleet is driven, not launched. This
@@ -1608,7 +1604,7 @@ impl LaunchOptions {
 /// while someone is typing in it, and `mark_profile_stopped` would queue a sync
 /// of a profile directory being written to. Hence the liveness check.
 async fn unwind_launch(profile: &BrowserProfile, acquired_team_lock: bool) {
-  if browser_is_running_for(&profile.id.to_string()) {
+  if browser_is_running_for(&profile.id.to_string()).await {
     log::debug!(
       "Not unwinding launch state for {}: a browser is still running for it",
       profile.name
@@ -1628,23 +1624,25 @@ async fn unwind_launch(profile: &BrowserProfile, acquired_team_lock: bool) {
   }
 }
 
-/// Whether a live browser process is recorded for this profile right now.
-/// Re-read from disk: the caller's copy predates the launch attempt.
-fn browser_is_running_for(profile_id: &str) -> bool {
-  BrowserRunner::instance()
-    .profile_manager
-    .list_profiles()
-    .ok()
-    .and_then(|profiles| {
-      profiles
-        .into_iter()
-        .find(|p| p.id.to_string() == profile_id)
-        .map(|p| {
-          p.process_id
-            .is_some_and(crate::proxy_storage::is_process_running)
-        })
-    })
-    .unwrap_or(false)
+/// Whether a live Wayfern browser owns this profile path right now.
+/// Re-read from disk: the caller's copy predates the launch attempt. A stored
+/// PID alone is not authoritative because the OS can reuse it for an unrelated
+/// process after a crash.
+async fn browser_is_running_for(profile_id: &str) -> bool {
+  let runner = BrowserRunner::instance();
+  let Ok(profile) = runner.profile_manager.load_profile(profile_id) else {
+    return false;
+  };
+  if profile.browser != "wayfern" {
+    return false;
+  }
+  let profiles_dir = runner.profile_manager.get_profiles_dir();
+  let profile_path = crate::ephemeral_dirs::get_effective_profile_path(&profile, &profiles_dir);
+  runner
+    .wayfern_manager
+    .find_wayfern_by_profile(&profile_path.to_string_lossy())
+    .await
+    .is_some()
 }
 
 pub async fn launch_browser_profile_impl(
@@ -1694,19 +1692,18 @@ pub async fn launch_browser_profile_impl(
 
   let browser_runner = BrowserRunner::instance();
 
-  // Resolve the most up-to-date profile from disk by ID to avoid using stale proxy_id/browser state
-  let profile_for_launch = match browser_runner
-    .profile_manager
-    .list_profiles()
-    .map_err(|e| format!("Failed to list profiles: {e}"))
-  {
-    Ok(profiles) => profiles
-      .into_iter()
-      .find(|p| p.id == profile.id)
-      .unwrap_or_else(|| profile.clone()),
-    Err(e) => {
+  // Resolve the most up-to-date profile from disk by ID to avoid using stale
+  // proxy/browser state. If it was deleted or corrupted while this request was
+  // waiting, unwind the state already acquired above rather than launching an
+  // orphan browser from the caller's stale snapshot.
+  let profile_for_launch = match load_latest_profile(browser_runner.profile_manager, &profile) {
+    Ok(profile) => profile,
+    Err(error) => {
       unwind_launch(&profile, acquired_team_lock).await;
-      return Err(e);
+      return Err(crate::wrap_backend_error(
+        error,
+        "Failed to reload profile before launch",
+      ));
     }
   };
 
@@ -1994,6 +1991,73 @@ mod tests {
   }
 
   #[test]
+  fn running_profile_watch_tracks_only_registered_profiles() {
+    let watch = RunningProfileWatch::default();
+
+    watch.register("profile-1");
+    watch.register("profile-2");
+    watch.register("profile-1");
+    assert_eq!(
+      watch.ids().into_iter().collect::<HashSet<_>>(),
+      HashSet::from(["profile-1".to_string(), "profile-2".to_string(),])
+    );
+
+    watch.unregister("profile-1");
+    assert_eq!(watch.ids(), vec!["profile-2".to_string()]);
+  }
+
+  #[tokio::test]
+  async fn running_check_does_not_rewrite_an_unrelated_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+
+    let target = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "target".to_string(),
+      browser: "wayfern".to_string(),
+      process_id: Some(std::process::id()),
+      host_os: Some(crate::profile::types::get_host_os()),
+      ..Default::default()
+    };
+    let unrelated = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "unrelated".to_string(),
+      browser: "wayfern".to_string(),
+      host_os: Some("android".to_string()),
+      ..Default::default()
+    };
+    manager.save_profile(&target).unwrap();
+    manager.save_profile(&unrelated).unwrap();
+
+    assert!(!browser_is_running_for(&target.id.to_string()).await);
+
+    let metadata = std::fs::read_to_string(
+      manager
+        .get_profiles_dir()
+        .join(unrelated.id.to_string())
+        .join("metadata.json"),
+    )
+    .unwrap();
+    let persisted: BrowserProfile = serde_json::from_str(&metadata).unwrap();
+    assert_eq!(persisted.host_os.as_deref(), Some("android"));
+  }
+
+  #[tokio::test]
+  async fn process_exit_wait_polls_until_the_pid_is_dead() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let checks = AtomicUsize::new(0);
+    let stopped = wait_for_process_exit_with(Duration::from_millis(100), || {
+      checks.fetch_add(1, Ordering::SeqCst) < 2
+    })
+    .await;
+
+    assert!(stopped);
+    assert_eq!(checks.load(Ordering::SeqCst), 3);
+  }
+
+  #[test]
   fn stopping_uses_latest_profile_metadata_from_disk() {
     let temp = TempDir::new().unwrap();
     let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
@@ -2016,6 +2080,29 @@ mod tests {
 
     assert_eq!(fingerprint["timezone"], "America/Los_Angeles");
     assert_eq!(loaded.process_id, Some(42));
+  }
+
+  #[test]
+  fn deleted_profile_is_not_loaded_from_a_stale_launch_snapshot() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let requested = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "deleted before launch".to_string(),
+      browser: "wayfern".to_string(),
+      ..Default::default()
+    };
+    manager.save_profile(&requested).unwrap();
+    std::fs::remove_file(
+      manager
+        .get_profiles_dir()
+        .join(requested.id.to_string())
+        .join("metadata.json"),
+    )
+    .unwrap();
+
+    assert!(load_latest_profile(manager, &requested).is_err());
   }
 
   #[test]

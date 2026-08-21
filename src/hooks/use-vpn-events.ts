@@ -1,8 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import i18n from "@/i18n";
-import type { VpnConfig } from "@/types";
+import { updateAssignmentUsage } from "@/lib/profile-event-state";
+import type { BrowserProfile, VpnConfig } from "@/types";
 
 /**
  * Custom hook to manage VPN-related state and listen for backend events.
@@ -14,18 +15,42 @@ export function useVpnEvents() {
   const [vpnUsage, setVpnUsage] = useState<Record<string, number>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const profileAssignments = useRef<Record<string, string | undefined>>({});
+  const assignmentVersions = useRef(new Map<string, number>());
+  const usageLoadVersion = useRef(0);
 
   const loadVpnUsage = useCallback(async () => {
+    const loadVersion = ++usageLoadVersion.current;
+    const versionsAtStart = new Map(assignmentVersions.current);
     try {
-      const profiles = await invoke<{ vpn_id?: string }[]>(
+      const profiles = await invoke<{ id: string; vpn_id?: string }[]>(
         "list_browser_profiles",
       );
-      const counts: Record<string, number> = {};
+      if (loadVersion !== usageLoadVersion.current) return;
+      const assignments: Record<string, string | undefined> = {};
       for (const p of profiles) {
-        if (p.vpn_id) counts[p.vpn_id] = (counts[p.vpn_id] ?? 0) + 1;
+        assignments[p.id] = p.vpn_id;
       }
+      for (const [profileId, assignmentId] of Object.entries(
+        profileAssignments.current,
+      )) {
+        if (
+          (assignmentVersions.current.get(profileId) ?? 0) >
+          (versionsAtStart.get(profileId) ?? 0)
+        ) {
+          assignments[profileId] = assignmentId;
+        }
+      }
+      const counts: Record<string, number> = {};
+      for (const assignmentId of Object.values(assignments)) {
+        if (assignmentId) {
+          counts[assignmentId] = (counts[assignmentId] ?? 0) + 1;
+        }
+      }
+      profileAssignments.current = assignments;
       setVpnUsage(counts);
     } catch (err) {
+      if (loadVersion !== usageLoadVersion.current) return;
       console.error("Failed to load VPN usage:", err);
     }
   }, []);
@@ -51,11 +76,10 @@ export function useVpnEvents() {
   useEffect(() => {
     let vpnConfigsUnlisten: (() => void) | undefined;
     let profilesUnlisten: (() => void) | undefined;
+    let profileUpdatedUnlisten: (() => void) | undefined;
 
     const setupListeners = async () => {
       try {
-        await loadVpnConfigs();
-
         vpnConfigsUnlisten = await listen("vpn-configs-changed", () => {
           void loadVpnConfigs();
         });
@@ -63,6 +87,33 @@ export function useVpnEvents() {
         profilesUnlisten = await listen("profiles-changed", () => {
           void loadVpnUsage();
         });
+
+        profileUpdatedUnlisten = await listen<BrowserProfile>(
+          "profile-updated",
+          (event) => {
+            const previousAssignments = profileAssignments.current;
+            profileAssignments.current = {
+              ...previousAssignments,
+              [event.payload.id]: event.payload.vpn_id,
+            };
+            assignmentVersions.current.set(
+              event.payload.id,
+              (assignmentVersions.current.get(event.payload.id) ?? 0) + 1,
+            );
+            setVpnUsage((usage) => {
+              const next = updateAssignmentUsage(
+                { assignments: previousAssignments, usage },
+                event.payload.id,
+                event.payload.vpn_id,
+              );
+              return next.usage;
+            });
+          },
+        );
+
+        // Subscribe before loading so profile assignment changes cannot be
+        // missed while the initial usage snapshot is in flight.
+        await loadVpnConfigs();
       } catch (err) {
         console.error("Failed to setup VPN event listeners:", err);
         setError(
@@ -80,6 +131,7 @@ export function useVpnEvents() {
     return () => {
       if (vpnConfigsUnlisten) vpnConfigsUnlisten();
       if (profilesUnlisten) profilesUnlisten();
+      if (profileUpdatedUnlisten) profileUpdatedUnlisten();
     };
   }, [loadVpnConfigs, loadVpnUsage]);
 

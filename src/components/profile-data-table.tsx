@@ -5,6 +5,7 @@ import {
   flexRender,
   getCoreRowModel,
   getSortedRowModel,
+  type Row,
   type RowData,
   type RowSelectionState,
   type SortingState,
@@ -104,7 +105,6 @@ import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { cookieBotScopeFor, useCookieBot } from "@/hooks/use-cookie-bot";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useRemoteHandoff } from "@/hooks/use-remote-handoff";
-import { useScrollFade } from "@/hooks/use-scroll-fade";
 import { useTableSorting } from "@/hooks/use-table-sorting";
 import { useTeamLocks } from "@/hooks/use-team-locks";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
@@ -124,11 +124,17 @@ import {
 import { DNS_BLOCKLIST_LEVELS } from "@/lib/dns-blocklist-levels";
 import { canUseCookieBot } from "@/lib/entitlements";
 import { formatRelativeTime } from "@/lib/flag-utils";
-import type { RemoteHandoffState } from "@/lib/remote-sessions";
+import {
+  createProfileRuntimeStore,
+  type ProfileRuntimeSnapshot,
+  type ProfileRuntimeSnapshotMap,
+  type ProfileRuntimeStore,
+} from "@/lib/profile-runtime-store";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import {
+  createTrafficSnapshotStore,
   shouldPollTraffic,
-  trafficSnapshotsEqual,
+  type TrafficSnapshotStore,
 } from "@/lib/traffic-snapshots";
 import { cn } from "@/lib/utils";
 import type {
@@ -170,16 +176,12 @@ declare module "@tanstack/react-table" {
 interface TableMeta {
   t: (key: string, options?: Record<string, unknown>) => string;
   selectedProfiles: string[];
-  selectableCount: number;
   showCheckboxes: boolean;
   isClient: boolean;
-  runningProfiles: Set<string>;
-  launchingProfiles: Set<string>;
-  stoppingProfiles: Set<string>;
-  isUpdating: (browser: string) => boolean;
-  browserState: ReturnType<typeof useBrowserState>;
-  /** All profiles — used for proxy occupancy / shared-IP badges (DON). */
-  profiles: BrowserProfile[];
+  runtimeStore: ProfileRuntimeStore;
+  browserStateRef: { current: ReturnType<typeof useBrowserState> };
+  getSelectableCount: () => number;
+  getProxyOccupancy: (proxyId: string) => number;
 
   // Tags editor state
   tagsOverrides: Record<string, string[]>;
@@ -260,11 +262,10 @@ interface TableMeta {
   onOpenCookieManagement?: (profile: BrowserProfile) => void;
 
   // Traffic snapshots (lightweight real-time data)
-  trafficSnapshots: Record<string, TrafficSnapshot>;
+  trafficSnapshotStore: TrafficSnapshotStore;
   onOpenTrafficDialog?: (profileId: string) => void;
 
   // Sync
-  syncStatuses: Record<string, { status: string; error?: string }>;
   onOpenProfileSyncDialog?: (profile: BrowserProfile) => void;
   onToggleProfileSync?: (profile: BrowserProfile) => void;
   crossOsUnlocked?: boolean;
@@ -279,27 +280,6 @@ interface TableMeta {
     country: LocationItem,
   ) => Promise<void>;
 
-  // Team locks
-  isProfileLockedByAnother: (profileId: string) => boolean;
-  getProfileLockEmail: (profileId: string) => string | undefined;
-
-  // Remote execution.
-  //
-  // `getRemoteHandoff` is the authoritative answer to "can this be opened
-  // here", read from the same store the backend gate reads. The team-lock cache
-  // above cannot serve it: it refreshes on a 30-second poll and says nothing at
-  // all about a session that has finished but whose work has not been pulled
-  // back yet.
-  getRemoteHandoff: (profileId: string) => RemoteHandoffState | null;
-
-  // Synchronizer
-  getProfileSyncInfo: (profileId: string) =>
-    | {
-        session: SyncSessionInfo;
-        isLeader: boolean;
-        failedAtUrl: string | null;
-      }
-    | undefined;
   onLaunchWithSync: (profile: BrowserProfile) => void;
 
   // Cookie Bot
@@ -323,6 +303,87 @@ interface TableMeta {
    */
   onBotFix: ((profile: BrowserProfile, fix: PreflightFix) => void) | null;
 }
+
+const EMPTY_RUNTIME_SNAPSHOT: ProfileRuntimeSnapshot = {
+  isRunning: false,
+  isLaunching: false,
+  isStopping: false,
+  isLockedByAnother: false,
+  remoteHandoff: null,
+};
+
+function runtimeSnapshot(
+  store: ProfileRuntimeStore,
+  profileId: string,
+): ProfileRuntimeSnapshot {
+  return store.getSnapshot(profileId) ?? EMPTY_RUNTIME_SNAPSHOT;
+}
+
+interface MemoizedProfileRowProps {
+  row: Row<BrowserProfile>;
+  runtimeStore: ProfileRuntimeStore;
+  metaVersion: TableMeta;
+  visibleColumnsVersion: string;
+  title?: string;
+  rowHeight: number;
+  columnWidth: (id: string, sizePx: number) => string;
+}
+
+const MemoizedProfileRow = React.memo(
+  function MemoizedProfileRow({
+    row,
+    runtimeStore,
+    title,
+    rowHeight,
+    columnWidth,
+  }: MemoizedProfileRowProps) {
+    const subscribe = React.useCallback(
+      (listener: () => void) => runtimeStore.subscribe(row.id, listener),
+      [row.id, runtimeStore],
+    );
+    const getSnapshot = React.useCallback(
+      () => runtimeStore.getSnapshot(row.id),
+      [row.id, runtimeStore],
+    );
+    React.useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+
+    const rowIsCrossOs = isCrossOsProfile(row.original);
+    return (
+      <TableRow
+        data-state={row.getIsSelected() && "selected"}
+        title={title}
+        style={{ height: `${rowHeight}px` }}
+        className={cn(
+          "overflow-visible border-0! hover:bg-muted",
+          rowIsCrossOs && "opacity-60",
+        )}
+      >
+        {row.getVisibleCells().map((cell) => (
+          <TableCell
+            key={cell.id}
+            className="overflow-visible py-0"
+            style={{
+              width: cell.column.columnDef.meta?.flexWidth
+                ? undefined
+                : columnWidth(cell.column.id, cell.column.getSize()),
+            }}
+          >
+            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          </TableCell>
+        ))}
+      </TableRow>
+    );
+  },
+  (previous, next) =>
+    previous.row.id === next.row.id &&
+    previous.row.original === next.row.original &&
+    previous.runtimeStore === next.runtimeStore &&
+    previous.metaVersion === next.metaVersion &&
+    previous.visibleColumnsVersion === next.visibleColumnsVersion &&
+    previous.title === next.title &&
+    previous.rowHeight === next.rowHeight &&
+    previous.columnWidth === next.columnWidth,
+);
 
 /**
  * Below this container width the bot column keeps its state mark but drops the
@@ -961,6 +1022,43 @@ const OverflowTooltipText = React.memo<{
 
 OverflowTooltipText.displayName = "OverflowTooltipText";
 
+const EMPTY_BANDWIDTH_DATA: never[] = [];
+
+const TrafficCell = React.memo<{
+  profileId: string;
+  store: TrafficSnapshotStore;
+  onOpen?: (profileId: string) => void;
+}>(({ profileId, store, onOpen }) => {
+  const subscribe = React.useCallback(
+    (listener: () => void) => store.subscribe(profileId, listener),
+    [profileId, store],
+  );
+  const getSnapshot = React.useCallback(
+    () => store.getSnapshot(profileId),
+    [profileId, store],
+  );
+  const snapshot = React.useSyncExternalStore(
+    subscribe,
+    getSnapshot,
+    getSnapshot,
+  );
+  const currentBandwidth =
+    (snapshot?.current_bytes_sent ?? 0) +
+    (snapshot?.current_bytes_received ?? 0);
+
+  return (
+    <div className="min-w-0 overflow-hidden">
+      <BandwidthMiniChart
+        data={snapshot?.recent_bandwidth ?? EMPTY_BANDWIDTH_DATA}
+        currentBandwidth={currentBandwidth}
+        onClick={() => onOpen?.(profileId)}
+      />
+    </div>
+  );
+});
+
+TrafficCell.displayName = "TrafficCell";
+
 // Must be rendered inside a <Popover>; the tooltip shows the full assignment
 // name only when it is truncated in the cell.
 const ProxyCellTrigger = React.memo<{
@@ -1513,6 +1611,8 @@ export function ProfilesDataTable({
   onImportProfiles,
 }: ProfilesDataTableProps) {
   const { t } = useTranslation();
+  const profilesRef = React.useRef(profiles);
+  profilesRef.current = profiles;
   const { getTableSorting, updateSorting, isLoaded } = useTableSorting();
   const [sorting, setSorting] = React.useState<SortingState>([]);
 
@@ -1683,9 +1783,14 @@ export function ProfilesDataTable({
   const [openNoteEditorFor, setOpenNoteEditorFor] = React.useState<
     string | null
   >(null);
-  const [trafficSnapshots, setTrafficSnapshots] = React.useState<
-    Record<string, TrafficSnapshot>
-  >({});
+  const trafficSnapshotStore = React.useMemo(
+    () => createTrafficSnapshotStore(),
+    [],
+  );
+  const profileRuntimeStore = React.useMemo(
+    () => createProfileRuntimeStore(),
+    [],
+  );
   const [trafficDocumentVisible, setTrafficDocumentVisible] =
     React.useState(true);
   const [trafficWindowFocused, setTrafficWindowFocused] = React.useState(true);
@@ -1791,7 +1896,6 @@ export function ProfilesDataTable({
         });
         setProxyOverrides((prev) => ({ ...prev, [profileId]: proxyId }));
         setVpnOverrides((prev) => ({ ...prev, [profileId]: null }));
-        await emit("profile-updated");
       } catch (error) {
         console.error("Failed to update proxy settings:", error);
       } finally {
@@ -1810,7 +1914,6 @@ export function ProfilesDataTable({
         });
         setVpnOverrides((prev) => ({ ...prev, [profileId]: vpnId }));
         setProxyOverrides((prev) => ({ ...prev, [profileId]: null }));
-        await emit("profile-updated");
       } catch (error) {
         console.error("Failed to update VPN settings:", error);
       } finally {
@@ -1994,6 +2097,58 @@ export function ProfilesDataTable({
     launchingProfiles,
     stoppingProfiles,
   );
+  const browserStateRef = React.useRef(browserState);
+  browserStateRef.current = browserState;
+  const runtimeSelectionRef = React.useRef({
+    isClient: browserState.isClient,
+    runningProfiles,
+    launchingProfiles,
+    stoppingProfiles,
+  });
+  runtimeSelectionRef.current = {
+    isClient: browserState.isClient,
+    runningProfiles,
+    launchingProfiles,
+    stoppingProfiles,
+  };
+
+  const runtimeSnapshots = React.useMemo<ProfileRuntimeSnapshotMap>(() => {
+    const snapshots: ProfileRuntimeSnapshotMap = {};
+    for (const profile of profiles) {
+      const lock = getLockInfo(profile.id);
+      const syncInfo = getProfileSyncInfo?.(profile.id);
+      snapshots[profile.id] = {
+        isRunning: browserState.isClient && runningProfiles.has(profile.id),
+        isLaunching: launchingProfiles.has(profile.id),
+        isStopping: stoppingProfiles.has(profile.id),
+        syncStatus: syncStatuses[profile.id]?.status,
+        syncError: syncStatuses[profile.id]?.error,
+        isLockedByAnother: isProfileLocked(profile.id),
+        lockEmail: lock?.lockedByEmail,
+        remoteHandoff: handoffFor(profile.id),
+        syncSessionId: syncInfo?.session.id,
+        syncLeaderProfileName: syncInfo?.session.leader_profile_name,
+        isSyncLeader: syncInfo?.isLeader,
+        syncFailedAtUrl: syncInfo?.failedAtUrl,
+      };
+    }
+    return snapshots;
+  }, [
+    browserState.isClient,
+    getLockInfo,
+    getProfileSyncInfo,
+    handoffFor,
+    isProfileLocked,
+    launchingProfiles,
+    profiles,
+    runningProfiles,
+    stoppingProfiles,
+    syncStatuses,
+  ]);
+
+  React.useLayoutEffect(() => {
+    profileRuntimeStore.replace(runtimeSnapshots);
+  }, [profileRuntimeStore, runtimeSnapshots]);
 
   // Listen for sync status events
   React.useEffect(() => {
@@ -2078,9 +2233,7 @@ export function ProfilesDataTable({
     if (!browserState.isClient) return;
 
     if (runningCount === 0) {
-      setTrafficSnapshots((current) =>
-        trafficSnapshotsEqual(current, {}) ? current : {},
-      );
+      trafficSnapshotStore.replace({});
       return;
     }
     if (
@@ -2113,11 +2266,7 @@ export function ProfilesDataTable({
           }
         }
         if (!disposed) {
-          setTrafficSnapshots((current) =>
-            trafficSnapshotsEqual(current, newSnapshots)
-              ? current
-              : newSnapshots,
-          );
+          trafficSnapshotStore.replace(newSnapshots);
         }
       } catch (error) {
         console.error("Failed to fetch traffic snapshots:", error);
@@ -2139,29 +2288,9 @@ export function ProfilesDataTable({
     runningCount,
     runningProfileIds,
     trafficDocumentVisible,
+    trafficSnapshotStore,
     trafficWindowFocused,
   ]);
-
-  // Clean up snapshots for profiles that are no longer running
-  React.useEffect(() => {
-    if (!browserState.isClient) return;
-
-    setTrafficSnapshots((prev) => {
-      const cleaned: Record<string, TrafficSnapshot> = {};
-      const runningSet = new Set(runningProfileIds);
-      for (const [profileId, snapshot] of Object.entries(prev)) {
-        // Only keep snapshots for profiles that are currently running
-        if (runningSet.has(profileId)) {
-          cleaned[profileId] = snapshot;
-        }
-      }
-      // Only update if something was removed
-      if (Object.keys(cleaned).length !== Object.keys(prev).length) {
-        return cleaned;
-      }
-      return prev;
-    });
-  }, [browserState.isClient, runningProfileIds]);
 
   // Clear launching/stopping spinners when backend reports running status changes
   React.useEffect(() => {
@@ -2353,11 +2482,11 @@ export function ProfilesDataTable({
   // Handle icon/checkbox click
   const handleIconClick = React.useCallback(
     (profileId: string) => {
-      const profile = profiles.find((p) => p.id === profileId);
+      const profile = profilesRef.current.find((p) => p.id === profileId);
       if (!profile) return;
 
       // Prevent selection of profiles whose browsers are updating
-      if (!browserState.canSelectProfile(profile)) {
+      if (!browserStateRef.current.canSelectProfile(profile)) {
         return;
       }
 
@@ -2376,7 +2505,7 @@ export function ProfilesDataTable({
 
       onSelectedProfilesChange(Array.from(newSet));
     },
-    [profiles, browserState, onSelectedProfilesChange, selectedProfiles],
+    [onSelectedProfilesChange, selectedProfiles],
   );
 
   React.useEffect(() => {
@@ -2408,14 +2537,15 @@ export function ProfilesDataTable({
   // Handle select all checkbox
   const handleToggleAll = React.useCallback(
     (checked: boolean) => {
+      const runtime = runtimeSelectionRef.current;
       const newSet = checked
         ? new Set(
-            profiles
+            profilesRef.current
               .filter((profile) => {
                 const isRunning =
-                  browserState.isClient && runningProfiles.has(profile.id);
-                const isLaunching = launchingProfiles.has(profile.id);
-                const isStopping = stoppingProfiles.has(profile.id);
+                  runtime.isClient && runtime.runningProfiles.has(profile.id);
+                const isLaunching = runtime.launchingProfiles.has(profile.id);
+                const isStopping = runtime.stoppingProfiles.has(profile.id);
                 return !isRunning && !isLaunching && !isStopping;
               })
               .map((profile) => profile.id),
@@ -2425,14 +2555,7 @@ export function ProfilesDataTable({
       setShowCheckboxes(checked);
       onSelectedProfilesChange(Array.from(newSet));
     },
-    [
-      profiles,
-      onSelectedProfilesChange,
-      browserState.isClient,
-      runningProfiles,
-      launchingProfiles,
-      stoppingProfiles,
-    ],
+    [onSelectedProfilesChange],
   );
 
   // Memoize selectableProfiles calculation
@@ -2451,21 +2574,43 @@ export function ProfilesDataTable({
     launchingProfiles,
     stoppingProfiles,
   ]);
+  const selectableCountRef = React.useRef(selectableProfiles.length);
+  selectableCountRef.current = selectableProfiles.length;
+  const getSelectableCount = React.useCallback(
+    () => selectableCountRef.current,
+    [],
+  );
+  const proxyOccupancyRef = React.useRef(new Map<string, number>());
+  const proxyOccupancy = new Map<string, number>();
+  for (const profile of profiles) {
+    if (profile.proxy_id) {
+      proxyOccupancy.set(
+        profile.proxy_id,
+        (proxyOccupancy.get(profile.proxy_id) ?? 0) + 1,
+      );
+    }
+  }
+  proxyOccupancyRef.current = proxyOccupancy;
+  const getProxyOccupancy = React.useCallback(
+    (proxyId: string) => proxyOccupancyRef.current.get(proxyId) ?? 0,
+    [],
+  );
+  const openTrafficDialog = React.useCallback((profileId: string) => {
+    const profile = profilesRef.current.find((item) => item.id === profileId);
+    setTrafficDialogProfile({ id: profileId, name: profile?.name });
+  }, []);
 
   // Build table meta from volatile state so columns can stay stable
   const tableMeta = React.useMemo<TableMeta>(
     () => ({
       t,
       selectedProfiles,
-      selectableCount: selectableProfiles.length,
       showCheckboxes,
       isClient: browserState.isClient,
-      runningProfiles,
-      launchingProfiles,
-      stoppingProfiles,
-      isUpdating,
-      browserState,
-      profiles,
+      runtimeStore: profileRuntimeStore,
+      browserStateRef,
+      getSelectableCount,
+      getProxyOccupancy,
 
       // Tags editor state
       tagsOverrides,
@@ -2534,14 +2679,10 @@ export function ProfilesDataTable({
       onOpenCookieManagement,
 
       // Traffic snapshots (lightweight real-time data)
-      trafficSnapshots,
-      onOpenTrafficDialog: (profileId: string) => {
-        const profile = profiles.find((p) => p.id === profileId);
-        setTrafficDialogProfile({ id: profileId, name: profile?.name });
-      },
+      trafficSnapshotStore,
+      onOpenTrafficDialog: openTrafficDialog,
 
       // Sync
-      syncStatuses,
       onOpenProfileSyncDialog,
       onToggleProfileSync,
       crossOsUnlocked,
@@ -2553,16 +2694,6 @@ export function ProfilesDataTable({
       loadCountries,
       handleCreateCountryProxy,
 
-      // Team locks
-      isProfileLockedByAnother: isProfileLocked,
-      getProfileLockEmail: (profileId: string) =>
-        getLockInfo(profileId)?.lockedByEmail,
-
-      // Remote execution
-      getRemoteHandoff: handoffFor,
-
-      // Synchronizer
-      getProfileSyncInfo: getProfileSyncInfo ?? (() => undefined),
       onLaunchWithSync:
         onLaunchWithSync ??
         (() => {
@@ -2589,15 +2720,11 @@ export function ProfilesDataTable({
     [
       t,
       selectedProfiles,
-      selectableProfiles.length,
       showCheckboxes,
       browserState.isClient,
-      runningProfiles,
-      launchingProfiles,
-      stoppingProfiles,
-      isUpdating,
-      browserState,
-      profiles,
+      profileRuntimeStore,
+      getSelectableCount,
+      getProxyOccupancy,
       tagsOverrides,
       allTags,
       openTagsEditorFor,
@@ -2621,7 +2748,8 @@ export function ProfilesDataTable({
       profileToRename,
       newProfileName,
       isRenamingSaving,
-      trafficSnapshots,
+      trafficSnapshotStore,
+      openTrafficDialog,
       renameError,
       onKillProfile,
       onLaunchProfile,
@@ -2630,7 +2758,6 @@ export function ProfilesDataTable({
       onConfigureWayfern,
       onCopyCookiesToProfile,
       onOpenCookieManagement,
-      syncStatuses,
       onOpenProfileSyncDialog,
       onToggleProfileSync,
       crossOsUnlocked,
@@ -2638,10 +2765,6 @@ export function ProfilesDataTable({
       countries,
       loadCountries,
       handleCreateCountryProxy,
-      isProfileLocked,
-      getLockInfo,
-      handoffFor,
-      getProfileSyncInfo,
       onLaunchWithSync,
       cookieBotUnlocked,
       containerWidth,
@@ -2662,12 +2785,13 @@ export function ProfilesDataTable({
         id: "select",
         header: ({ table }) => {
           const meta = table.options.meta as TableMeta;
+          const selectableCount = meta.getSelectableCount();
           return (
             <span>
               <Checkbox
                 checked={
-                  meta.selectedProfiles.length === meta.selectableCount &&
-                  meta.selectableCount !== 0
+                  meta.selectedProfiles.length === selectableCount &&
+                  selectableCount !== 0
                 }
                 onCheckedChange={(value) => {
                   meta.handleToggleAll(!!value);
@@ -2686,10 +2810,10 @@ export function ProfilesDataTable({
           const isCrossOs = isCrossOsProfile(profile);
 
           const isSelected = meta.isProfileSelected(profile.id);
-          const isRunning =
-            meta.isClient && meta.runningProfiles.has(profile.id);
-          const isLaunching = meta.launchingProfiles.has(profile.id);
-          const isStopping = meta.stoppingProfiles.has(profile.id);
+          const runtime = runtimeSnapshot(meta.runtimeStore, profile.id);
+          const isRunning = meta.isClient && runtime.isRunning;
+          const isLaunching = runtime.isLaunching;
+          const isStopping = runtime.isStopping;
           const isDisabled = isRunning || isLaunching || isStopping;
 
           // Cross-OS profiles: show OS icon when checkboxes aren't visible, show checkbox when they are
@@ -2842,7 +2966,8 @@ export function ProfilesDataTable({
         cell: ({ row, table }) => {
           const meta = table.options.meta as TableMeta;
           const profile = row.original;
-          const handoff = meta.getRemoteHandoff(profile.id);
+          const runtime = runtimeSnapshot(meta.runtimeStore, profile.id);
+          const handoff = runtime.remoteHandoff;
           // A profile open on the fleet IS running, and the button has to say
           // so: it is the control that stops it, and stopping now reaches the
           // remote browser rather than looking for a local process that was
@@ -2850,29 +2975,28 @@ export function ProfilesDataTable({
           const isRunningRemotely = handoff === "running";
           const isPendingRemotePull = handoff === "pending_sync";
           const isRunning =
-            (meta.isClient && meta.runningProfiles.has(profile.id)) ||
-            isRunningRemotely;
-          const isLaunching = meta.launchingProfiles.has(profile.id);
-          const isStopping = meta.stoppingProfiles.has(profile.id);
-          const isLockedByAnother = meta.isProfileLockedByAnother(profile.id);
-          const isSyncing = meta.syncStatuses[profile.id]?.status === "syncing";
+            (meta.isClient && runtime.isRunning) || isRunningRemotely;
+          const isLaunching = runtime.isLaunching;
+          const isStopping = runtime.isStopping;
+          const isLockedByAnother = runtime.isLockedByAnother;
+          const isSyncing = runtime.syncStatus === "syncing";
           // A remote session holds the profile lock under its own holder id, so
           // `isLockedByAnother` is true for the user's OWN fleet session. That
           // must not disable the control that stops it.
           const canLaunch = isRunningRemotely
             ? true
-            : meta.browserState.canLaunchProfile(profile) &&
+            : meta.browserStateRef.current.canLaunchProfile(profile) &&
               !isPendingRemotePull &&
               !isLockedByAnother &&
               !isSyncing;
-          const lockEmail = meta.getProfileLockEmail(profile.id);
+          const lockEmail = runtime.lockEmail;
           const tooltipContent = isRunningRemotely
             ? meta.t("profiles.remote.runningTooltip")
             : isPendingRemotePull
               ? meta.t("profiles.remote.pendingSyncTooltip")
               : isLockedByAnother
                 ? meta.t("sync.team.cannotLaunchLocked", { email: lockEmail })
-                : meta.browserState.getLaunchTooltipContent(profile);
+                : meta.browserStateRef.current.getLaunchTooltipContent(profile);
 
           const handleProfileStop = async (profile: BrowserProfile) => {
             meta.setStoppingProfiles((prev: Set<string>) =>
@@ -2907,33 +3031,32 @@ export function ProfilesDataTable({
             }
           };
 
-          const syncInfo = meta.getProfileSyncInfo(profile.id);
-          const isLeader = syncInfo?.isLeader === true;
-          const isFollower = syncInfo?.isLeader === false;
-          const isDesynced = isFollower && syncInfo.failedAtUrl != null;
+          const isLeader = runtime.isSyncLeader === true;
+          const isFollower = runtime.isSyncLeader === false;
+          const isDesynced = isFollower && runtime.syncFailedAtUrl != null;
           const stopTooltip = isLeader
             ? meta.t("profiles.synchronizer.stopLeader")
             : isFollower
               ? meta.t("profiles.synchronizer.stopFollower", {
-                  leaderName: syncInfo.session.leader_profile_name ?? "",
+                  leaderName: runtime.syncLeaderProfileName ?? "",
                 })
               : tooltipContent;
 
           const handleStop = async () => {
-            if (isLeader && syncInfo) {
+            if (isLeader && runtime.syncSessionId) {
               // Stop leader: invoke stop_sync_session which kills leader + all followers
               try {
                 await invoke("stop_sync_session", {
-                  sessionId: syncInfo.session.id,
+                  sessionId: runtime.syncSessionId,
                 });
               } catch (error) {
                 console.error("Failed to stop sync session:", error);
               }
-            } else if (isFollower && syncInfo) {
+            } else if (isFollower && runtime.syncSessionId) {
               // Stop follower: remove from session
               try {
                 await invoke("remove_sync_follower", {
-                  sessionId: syncInfo.session.id,
+                  sessionId: runtime.syncSessionId,
                   followerProfileId: profile.id,
                 });
               } catch (error) {
@@ -2961,7 +3084,7 @@ export function ProfilesDataTable({
                   </TooltipTrigger>
                   <TooltipContent>
                     {meta.t("profiles.synchronizer.desyncedTooltip", {
-                      url: syncInfo?.failedAtUrl ?? "",
+                      url: runtime.syncFailedAtUrl ?? "",
                     })}
                   </TooltipContent>
                 </Tooltip>
@@ -3133,10 +3256,11 @@ export function ProfilesDataTable({
           const profile = row.original as BrowserProfile;
           const rawName: string = row.getValue("name");
           const name = getBrowserDisplayName(rawName);
+          const runtime = runtimeSnapshot(meta.runtimeStore, profile.id);
           const isRuntimeLocked =
-            (meta.isClient && meta.runningProfiles.has(profile.id)) ||
-            meta.launchingProfiles.has(profile.id) ||
-            meta.stoppingProfiles.has(profile.id);
+            (meta.isClient && runtime.isRunning) ||
+            runtime.isLaunching ||
+            runtime.isStopping;
           const isCrossOsBlocked = isCrossOsProfile(profile);
           const isEditing =
             meta.profileToRename?.id === profile.id &&
@@ -3192,8 +3316,8 @@ export function ProfilesDataTable({
             />
           );
 
-          const lockedEmail = meta.getProfileLockEmail(profile.id);
-          const isLocked = meta.isProfileLockedByAnother(profile.id);
+          const lockedEmail = runtime.lockEmail;
+          const isLocked = runtime.isLockedByAnother;
           const nameControl = isRuntimeLocked ? (
             <div className="mr-auto h-6 max-w-full min-w-0 cursor-text overflow-hidden rounded px-2 py-1 text-left select-text">
               {display}
@@ -3308,10 +3432,10 @@ export function ProfilesDataTable({
           const profile = row.original;
           const isCrossOs = isCrossOsProfile(profile);
           const isCrossOsBlocked = isCrossOs;
-          const isRunning =
-            meta.isClient && meta.runningProfiles.has(profile.id);
-          const isLaunching = meta.launchingProfiles.has(profile.id);
-          const isStopping = meta.stoppingProfiles.has(profile.id);
+          const runtime = runtimeSnapshot(meta.runtimeStore, profile.id);
+          const isRunning = meta.isClient && runtime.isRunning;
+          const isLaunching = runtime.isLaunching;
+          const isStopping = runtime.isStopping;
           const isDisabled =
             isRunning || isLaunching || isStopping || isCrossOsBlocked;
 
@@ -3347,32 +3471,20 @@ export function ProfilesDataTable({
           // DON: show when this residential proxy is shared across profiles
           let occupancyBadge: string | null = null;
           if (effectiveProxyId && !effectiveVpn) {
-            const shareCount = meta.profiles.filter(
-              (p) => p.proxy_id === effectiveProxyId,
-            ).length;
+            const shareCount = meta.getProxyOccupancy(effectiveProxyId);
             if (shareCount > 1) {
               occupancyBadge = `shared×${shareCount}`;
             }
           }
 
           // When profile is running, show bandwidth chart instead of proxy selector
-          if (isRunning && meta.trafficSnapshots) {
-            const snapshot = meta.trafficSnapshots[profile.id];
-            const bandwidthData = snapshot?.recent_bandwidth
-              ? [...snapshot.recent_bandwidth]
-              : [];
-            const currentBandwidth =
-              (snapshot?.current_bytes_sent ?? 0) +
-              (snapshot?.current_bytes_received ?? 0);
-
+          if (isRunning) {
             return (
-              <div className="min-w-0 overflow-hidden">
-                <BandwidthMiniChart
-                  data={bandwidthData}
-                  currentBandwidth={currentBandwidth}
-                  onClick={() => meta.onOpenTrafficDialog?.(profile.id)}
-                />
-              </div>
+              <TrafficCell
+                profileId={profile.id}
+                store={meta.trafficSnapshotStore}
+                onOpen={meta.onOpenTrafficDialog}
+              />
             );
           }
 
@@ -3600,8 +3712,8 @@ export function ProfilesDataTable({
         cell: ({ row, table }) => {
           const profile = row.original;
           const meta = table.options.meta as TableMeta;
-          const syncEntry = meta.syncStatuses[profile.id];
-          const liveStatus = syncEntry?.status as
+          const runtime = runtimeSnapshot(meta.runtimeStore, profile.id);
+          const liveStatus = runtime.syncStatus as
             | "syncing"
             | "waiting"
             | "synced"
@@ -3613,7 +3725,7 @@ export function ProfilesDataTable({
             profile,
             liveStatus,
             meta.t,
-            syncEntry?.error,
+            runtime.syncError,
           );
           if (!dot) return null;
 
@@ -3700,6 +3812,10 @@ export function ProfilesDataTable({
     getRowId: (row) => row.id,
     meta: tableMeta,
   });
+  const visibleColumnsVersion = table
+    .getVisibleLeafColumns()
+    .map((column) => column.id)
+    .join("|");
 
   const scrollParentRef = React.useRef<HTMLDivElement | null>(null);
   const columnWidth = React.useCallback(
@@ -3726,7 +3842,6 @@ export function ProfilesDataTable({
     [containerWidth],
   );
   const sortedRows = table.getRowModel().rows;
-  useScrollFade(scrollParentRef);
 
   React.useEffect(() => {
     const el = scrollParentRef.current;
@@ -3785,20 +3900,12 @@ export function ProfilesDataTable({
         <div
           ref={scrollParentRef}
           className={cn(
-            "scroll-fade relative min-h-0 flex-1 overflow-auto",
+            "relative min-h-0 flex-1 overflow-auto",
             // Clearance for the floating selection action bar (bottom-6 +
             // ~46px tall) so the last rows can scroll out from behind it.
             // Same predicate DataTableActionBar uses for its visibility.
             table.getFilteredSelectedRowModel().rows.length > 0 && "pb-20",
           )}
-          style={
-            {
-              // Sticky table header is 32px tall (h-8); shift the top
-              // fade band below it so the header stays fully opaque and
-              // only body rows fade as they scroll past.
-              "--scroll-fade-top-offset": "32px",
-            } as React.CSSProperties
-          }
         >
           <Table className="table-fixed" containerClassName="overflow-visible">
             <TableHeader className="sticky top-0 z-10 overflow-visible bg-background [&_tr]:border-0">
@@ -3945,36 +4052,16 @@ export function ProfilesDataTable({
                         })
                       : undefined;
                     return (
-                      <TableRow
+                      <MemoizedProfileRow
                         key={row.id}
-                        data-state={row.getIsSelected() && "selected"}
+                        row={row}
+                        runtimeStore={profileRuntimeStore}
+                        metaVersion={tableMeta}
+                        visibleColumnsVersion={visibleColumnsVersion}
                         title={crossOsTitle}
-                        style={{ height: `${ROW_HEIGHT}px` }}
-                        className={cn(
-                          "overflow-visible border-0! hover:bg-muted",
-                          rowIsCrossOs && "opacity-60",
-                        )}
-                      >
-                        {row.getVisibleCells().map((cell) => (
-                          <TableCell
-                            key={cell.id}
-                            className="overflow-visible py-0"
-                            style={{
-                              width: cell.column.columnDef.meta?.flexWidth
-                                ? undefined
-                                : columnWidth(
-                                    cell.column.id,
-                                    cell.column.getSize(),
-                                  ),
-                            }}
-                          >
-                            {flexRender(
-                              cell.column.columnDef.cell,
-                              cell.getContext(),
-                            )}
-                          </TableCell>
-                        ))}
-                      </TableRow>
+                        rowHeight={ROW_HEIGHT}
+                        columnWidth={columnWidth}
+                      />
                     );
                   })}
                   {paddingBottom > 0 && (

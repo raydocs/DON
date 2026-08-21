@@ -60,6 +60,14 @@ const osLabels: Record<WayfernOS, string> = {
   ios: "iOS",
 };
 
+const fingerprintOperatingSystems: WayfernOS[] = [
+  "windows",
+  "macos",
+  "linux",
+  "android",
+  "ios",
+];
+
 const desktopDevicePresets = devicePresetCatalog.presets.filter(
   (preset) =>
     !preset.mobile && (preset.os === "windows" || preset.os === "macos"),
@@ -109,6 +117,18 @@ export function WayfernConfigForm({
     (preset) => preset.id === config.device_preset,
   );
 
+  const handleOperatingSystemChange = (value: WayfernOS) => {
+    onConfigChange("os", value);
+    onConfigChange("fingerprint", undefined);
+    if (selectedDevicePreset && selectedDevicePreset.os !== value) {
+      onConfigChange("device_preset", undefined);
+    }
+    // A preset or the previous host may have supplied a scale that is invalid
+    // for the new target. Cross-OS generation may choose its own scale; the
+    // create-form effect restores the live scale when switching back to host.
+    onConfigChange("expected_device_pixel_ratio", undefined);
+  };
+
   useEffect(() => {
     if (isCreating && typeof window !== "undefined") {
       const screenWidth = window.screen.width;
@@ -121,7 +141,10 @@ export function WayfernConfigForm({
       if (!config.screen_max_height) {
         onConfigChange("screen_max_height", screenHeight);
       }
-      if (config.expected_device_pixel_ratio == null) {
+      if (
+        config.expected_device_pixel_ratio == null &&
+        selectedOS === currentOS
+      ) {
         onConfigChange("expected_device_pixel_ratio", dpr);
       }
       if (config.randomize_fingerprint_on_launch == null) {
@@ -134,6 +157,8 @@ export function WayfernConfigForm({
     config.screen_max_height,
     config.expected_device_pixel_ratio,
     config.randomize_fingerprint_on_launch,
+    selectedOS,
+    currentOS,
     onConfigChange,
   ]);
 
@@ -281,13 +306,18 @@ export function WayfernConfigForm({
           const preset = desktopDevicePresets.find(
             (candidate) => candidate.id === value,
           );
-          onConfigChange("device_preset", value === "none" ? undefined : value);
-          if (preset) {
-            onConfigChange("os", preset.os as WayfernOS);
-            const dpr = preset.fingerprint.devicePixelRatio;
-            if (typeof dpr === "number") {
-              onConfigChange("expected_device_pixel_ratio", dpr);
-            }
+          if (!preset) {
+            onConfigChange("device_preset", undefined);
+            onConfigChange("fingerprint", undefined);
+            onConfigChange("expected_device_pixel_ratio", undefined);
+            return;
+          }
+          onConfigChange("device_preset", value);
+          onConfigChange("os", preset.os as WayfernOS);
+          onConfigChange("fingerprint", undefined);
+          const dpr = preset.fingerprint.devicePixelRatio;
+          if (typeof dpr === "number") {
+            onConfigChange("expected_device_pixel_ratio", dpr);
           }
         }}
         disabled={readOnly}
@@ -345,16 +375,14 @@ export function WayfernConfigForm({
         </div>
         <Select
           value={selectedOS}
-          onValueChange={(value: WayfernOS) => {
-            onConfigChange("os", value);
-          }}
+          onValueChange={handleOperatingSystemChange}
           disabled={readOnly}
         >
-          <SelectTrigger>
+          <SelectTrigger id="advanced-fingerprint-os">
             <SelectValue placeholder={t("fingerprint.selectOSPlaceholder")} />
           </SelectTrigger>
           <SelectContent>
-            {(["windows", "macos"] as WayfernOS[]).map((os) => {
+            {fingerprintOperatingSystems.map((os) => {
               const isDisabled = os !== currentOS && !crossOsUnlocked;
               return (
                 <SelectItem key={os} value={os} disabled={isDisabled}>
@@ -1828,18 +1856,16 @@ export function WayfernConfigForm({
               <Label>{t("fingerprint.osLabel")}</Label>
               <Select
                 value={selectedOS}
-                onValueChange={(value: WayfernOS) => {
-                  onConfigChange("os", value);
-                }}
+                onValueChange={handleOperatingSystemChange}
                 disabled={readOnly}
               >
-                <SelectTrigger>
+                <SelectTrigger id="automatic-fingerprint-os">
                   <SelectValue
                     placeholder={t("fingerprint.selectOSPlaceholder")}
                   />
                 </SelectTrigger>
                 <SelectContent>
-                  {(["windows", "macos"] as WayfernOS[]).map((os) => {
+                  {fingerprintOperatingSystems.map((os) => {
                     const isDisabled = os !== currentOS && !crossOsUnlocked;
                     return (
                       <SelectItem key={os} value={os} disabled={isDisabled}>
