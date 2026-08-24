@@ -102,6 +102,10 @@ fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
     format!("--remote-debugging-port={port}"),
     "--remote-debugging-address=127.0.0.1".to_string(),
     format!("--user-data-dir={profile_path}"),
+    format!(
+      "--profile-directory={}",
+      crate::profile_import::INITIAL_PROFILE_DIR
+    ),
     "--no-first-run".to_string(),
     "--no-default-browser-check".to_string(),
     "--disable-background-mode".to_string(),
@@ -180,13 +184,35 @@ fn contains_all_tokens(value: &str, tokens: &[String]) -> bool {
     .all(|token| value.contains(&token.to_ascii_lowercase()))
 }
 
-fn stored_fingerprint_format_mismatch(fingerprint: &serde_json::Value) -> Option<&'static str> {
+fn stored_fingerprint_compatibility_mismatch(
+  fingerprint: &serde_json::Value,
+  browser_version: &str,
+) -> Option<String> {
   let fingerprint = fingerprint.get("fingerprint").unwrap_or(fingerprint);
-  (fingerprint
+  if fingerprint
     .get("deviceProfileApplied")
     .and_then(serde_json::Value::as_bool)
-    != Some(true))
-  .then_some("fingerprint predates complete device-profile application")
+    != Some(true)
+  {
+    return Some("fingerprint predates complete device-profile application".to_string());
+  }
+
+  let major = |version: &str| version.split('.').next()?.parse::<u64>().ok();
+  let fingerprint_major = fingerprint.get("brandVersion").and_then(|version| {
+    version
+      .as_str()
+      .and_then(major)
+      .or_else(|| version.as_u64())
+  });
+  let browser_major = major(browser_version);
+  match (fingerprint_major, browser_major) {
+    (Some(fingerprint_major), Some(browser_major)) if fingerprint_major != browser_major => {
+      Some(format!(
+        "fingerprint browser major {fingerprint_major} does not match Wayfern {browser_major}"
+      ))
+    }
+    _ => None,
+  }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -730,6 +756,7 @@ impl WayfernManager {
     &self,
     app_handle: &AppHandle,
     config: &WayfernConfig,
+    browser_version: &str,
   ) -> Option<String> {
     let fingerprint_json = match config.fingerprint.as_deref().map(str::trim) {
       Some(fingerprint_json) if !fingerprint_json.is_empty() => fingerprint_json,
@@ -739,8 +766,8 @@ impl WayfernManager {
       Ok(fingerprint) => fingerprint,
       Err(error) => return Some(format!("fingerprint JSON is invalid: {error}")),
     };
-    if let Some(reason) = stored_fingerprint_format_mismatch(&fingerprint) {
-      return Some(reason.to_string());
+    if let Some(reason) = stored_fingerprint_compatibility_mismatch(&fingerprint, browser_version) {
+      return Some(reason);
     }
     WayfernConfig::fingerprint_satisfies_host_constraints(
       &fingerprint,
@@ -947,9 +974,18 @@ impl WayfernManager {
     port: u16,
   ) -> Result<Vec<CdpTarget>, Box<dyn std::error::Error + Send + Sync>> {
     let url = format!("http://127.0.0.1:{port}/json");
-    let resp = self.http_client.get(&url).send().await?;
-    let targets: Vec<CdpTarget> = resp.json().await?;
-    Ok(targets)
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+      let resp = self.http_client.get(&url).send().await?;
+      let targets: Vec<CdpTarget> = resp.json().await?;
+      let has_page = targets
+        .iter()
+        .any(|target| target.target_type == "page" && target.websocket_debugger_url.is_some());
+      if has_page || tokio::time::Instant::now() >= deadline {
+        return Ok(targets);
+      }
+      tokio::time::sleep(Duration::from_millis(100)).await;
+    }
   }
 
   async fn send_cdp_command(
@@ -2282,6 +2318,50 @@ fn hsl_to_rgb(h: f64, s: f64, l: f64) -> (u8, u8, u8) {
 mod tests {
   use super::*;
   use std::collections::HashSet;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  #[tokio::test]
+  async fn cdp_target_discovery_waits_for_the_first_page() {
+    async fn targets(
+      axum::extract::State(request_count): axum::extract::State<Arc<AtomicUsize>>,
+    ) -> axum::Json<serde_json::Value> {
+      let request = request_count.fetch_add(1, Ordering::SeqCst);
+      if request == 0 {
+        axum::Json(serde_json::json!([{
+          "type": "browser",
+          "webSocketDebuggerUrl": "ws://127.0.0.1/browser"
+        }]))
+      } else {
+        axum::Json(serde_json::json!([{
+          "type": "page",
+          "webSocketDebuggerUrl": "ws://127.0.0.1/page"
+        }]))
+      }
+    }
+
+    let request_count = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+      .route("/json", axum::routing::get(targets))
+      .with_state(request_count.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+      axum::serve(listener, app).await.unwrap();
+    });
+
+    let discovered = WayfernManager::new().get_cdp_targets(port).await.unwrap();
+    server.abort();
+
+    assert!(discovered.iter().any(|target| target.target_type == "page"));
+    assert_eq!(request_count.load(Ordering::SeqCst), 2);
+  }
+
+  #[test]
+  fn production_launch_selects_the_managed_default_profile() {
+    let args = base_wayfern_launch_args(9222, "/tmp/profile");
+
+    assert!(args.iter().any(|arg| arg == "--profile-directory=Default"));
+  }
 
   #[test]
   fn production_launch_keeps_chromium_background_throttling_enabled() {
@@ -2548,11 +2628,26 @@ mod tests {
   #[test]
   fn legacy_fingerprint_without_applied_device_profile_is_regenerated() {
     let legacy = complete_desktop_fingerprint(2.0);
-    assert!(stored_fingerprint_format_mismatch(&legacy).is_some());
+    assert!(stored_fingerprint_compatibility_mismatch(&legacy, "151.0.7922.72").is_some());
 
     let mut current = legacy;
     current["deviceProfileApplied"] = serde_json::json!(true);
-    assert_eq!(stored_fingerprint_format_mismatch(&current), None);
+    assert_eq!(
+      stored_fingerprint_compatibility_mismatch(&current, "151.0.7922.72"),
+      None
+    );
+  }
+
+  #[test]
+  fn fingerprint_from_an_older_browser_major_is_regenerated() {
+    let mut fingerprint = complete_desktop_fingerprint(2.0);
+    fingerprint["deviceProfileApplied"] = serde_json::json!(true);
+    fingerprint["brandVersion"] = serde_json::json!("150");
+
+    assert_eq!(
+      stored_fingerprint_compatibility_mismatch(&fingerprint, "151.0.7922.72"),
+      Some("fingerprint browser major 150 does not match Wayfern 151".to_string())
+    );
   }
 
   #[test]

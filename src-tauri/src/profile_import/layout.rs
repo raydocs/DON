@@ -2,10 +2,10 @@
 //!
 //! Two layout facts drive everything here:
 //!
-//! 1. Donut launches with `--user-data-dir` and no `--profile-directory`, so
-//!    Chromium reads `<user-data-dir>/Default/` (`chrome_constants.cc`
-//!    `kInitialProfile`). A source *profile* directory therefore has to be
-//!    copied one level down, not onto the root.
+//! 1. Donut launches with `--user-data-dir` and explicitly selects its managed
+//!    `Default` profile, so Chromium reads `<user-data-dir>/Default/`. A source
+//!    *profile* directory therefore has to be copied one level down, not onto
+//!    the root.
 //! 2. Network state (`Cookies`, `TransportSecurity`, …) lives in
 //!    `Default/Network/` on Windows and in `Default/` everywhere else. That
 //!    split is not cosmetic: `kTriggerNetworkDataMigration` is enabled by

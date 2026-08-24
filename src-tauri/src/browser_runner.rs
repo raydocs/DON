@@ -602,9 +602,11 @@ impl BrowserRunner {
         .as_ref()
         .and_then(|config| config.fingerprint.clone());
       let mut regenerated_geo_proxy_signature: Option<Option<String>> = None;
-      let stored_mismatch = self
-        .wayfern_manager
-        .stored_fingerprint_mismatch(&app_handle, &wayfern_config);
+      let stored_mismatch = self.wayfern_manager.stored_fingerprint_mismatch(
+        &app_handle,
+        &wayfern_config,
+        &profile.version,
+      );
       let randomize = wayfern_config.randomize_fingerprint_on_launch == Some(true);
       if let Some(reason) = stored_mismatch.as_deref() {
         log::warn!(

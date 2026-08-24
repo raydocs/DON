@@ -23,8 +23,9 @@ use layout::RejectReason;
 use report::{warning, ProfileImportReport};
 use std::path::Path;
 
-/// The profile subdirectory Chromium reads when no `--profile-directory` is
-/// passed (`chrome_constants.cc` `kInitialProfile`). Donut never passes one.
+/// The managed profile subdirectory Chromium reads. Launches select this
+/// explicitly so an accidentally created `Profile N` cannot reopen the
+/// Chromium profile picker instead of the managed identity.
 pub const INITIAL_PROFILE_DIR: &str = "Default";
 
 /// Import `source` into `dest_user_data_dir`, which becomes the new profile's
