@@ -480,10 +480,6 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "ahash",
-    "license": "Apache-2.0 OR MIT"
-  },
-  {
     "name": "aho-corasick",
     "license": "Unlicense OR MIT"
   },
@@ -546,10 +542,6 @@
   {
     "name": "aria-hidden",
     "license": "MIT"
-  },
-  {
-    "name": "arrayref",
-    "license": "BSD-2-Clause"
   },
   {
     "name": "arrayvec",
@@ -668,10 +660,6 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "bitvec",
-    "license": "MIT"
-  },
-  {
     "name": "blake2",
     "license": "Apache-2.0 OR MIT"
   },
@@ -700,14 +688,6 @@
     "license": "BSD-3-Clause"
   },
   {
-    "name": "borsh",
-    "license": "Apache-2.0 OR MIT"
-  },
-  {
-    "name": "borsh-derive",
-    "license": "Apache-2.0"
-  },
-  {
     "name": "brotli",
     "license": "BSD-3-Clause AND MIT"
   },
@@ -732,23 +712,15 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "byte-unit",
-    "license": "MIT"
-  },
-  {
     "name": "byte_string",
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "bytecheck",
-    "license": "MIT"
-  },
-  {
-    "name": "bytecheck_derive",
-    "license": "MIT"
-  },
-  {
     "name": "bytemuck",
+    "license": "Zlib OR Apache-2.0 OR MIT"
+  },
+  {
+    "name": "bytemuck_derive",
     "license": "Zlib OR Apache-2.0 OR MIT"
   },
   {
@@ -1376,10 +1348,6 @@
     "license": "MIT"
   },
   {
-    "name": "funty",
-    "license": "MIT"
-  },
-  {
     "name": "futures",
     "license": "Apache-2.0 OR MIT"
   },
@@ -1756,6 +1724,18 @@
     "license": "Unlicense OR MIT"
   },
   {
+    "name": "jiff-core",
+    "license": "Unlicense OR MIT"
+  },
+  {
+    "name": "jiff-tzdb",
+    "license": "Unlicense OR MIT"
+  },
+  {
+    "name": "jiff-tzdb-platform",
+    "license": "Unlicense OR MIT"
+  },
+  {
     "name": "js-cookie",
     "license": "MIT"
   },
@@ -1814,6 +1794,10 @@
   {
     "name": "libloading",
     "license": "ISC"
+  },
+  {
+    "name": "libm",
+    "license": "MIT"
   },
   {
     "name": "libsqlite3-sys",
@@ -2296,11 +2280,11 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "ptr_meta",
+    "name": "pulp",
     "license": "MIT"
   },
   {
-    "name": "ptr_meta_derive",
+    "name": "pulp-wasm-simd-flag",
     "license": "MIT"
   },
   {
@@ -2322,10 +2306,6 @@
   {
     "name": "quote",
     "license": "Apache-2.0 OR MIT"
-  },
-  {
-    "name": "radium",
-    "license": "MIT"
   },
   {
     "name": "radix-ui",
@@ -2350,6 +2330,10 @@
   {
     "name": "ravif",
     "license": "BSD-3-Clause"
+  },
+  {
+    "name": "raw-cpuid",
+    "license": "MIT"
   },
   {
     "name": "raw-window-handle",
@@ -2404,6 +2388,10 @@
     "license": "MIT"
   },
   {
+    "name": "reborrow",
+    "license": "MIT"
+  },
+  {
     "name": "recharts",
     "license": "MIT"
   },
@@ -2440,10 +2428,6 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "rend",
-    "license": "MIT"
-  },
-  {
     "name": "reqwest",
     "license": "Apache-2.0 OR MIT"
   },
@@ -2472,23 +2456,11 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "rkyv",
-    "license": "MIT"
-  },
-  {
-    "name": "rkyv_derive",
-    "license": "MIT"
-  },
-  {
     "name": "rusqlite",
     "license": "MIT"
   },
   {
     "name": "rust-ini",
-    "license": "MIT"
-  },
-  {
-    "name": "rust_decimal",
     "license": "MIT"
   },
   {
@@ -2541,10 +2513,6 @@
   },
   {
     "name": "screenfull",
-    "license": "MIT"
-  },
-  {
-    "name": "seahash",
     "license": "MIT"
   },
   {
@@ -2692,10 +2660,6 @@
     "license": "MIT"
   },
   {
-    "name": "simdutf8",
-    "license": "Apache-2.0 OR MIT"
-  },
-  {
     "name": "siphasher",
     "license": "Apache-2.0 OR MIT"
   },
@@ -2802,10 +2766,6 @@
   {
     "name": "tao",
     "license": "Apache-2.0"
-  },
-  {
-    "name": "tap",
-    "license": "MIT"
   },
   {
     "name": "tar",
@@ -3124,10 +3084,6 @@
     "license": "MIT"
   },
   {
-    "name": "utf8-width",
-    "license": "MIT"
-  },
-  {
     "name": "utf8_iter",
     "license": "Apache-2.0 OR MIT"
   },
@@ -3154,10 +3110,6 @@
   {
     "name": "v_frame",
     "license": "BSD-2-Clause"
-  },
-  {
-    "name": "value-bag",
-    "license": "Apache-2.0 OR MIT"
   },
   {
     "name": "victory-vendor",
@@ -3340,10 +3292,6 @@
     "license": "Apache-2.0 OR MIT"
   },
   {
-    "name": "wyz",
-    "license": "MIT"
-  },
-  {
     "name": "x11",
     "license": "MIT"
   },
@@ -3393,6 +3341,10 @@
   },
   {
     "name": "zbus_names",
+    "license": "MIT"
+  },
+  {
+    "name": "zcheapstr",
     "license": "MIT"
   },
   {
