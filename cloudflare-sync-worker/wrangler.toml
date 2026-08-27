@@ -1,5 +1,6 @@
 name = "don-sync-worker"
 main = "src/index.ts"
+account_id = "63fb9ee0f754bbe960a080bff02a22fe"
 compatibility_date = "2024-09-23"
 compatibility_flags = ["nodejs_compat"]
 
@@ -12,7 +13,7 @@ bucket_name = "don-sync-bucket"
 [[d1_databases]]
 binding = "DB"
 database_name = "don-sync-db"
-database_id = "your-d1-database-id-here"
+database_id = "91984417-cc14-4392-a96f-595143698b1c"
 
 [vars]
 # Secret token for authentication (can also be set securely via `wrangler secret put SYNC_TOKEN`)
