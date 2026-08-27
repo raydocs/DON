@@ -60,6 +60,7 @@ app.get("/readyz", (c) => {
   return c.json({
     status: "ready",
     storage: "cloudflare-r2",
+    storageEndpoint: "Cloudflare R2 (Zero Egress Fees)",
     database: "cloudflare-d1",
   });
 });
