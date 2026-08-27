@@ -115,7 +115,7 @@ app.get("/raw/get/:signature/:expiresAt/:key", async (c) => {
   headers.set("Content-Length", object.size.toString());
   if (object.customMetadata) {
     for (const [k, v] of Object.entries(object.customMetadata)) {
-      headers.set(`x-amz-meta-${k}`, v);
+      headers.set(`x-amz-meta-${k}`, String(v));
     }
   }
 
@@ -337,7 +337,7 @@ app.post("/v1/objects/delete-prefix", async (c) => {
     });
 
     if (listed.objects.length > 0) {
-      const keysToDelete = listed.objects.map((o) => o.key);
+      const keysToDelete = listed.objects.map((o: { key: string }) => o.key);
       await c.env.BUCKET.delete(keysToDelete);
       deletedCount += keysToDelete.length;
     }
@@ -379,16 +379,18 @@ app.post("/v1/objects/list", async (c) => {
     cursor: body.continuationToken || undefined,
   });
 
-  const objects: ListObjectItem[] = listed.objects.map((obj) => {
-    const relativeKey = user.prefix
-      ? obj.key.replace(new RegExp(`^${user.prefix}`), "")
-      : obj.key;
-    return {
-      key: relativeKey,
-      size: obj.size,
-      lastModified: obj.uploaded.toISOString(),
-    };
-  });
+  const objects: ListObjectItem[] = listed.objects.map(
+    (obj: { key: string; size: number; uploaded: Date }) => {
+      const relativeKey = user.prefix
+        ? obj.key.replace(new RegExp(`^${user.prefix}`), "")
+        : obj.key;
+      return {
+        key: relativeKey,
+        size: obj.size,
+        lastModified: obj.uploaded.toISOString(),
+      };
+    },
+  );
 
   const res: ListResponse = {
     objects,

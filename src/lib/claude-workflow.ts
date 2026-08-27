@@ -322,6 +322,18 @@ function fingerprintObj(
   }
 }
 
+/** Determine if a profile is specifically configured for Claude isolation. */
+export function isClaudeProfile(profile: BrowserProfile): boolean {
+  const tags = profile.tags ?? [];
+  const note = profile.note ?? "";
+  return (
+    tags.includes("claude") ||
+    tags.includes("don-isolation") ||
+    /DON Claude isolation/i.test(note) ||
+    /^Claude-/i.test(profile.name)
+  );
+}
+
 /**
  * Assess a profile against the Claude isolation model.
  * `hostDpr` should be window.devicePixelRatio when available.
@@ -336,8 +348,9 @@ export function assessClaudeProfile(
   const issues: HealthIssue[] = [];
   const cfg = profile.wayfern_config;
   const fp = fingerprintObj(profile);
+  const isClaude = isClaudeProfile(profile);
 
-  if (!profile.proxy_id && !profile.vpn_id) {
+  if (isClaude && !profile.proxy_id && !profile.vpn_id) {
     issues.push({
       code: "NO_PROXY",
       severity: "block",
@@ -420,8 +433,8 @@ export function assessClaudeProfile(
     ) {
       issues.push({
         code: "DPR_MISMATCH",
-        severity: "block",
-        message: `Fingerprint DPR ${dpr} ≠ host ${hostDpr} — Claude/Stripe payment iframe may break`,
+        severity: "warn",
+        message: `Fingerprint DPR ${dpr} ≠ host ${hostDpr} — Claude/Stripe payment iframe may render differently`,
       });
     }
     if (!fp.timezone) {
@@ -434,29 +447,31 @@ export function assessClaudeProfile(
   }
 
   const note = profile.note ?? "";
-  if (!/card\s*:/i.test(note)) {
-    issues.push({
-      code: "NO_CARD_LABEL",
-      severity: "warn",
-      message:
-        "Note missing card label — track 1 card per profile (label only, never store PAN)",
-    });
-  }
-  if (!/residential\s*:/i.test(note)) {
-    issues.push({
-      code: "NO_RESIDENTIAL_LABEL",
-      severity: "warn",
-      message: "Note missing residential/家宽 label for ops tracking",
-    });
-  }
+  if (isClaude) {
+    if (!/card\s*:/i.test(note)) {
+      issues.push({
+        code: "NO_CARD_LABEL",
+        severity: "warn",
+        message:
+          "Note missing card label — track 1 card per profile (label only, never store PAN)",
+      });
+    }
+    if (!/residential\s*:/i.test(note)) {
+      issues.push({
+        code: "NO_RESIDENTIAL_LABEL",
+        severity: "warn",
+        message: "Note missing residential/家宽 label for ops tracking",
+      });
+    }
 
-  const tags = profile.tags ?? [];
-  if (!tags.includes("claude")) {
-    issues.push({
-      code: "NO_CLAUDE_TAG",
-      severity: "warn",
-      message: "Missing tag “claude” — add for filtering",
-    });
+    const tags = profile.tags ?? [];
+    if (!tags.includes("claude")) {
+      issues.push({
+        code: "NO_CLAUDE_TAG",
+        severity: "warn",
+        message: "Missing tag “claude” — add for filtering",
+      });
+    }
   }
 
   let score: HealthSeverity = "ok";
@@ -605,10 +620,13 @@ export function launchBlockMessages(
   allProfiles: BrowserProfile[],
   hostDpr?: number,
 ): string[] {
+  if (!isClaudeProfile(profile)) {
+    return [];
+  }
   const health = assessClaudeProfile(profile, allProfiles, [], hostDpr);
-  // Only hard-block on issues that break isolation or payment UI.
-  // Missing card label etc. stay warn-only at launch.
-  const hard = new Set(["SHARED_PROXY", "RANDOMIZE_ON", "DPR_MISMATCH"]);
+  // Only hard-block on issues that break critical account isolation.
+  // Missing card label or DPR mismatches stay warn-only.
+  const hard = new Set(["SHARED_PROXY", "RANDOMIZE_ON"]);
   return health.issues
     .filter((i) => i.severity === "block" && hard.has(i.code))
     .map((i) => i.message);

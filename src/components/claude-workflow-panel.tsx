@@ -31,6 +31,7 @@ import {
   CLAUDE_ISOLATION_RULES,
   canFlagFix,
   type HealthSeverity,
+  isClaudeProfile,
   mergeClaudeTags,
   needsFingerprintRegen,
   PROXY_REUSE_COOLDOWN_DAYS,
@@ -416,6 +417,8 @@ export function ClaudeWorkflowPanel({
     return "error" in plan ? null : plan;
   }, [proxies, profiles]);
 
+  const [showClaudeOnly, setShowClaudeOnly] = useState(true);
+
   const health = useMemo(
     () => assessAllClaudeProfiles(profiles, proxies, hostDpr),
     [profiles, proxies, hostDpr],
@@ -427,14 +430,27 @@ export function ClaudeWorkflowPanel({
     return m;
   }, [profiles]);
 
+  const hasClaudeProfiles = useMemo(
+    () => profiles.some((p) => isClaudeProfile(p)),
+    [profiles],
+  );
+
+  const filteredHealth = useMemo(() => {
+    if (!showClaudeOnly || !hasClaudeProfiles) return health;
+    return health.filter((h) => {
+      const p = profileById.get(h.profileId);
+      return p ? isClaudeProfile(p) : false;
+    });
+  }, [health, showClaudeOnly, hasClaudeProfiles, profileById]);
+
   const counts = useMemo(() => {
     return {
-      total: health.length,
-      block: health.filter((h) => h.score === "block").length,
-      warn: health.filter((h) => h.score === "warn").length,
-      ok: health.filter((h) => h.score === "ok").length,
+      total: filteredHealth.length,
+      block: filteredHealth.filter((h) => h.score === "block").length,
+      warn: filteredHealth.filter((h) => h.score === "warn").length,
+      ok: filteredHealth.filter((h) => h.score === "ok").length,
     };
-  }, [health]);
+  }, [filteredHealth]);
 
   const applyFlagFix = useCallback(async (profile: BrowserProfile) => {
     const nextConfig = buildIsolationWayfernConfig(profile.wayfern_config);
@@ -955,24 +971,55 @@ export function ClaudeWorkflowPanel({
             </section>
 
             <section className="space-y-2">
-              <div className="flex flex-wrap items-center gap-2">
-                <h3 className="text-sm font-semibold">
-                  {t("claudeWorkflow.healthTitle", {
-                    defaultValue: "Profile health scan",
-                  })}
-                </h3>
-                <span className="text-xs text-muted-foreground">
-                  {counts.total} profiles · {counts.ok} ok · {counts.warn} warn
-                  · {counts.block} block
-                </span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <h3 className="text-sm font-semibold">
+                    {t("claudeWorkflow.healthTitle", {
+                      defaultValue: "Profile health scan",
+                    })}
+                  </h3>
+                  <span className="text-xs text-muted-foreground">
+                    {counts.total} profiles · {counts.ok} ok · {counts.warn}{" "}
+                    warn · {counts.block} block
+                  </span>
+                </div>
+                {hasClaudeProfiles && (
+                  <div className="flex items-center gap-1 rounded-md border p-0.5 text-xs">
+                    <button
+                      type="button"
+                      className={cn(
+                        "rounded px-2 py-0.5 font-medium transition-colors",
+                        showClaudeOnly
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                      onClick={() => setShowClaudeOnly(true)}
+                    >
+                      Claude only
+                    </button>
+                    <button
+                      type="button"
+                      className={cn(
+                        "rounded px-2 py-0.5 font-medium transition-colors",
+                        !showClaudeOnly
+                          ? "bg-primary text-primary-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                      onClick={() => setShowClaudeOnly(false)}
+                    >
+                      All profiles
+                    </button>
+                  </div>
+                )}
               </div>
-              {health.length === 0 ? (
+              {filteredHealth.length === 0 ? (
                 <p className="text-sm text-muted-foreground">
-                  No profiles yet. Create one with a dedicated 家宽 proxy.
+                  No profiles match the filter. Create one with a dedicated 家宽
+                  proxy.
                 </p>
               ) : (
                 <div className="space-y-2">
-                  {health.map((h) => (
+                  {filteredHealth.map((h) => (
                     <HealthRow
                       key={h.profileId}
                       health={h}
