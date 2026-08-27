@@ -164,7 +164,7 @@ fn is_safe_manifest_path(path: &str) -> bool {
 /// uncommitted data (e.g. cookies, login data). Since WAL files are
 /// excluded from sync, we must checkpoint them into the main database
 /// files before generating the manifest to avoid data loss.
-fn checkpoint_sqlite_wal_files(profile_dir: &Path) {
+pub(crate) fn checkpoint_sqlite_wal_files(profile_dir: &Path) {
   fn find_wal_files(dir: &Path, wal_files: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
       return;

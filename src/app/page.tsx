@@ -39,6 +39,7 @@ import {
 } from "@/components/profile-password-dialog";
 import { ProfileSelectorDialog } from "@/components/profile-selector-dialog";
 import { ProfileSyncDialog } from "@/components/profile-sync-dialog";
+import { ProfileTransferDialog } from "@/components/profile-transfer-dialog";
 import { ProxyAssignmentDialog } from "@/components/proxy-assignment-dialog";
 import { ProxyManagementDialog } from "@/components/proxy-management-dialog";
 import { type AppPage, RailNav } from "@/components/rail-nav";
@@ -381,6 +382,9 @@ export default function Home() {
   const [currentProfileForWayfernConfig, setCurrentProfileForWayfernConfig] =
     useState<BrowserProfile | null>(null);
   const [cloneProfile, setCloneProfile] = useState<BrowserProfile | null>(null);
+  const [profileToShare, setProfileToShare] = useState<BrowserProfile | null>(
+    null,
+  );
   const [passwordDialogProfile, setPasswordDialogProfile] =
     useState<BrowserProfile | null>(null);
   const [passwordDialogMode, setPasswordDialogMode] =
@@ -2100,6 +2104,7 @@ export default function Home() {
                 onLaunchProfile={launchProfile}
                 onKillProfile={handleKillProfile}
                 onCloneProfile={handleCloneProfile}
+                onShareProfile={setProfileToShare}
                 onSetPassword={handleSetPassword}
                 onChangePassword={handleChangePassword}
                 onRemovePassword={handleRemovePassword}
@@ -2376,6 +2381,12 @@ export default function Home() {
           setCloneProfile(null);
         }}
         profile={cloneProfile}
+      />
+
+      <ProfileTransferDialog
+        isOpen={profileToShare !== null}
+        onClose={() => setProfileToShare(null)}
+        profile={profileToShare}
       />
 
       <ProfilePasswordDialog

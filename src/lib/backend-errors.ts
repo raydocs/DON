@@ -135,6 +135,13 @@ export type BackendErrorCode =
   | "EXIT_PROBE_FAILED"
   | "CAMOUFOX_REMOVED"
   | "NO_E2E_PASSWORD_SET"
+  | "PROFILE_TRANSFER_FAILED"
+  | "PROFILE_TRANSFER_DESTINATION_INVALID"
+  | "PROFILE_TRANSFER_SOURCE_INVALID"
+  | "PROFILE_TRANSFER_DECRYPT_FAILED"
+  | "PROFILE_TRANSFER_INVALID"
+  | "PROFILE_TRANSFER_BROWSER_INCOMPATIBLE"
+  | "PROFILE_TRANSFER_FINGERPRINT_INCOMPATIBLE"
   | "INTERNAL_ERROR";
 
 export interface BackendError {
@@ -492,6 +499,24 @@ export function translateBackendError(t: TFunction, err: unknown): string {
       return t("backendErrors.legacyMigrationFailed");
     case "NO_E2E_PASSWORD_SET":
       return t("backendErrors.noE2ePasswordSet");
+    case "PROFILE_TRANSFER_FAILED":
+      return t("backendErrors.profileTransferFailed");
+    case "PROFILE_TRANSFER_DESTINATION_INVALID":
+      return t("backendErrors.profileTransferDestinationInvalid");
+    case "PROFILE_TRANSFER_SOURCE_INVALID":
+      return t("backendErrors.profileTransferSourceInvalid");
+    case "PROFILE_TRANSFER_DECRYPT_FAILED":
+      return t("backendErrors.profileTransferDecryptFailed");
+    case "PROFILE_TRANSFER_INVALID":
+      return t("backendErrors.profileTransferInvalid");
+    case "PROFILE_TRANSFER_BROWSER_INCOMPATIBLE":
+      return t("backendErrors.profileTransferBrowserIncompatible", {
+        version: parsed.params?.version ?? "",
+      });
+    case "PROFILE_TRANSFER_FINGERPRINT_INCOMPATIBLE":
+      return t("backendErrors.profileTransferFingerprintIncompatible", {
+        reason: parsed.params?.reason ?? "",
+      });
     case "INTERNAL_ERROR":
       return t("backendErrors.internal", {
         detail: parsed.params?.detail ?? "",

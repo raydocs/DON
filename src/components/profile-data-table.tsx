@@ -1516,6 +1516,7 @@ interface ProfilesDataTableProps {
   onLaunchProfile: (profile: BrowserProfile) => void | Promise<unknown>;
   onKillProfile: (profile: BrowserProfile) => void | Promise<void>;
   onCloneProfile: (profile: BrowserProfile) => void | Promise<void>;
+  onShareProfile?: (profile: BrowserProfile) => void;
   onDeleteProfile: (profile: BrowserProfile) => void | Promise<void>;
   onRenameProfile: (profileId: string, newName: string) => Promise<void>;
   onConfigureWayfern: (profile: BrowserProfile) => void;
@@ -1574,6 +1575,7 @@ export function ProfilesDataTable({
   onLaunchProfile,
   onKillProfile,
   onCloneProfile,
+  onShareProfile,
   onDeleteProfile,
   onRenameProfile,
   onConfigureWayfern,
@@ -4132,6 +4134,10 @@ export function ProfilesDataTable({
                 setLaunchHookProfile(profile);
               }}
               onCloneProfile={onCloneProfile}
+              onShareProfile={(profile) => {
+                setProfileForInfoDialog(null);
+                onShareProfile?.(profile);
+              }}
               onLaunchWithSync={onLaunchWithSync}
               onSetPassword={onSetPassword}
               onChangePassword={onChangePassword}

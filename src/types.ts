@@ -320,6 +320,11 @@ export interface ProfileImportReport {
   warnings: ProfileImportWarning[];
 }
 
+export interface ProfileTransferImportResult {
+  profile: BrowserProfile;
+  report: ProfileImportReport;
+}
+
 export interface ProfileImportItemResult {
   name: string;
   source_path: string;

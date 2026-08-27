@@ -27,9 +27,6 @@
 use aes::cipher::{block_padding::Pkcs7, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Key, Nonce};
-// Windows stores the raw 32-byte key, so it neither encodes nor decodes
-// base64; only the mac/Linux password paths below need the trait in scope.
-#[cfg(not(target_os = "windows"))]
 use base64::Engine;
 use rand::RngExt;
 use ring::pbkdf2;
@@ -329,6 +326,47 @@ pub struct SourceKeyring {
 }
 
 impl SourceKeyring {
+  /// Build a keyring for a profile created by Wayfern on another host.
+  ///
+  /// Unlike Chrome import, a shared DON profile carries its portable
+  /// `os_crypt_key`. The file's bytes must be interpreted according to the
+  /// source host, not this process's host, before the stores are re-sealed for
+  /// the recipient.
+  pub fn from_wayfern_key(source_host_os: &str, contents: &[u8]) -> Result<Self, String> {
+    match source_host_os {
+      "macos" => {
+        validate_cbc_key_file(contents)?;
+        Ok(Self {
+          v10: Some(CryptoKey::Aes128Cbc(derive_key(contents, MAC_ITERATIONS))),
+          ..Default::default()
+        })
+      }
+      "linux" => {
+        validate_cbc_key_file(contents)?;
+        Ok(Self {
+          v10: Some(CryptoKey::Aes128Cbc(derive_key(
+            POSIX_FALLBACK_PASSWORD,
+            POSIX_ITERATIONS,
+          ))),
+          v11: Some(CryptoKey::Aes128Cbc(derive_key(contents, POSIX_ITERATIONS))),
+          ..Default::default()
+        })
+      }
+      "windows" => {
+        let key: [u8; 32] = contents
+          .try_into()
+          .map_err(|_| "Windows os_crypt_key must contain exactly 32 bytes".to_string())?;
+        Ok(Self {
+          v10: Some(CryptoKey::Aes256Gcm(key)),
+          ..Default::default()
+        })
+      }
+      _ => Err(format!(
+        "Unsupported source host operating system: {source_host_os}"
+      )),
+    }
+  }
+
   pub fn is_empty(&self) -> bool {
     self.v10.is_none() && self.v11.is_none()
   }
@@ -375,6 +413,16 @@ impl SourceKeyring {
 
     Decrypted::Unrecoverable
   }
+}
+
+fn validate_cbc_key_file(contents: &[u8]) -> Result<(), String> {
+  let decoded = base64::engine::general_purpose::STANDARD
+    .decode(contents)
+    .map_err(|_| "os_crypt_key is not valid base64".to_string())?;
+  if decoded.len() != 16 {
+    return Err("os_crypt_key must encode exactly 16 bytes".to_string());
+  }
+  Ok(())
 }
 
 #[cfg(test)]
@@ -546,6 +594,69 @@ mod tests {
       Decrypted::Value(v) => assert_eq!(v, b"legacy"),
       _ => panic!("empty-password fallback must be attempted"),
     }
+  }
+
+  #[test]
+  fn shared_macos_key_opens_v10_records() {
+    let contents = b"MDEyMzQ1Njc4OWFiY2RlZg==";
+    let keyring = SourceKeyring::from_wayfern_key("macos", contents).unwrap();
+    let body = CryptoKey::Aes128Cbc(derive_key(contents, MAC_ITERATIONS))
+      .encrypt(b"mac-secret")
+      .unwrap();
+    let mut stored = b"v10".to_vec();
+    stored.extend_from_slice(&body);
+    assert!(matches!(
+      keyring.decrypt(&stored),
+      Decrypted::Value(value) if value == b"mac-secret"
+    ));
+  }
+
+  #[test]
+  fn shared_linux_key_opens_v11_and_fallback_v10_records() {
+    let contents = b"MDEyMzQ1Njc4OWFiY2RlZg==";
+    let keyring = SourceKeyring::from_wayfern_key("linux", contents).unwrap();
+    for (tag, key, plaintext) in [
+      (
+        b"v11" as &[u8],
+        derive_key(contents, POSIX_ITERATIONS),
+        b"linux-keyring" as &[u8],
+      ),
+      (
+        b"v10" as &[u8],
+        derive_key(POSIX_FALLBACK_PASSWORD, POSIX_ITERATIONS),
+        b"linux-basic" as &[u8],
+      ),
+    ] {
+      let mut stored = tag.to_vec();
+      stored.extend_from_slice(&CryptoKey::Aes128Cbc(key).encrypt(plaintext).unwrap());
+      assert!(matches!(
+        keyring.decrypt(&stored),
+        Decrypted::Value(value) if value == plaintext
+      ));
+    }
+  }
+
+  #[test]
+  fn shared_windows_key_opens_v10_records() {
+    let contents = [19u8; 32];
+    let keyring = SourceKeyring::from_wayfern_key("windows", &contents).unwrap();
+    let mut stored = b"v10".to_vec();
+    stored.extend_from_slice(
+      &CryptoKey::Aes256Gcm(contents)
+        .encrypt(b"windows-secret")
+        .unwrap(),
+    );
+    assert!(matches!(
+      keyring.decrypt(&stored),
+      Decrypted::Value(value) if value == b"windows-secret"
+    ));
+  }
+
+  #[test]
+  fn shared_key_rejects_wrong_platform_format() {
+    assert!(SourceKeyring::from_wayfern_key("windows", &[1u8; 24]).is_err());
+    assert!(SourceKeyring::from_wayfern_key("macos", b"not-base64").is_err());
+    assert!(SourceKeyring::from_wayfern_key("android", &[1u8; 32]).is_err());
   }
 
   /// Load the host-format key into a keyring under the host tag, for tests

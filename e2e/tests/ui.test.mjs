@@ -447,6 +447,99 @@ test("all primary navigation buttons and sub-page tabs render and remain interac
   });
 });
 
+test("profile sharing and shared-profile import controls are reachable", async () => {
+  await withApp(
+    "ui-profile-transfer",
+    async (app) => {
+      const profileName = "Share UI fixture";
+      await createWayfernUiFixture(app, profileName, {
+        os:
+          process.platform === "darwin"
+            ? "macos"
+            : process.platform === "win32"
+              ? "windows"
+              : "linux",
+        fingerprint: "{}",
+      });
+      await app.waitForText(profileName);
+
+      await app.clickText(en.profiles.aria.profileInfo, { roles: ["button"] });
+      await app.waitForText(en.profileInfo.title);
+      await app.clickText(en.profileTransfer.shareButton, {
+        roles: ["button"],
+      });
+      await app.waitForText(en.profileTransfer.shareTitle);
+      assert.deepEqual(
+        await app.execute(
+          `
+            return {
+              password: Boolean(document.querySelector("#profile-transfer-password")),
+              confirmation: Boolean(document.querySelector("#profile-transfer-confirm-password")),
+              saveDisabled: [...document.querySelectorAll("button")].some(
+                (button) =>
+                  button.textContent?.trim() === arguments[0] && button.disabled
+              ),
+            };
+          `,
+          [en.profileTransfer.saveButton],
+        ),
+        { password: true, confirmation: true, saveDisabled: true },
+      );
+      await dismissSurface(app);
+
+      await app.clickSelector('[aria-label="More"]');
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return Boolean(document.querySelector("[role='menu']"));`,
+          ),
+        { description: "More menu" },
+      );
+      await app.clickText("Import profile", {
+        exact: false,
+        roles: ["menuitem"],
+      });
+      await app.waitForText(en.profileTransfer.importTab);
+      await app.clickText(en.profileTransfer.importTab, { roles: ["tab"] });
+      await app.waitForText(en.profileTransfer.importTitle);
+      assert.deepEqual(
+        await app.execute(
+          `
+            return {
+              file: Boolean(document.querySelector("#don-profile-path")),
+              password: Boolean(document.querySelector("#don-profile-password")),
+              proxy: Boolean(document.querySelector("#don-profile-include-proxy")),
+              adaptMode: [...document.querySelectorAll("button")].some(
+                (button) => button.textContent?.trim() === arguments[0]
+              ),
+              importDisabled: [...document.querySelectorAll("button")].some(
+                (button) =>
+                  button.textContent?.trim() === arguments[1] && button.disabled
+              ),
+            };
+          `,
+          [en.profileTransfer.modeAdapt, en.profileTransfer.importButton],
+        ),
+        {
+          file: true,
+          password: true,
+          proxy: true,
+          adaptMode: true,
+          importDisabled: true,
+        },
+      );
+      await app.clickText(en.profileTransfer.modeAdapt, {
+        roles: ["combobox"],
+      });
+      await app.clickText(en.profileTransfer.modePreserve, {
+        roles: ["option"],
+      });
+      await app.waitForText(en.profileTransfer.modePreserveDescription);
+    },
+    { seedDownloadedBrowser: true },
+  );
+});
+
 test("clearing a device preset removes its fingerprint and preset DPR", async () => {
   await withApp(
     "ui-clear-device-preset",

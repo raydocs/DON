@@ -27,6 +27,7 @@ import {
   LuPuzzle,
   LuRefreshCw,
   LuSettings,
+  LuShare2,
   LuShield,
   LuShieldCheck,
   LuTimer,
@@ -106,6 +107,7 @@ interface ProfileInfoDialogProps {
   onOpenDnsBlocklist?: (profile: BrowserProfile) => void;
   onOpenLaunchHook?: (profile: BrowserProfile) => void;
   onCloneProfile?: (profile: BrowserProfile) => void;
+  onShareProfile?: (profile: BrowserProfile) => void;
   onDeleteProfile?: (profile: BrowserProfile) => void;
   onLaunchWithSync?: (profile: BrowserProfile) => void;
   onSetPassword?: (profile: BrowserProfile) => void;
@@ -333,6 +335,7 @@ export function ProfileInfoDialog({
   onOpenDnsBlocklist,
   onOpenLaunchHook,
   onCloneProfile,
+  onShareProfile,
   onDeleteProfile,
   onLaunchWithSync,
   onSetPassword,
@@ -665,6 +668,7 @@ export function ProfileInfoDialog({
           handleCopyId={handleCopyId}
           onClose={onClose}
           onCloneProfile={onCloneProfile}
+          onShareProfile={onShareProfile}
           onKillProfile={undefined}
           visibleActions={visibleActions}
           t={t}
@@ -692,6 +696,7 @@ interface ProfileInfoLayoutProps {
   handleCopyId: () => Promise<void>;
   onClose: () => void;
   onCloneProfile?: (profile: BrowserProfile) => void;
+  onShareProfile?: (profile: BrowserProfile) => void;
   onKillProfile?: (profile: BrowserProfile) => void;
   visibleActions: {
     id?: string;
@@ -735,6 +740,7 @@ function ProfileInfoLayout({
   handleCopyId,
   onClose,
   onCloneProfile,
+  onShareProfile,
   visibleActions,
   t,
 }: ProfileInfoLayoutProps) {
@@ -876,6 +882,18 @@ function ProfileInfoLayout({
           <span className="text-muted-foreground">/</span>
           <span className="truncate text-muted-foreground">{profile.name}</span>
         </div>
+        {onShareProfile && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1.5 px-2 text-xs"
+            disabled={isDisabled || profile.ephemeral === true}
+            onClick={() => onShareProfile(profile)}
+          >
+            <LuShare2 className="size-3" />
+            {t("profileTransfer.shareButton")}
+          </Button>
+        )}
         {onCloneProfile && (
           <Button
             variant="ghost"

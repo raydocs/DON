@@ -57,6 +57,7 @@ import type {
   ProfileImportBatchResult,
   ProfileImportProgress,
   ProfileImportReport,
+  ProfileTransferImportResult,
   WayfernConfig,
 } from "@/types";
 import { RippleButton } from "./ui/ripple";
@@ -146,7 +147,7 @@ interface ImportProfileDialogProps {
 }
 
 type Step = "select" | "configure" | "importing";
-type ImportMode = "auto-detect" | "manual" | "legacy-donut";
+type ImportMode = "auto-detect" | "manual" | "don-profile" | "legacy-donut";
 type DuplicateStrategy = "rename" | "skip";
 const LEGACY_CATEGORIES = [
   "profiles",
@@ -173,6 +174,15 @@ export function ImportProfileDialog({
   const [isScanning, setIsScanning] = useState(false);
   const [manualPath, setManualPath] = useState("");
   const [extractedDir, setExtractedDir] = useState<string | null>(null);
+  const [transferPath, setTransferPath] = useState("");
+  const [transferPassword, setTransferPassword] = useState("");
+  const [transferFingerprintMode, setTransferFingerprintMode] = useState<
+    "adapt" | "preserve"
+  >("adapt");
+  const [transferIncludeProxy, setTransferIncludeProxy] = useState(true);
+  const [transferResult, setTransferResult] =
+    useState<ProfileTransferImportResult | null>(null);
+  const [isTransferImporting, setIsTransferImporting] = useState(false);
 
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [profileNames, setProfileNames] = useState<Record<string, string>>({});
@@ -347,6 +357,55 @@ export function ImportProfileDialog({
     } catch (error) {
       console.error("Failed to open archive dialog:", error);
       toast.error(t("importProfile.folderDialogFailed"));
+    }
+  };
+
+  const handleBrowseTransfer = async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        title: t("profileTransfer.chooseFile"),
+        filters: [
+          {
+            name: t("profileTransfer.fileType"),
+            extensions: ["donprofile"],
+          },
+        ],
+      });
+      if (selected && typeof selected === "string") {
+        setTransferPath(selected);
+        setTransferResult(null);
+      }
+    } catch (error) {
+      console.error("Failed to open profile transfer dialog:", error);
+      toast.error(t("profileTransfer.fileDialogFailed"));
+    }
+  };
+
+  const handleImportTransfer = async () => {
+    if (!transferPath || !transferPassword) return;
+    setIsTransferImporting(true);
+    setTransferResult(null);
+    try {
+      const imported = await invoke<ProfileTransferImportResult>(
+        "import_profile_transfer",
+        {
+          source: transferPath,
+          password: transferPassword,
+          fingerprintMode: transferFingerprintMode,
+          includeProxy: transferIncludeProxy,
+        },
+      );
+      setTransferResult(imported);
+      setTransferPassword("");
+      toast.success(
+        t("profileTransfer.importSuccess", { name: imported.profile.name }),
+      );
+    } catch (error) {
+      console.error("Failed to import shared DON profile:", error);
+      toast.error(translateBackendError(t, error));
+    } finally {
+      setIsTransferImporting(false);
     }
   };
 
@@ -525,6 +584,11 @@ export function ImportProfileDialog({
     setScannedProfiles([]);
     setManualPath("");
     setExtractedDir(null);
+    setTransferPath("");
+    setTransferPassword("");
+    setTransferFingerprintMode("adapt");
+    setTransferIncludeProxy(true);
+    setTransferResult(null);
     setSelectedPaths(new Set());
     setProfileNames({});
     setSelectedGroupId("none");
@@ -655,6 +719,12 @@ export function ImportProfileDialog({
                     {t("importProfile.manualImport")}
                   </AnimatedTabsTrigger>
                   <AnimatedTabsTrigger
+                    value="don-profile"
+                    disabled={isTransferImporting}
+                  >
+                    {t("profileTransfer.importTab")}
+                  </AnimatedTabsTrigger>
+                  <AnimatedTabsTrigger
                     value="legacy-donut"
                     disabled={isLegacyLoading}
                   >
@@ -752,6 +822,134 @@ export function ImportProfileDialog({
 
                     {scannedProfiles.length > 0 &&
                       renderProfileList(scannedProfiles)}
+                  </div>
+                </AnimatedTabsContent>
+
+                <AnimatedTabsContent value="don-profile">
+                  <div className="space-y-4">
+                    <div>
+                      <h3 className="text-lg font-medium">
+                        {t("profileTransfer.importTitle")}
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        {t("profileTransfer.importDescription")}
+                      </p>
+                    </div>
+
+                    <Alert>
+                      <AlertDescription>
+                        {t("profileTransfer.importSecurityNotice")}
+                      </AlertDescription>
+                    </Alert>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="don-profile-path">
+                        {t("profileTransfer.file")}
+                      </Label>
+                      <div className="flex gap-2">
+                        <Input
+                          id="don-profile-path"
+                          value={transferPath}
+                          readOnly
+                          placeholder={t("profileTransfer.filePlaceholder")}
+                        />
+                        <Button
+                          variant="outline"
+                          onClick={() => void handleBrowseTransfer()}
+                        >
+                          {t("profileTransfer.browse")}
+                        </Button>
+                      </div>
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="don-profile-password">
+                        {t("profileTransfer.password")}
+                      </Label>
+                      <Input
+                        id="don-profile-password"
+                        type="password"
+                        autoComplete="current-password"
+                        value={transferPassword}
+                        onChange={(event) =>
+                          setTransferPassword(event.target.value)
+                        }
+                        placeholder={t(
+                          "profileTransfer.importPasswordPlaceholder",
+                        )}
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label>{t("profileTransfer.fingerprintMode")}</Label>
+                      <Select
+                        value={transferFingerprintMode}
+                        onValueChange={(value) =>
+                          setTransferFingerprintMode(
+                            value as "adapt" | "preserve",
+                          )
+                        }
+                      >
+                        <SelectTrigger>
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="adapt">
+                            {t("profileTransfer.modeAdapt")}
+                          </SelectItem>
+                          <SelectItem value="preserve">
+                            {t("profileTransfer.modePreserve")}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs text-muted-foreground">
+                        {transferFingerprintMode === "adapt"
+                          ? t("profileTransfer.modeAdaptDescription")
+                          : t("profileTransfer.modePreserveDescription")}
+                      </p>
+                    </div>
+
+                    <label
+                      htmlFor="don-profile-include-proxy"
+                      className="flex cursor-pointer items-start gap-3 rounded-md border border-border p-3"
+                    >
+                      <Checkbox
+                        id="don-profile-include-proxy"
+                        checked={transferIncludeProxy}
+                        onCheckedChange={(checked) =>
+                          setTransferIncludeProxy(checked === true)
+                        }
+                      />
+                      <span>
+                        <span className="block text-sm font-medium">
+                          {t("profileTransfer.restoreProxy")}
+                        </span>
+                        <span className="block text-xs text-muted-foreground">
+                          {t("profileTransfer.restoreProxyDescription")}
+                        </span>
+                      </span>
+                    </label>
+
+                    <LoadingButton
+                      isLoading={isTransferImporting}
+                      disabled={!transferPath || !transferPassword}
+                      onClick={() => void handleImportTransfer()}
+                    >
+                      {t("profileTransfer.importButton")}
+                    </LoadingButton>
+
+                    {transferResult && (
+                      <Alert>
+                        <AlertDescription>
+                          <p className="font-medium">
+                            {t("profileTransfer.importedProfile", {
+                              name: transferResult.profile.name,
+                            })}
+                          </p>
+                          <ImportReportSummary report={transferResult.report} />
+                        </AlertDescription>
+                      </Alert>
+                    )}
                   </div>
                 </AnimatedTabsContent>
 
@@ -1211,16 +1409,17 @@ export function ImportProfileDialog({
                   {t("common.buttons.cancel")}
                 </RippleButton>
               )}
-              {importMode !== "legacy-donut" && (
-                <RippleButton
-                  disabled={selectedPaths.size === 0}
-                  onClick={() => {
-                    setCurrentStep("configure");
-                  }}
-                >
-                  {t("importProfile.nextButton")}
-                </RippleButton>
-              )}
+              {importMode !== "legacy-donut" &&
+                importMode !== "don-profile" && (
+                  <RippleButton
+                    disabled={selectedPaths.size === 0}
+                    onClick={() => {
+                      setCurrentStep("configure");
+                    }}
+                  >
+                    {t("importProfile.nextButton")}
+                  </RippleButton>
+                )}
             </>
           )}
           {currentStep === "configure" && (

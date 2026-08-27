@@ -85,6 +85,7 @@ mod platform_browser;
 mod profile;
 mod profile_import;
 mod profile_importer;
+mod profile_transfer;
 mod proxy_manager;
 pub mod proxy_runner;
 pub mod proxy_server;
@@ -187,6 +188,7 @@ use profile_importer::{
   cleanup_profile_import_scratch, detect_existing_profiles, import_browser_profiles,
   scan_folder_for_profiles, scan_profile_archive,
 };
+use profile_transfer::{export_profile_transfer, import_profile_transfer};
 
 use legacy_migration::{migrate_legacy_donut_data, preview_legacy_donut_migration};
 
@@ -2665,6 +2667,8 @@ pub fn run_with_builder(
       cancel_download,
       delete_profile,
       clone_profile,
+      export_profile_transfer,
+      import_profile_transfer,
       check_browser_exists,
       create_browser_profile_new,
       list_browser_profiles,

@@ -187,7 +187,7 @@ impl ProfileManager {
     Ok(profile)
   }
 
-  fn rebuild_tag_suggestions(&self) {
+  pub(crate) fn rebuild_tag_suggestions(&self) {
     let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
       let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
     });

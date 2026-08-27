@@ -36,6 +36,8 @@ export const commandCoverage = {
     commands: [
       "delete_profile",
       "clone_profile",
+      "export_profile_transfer",
+      "import_profile_transfer",
       "create_browser_profile_new",
       "list_browser_profiles",
       "get_all_tags",

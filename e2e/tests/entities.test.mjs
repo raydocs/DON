@@ -246,6 +246,94 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
         "automation",
       ]);
 
+      const sourceProfileDir = path.join(
+        app.dataRoot,
+        "data",
+        "profiles",
+        profile.id,
+        "profile",
+      );
+      const sourceSiteData = path.join(
+        sourceProfileDir,
+        "Default",
+        "Local Storage",
+        "leveldb",
+        "000003.log",
+      );
+      await mkdir(path.dirname(sourceSiteData), { recursive: true });
+      await writeFile(sourceSiteData, "portable-site-state");
+      const transferPath = path.join(app.root, "entity-profile.donprofile");
+      await app.invoke("export_profile_transfer", {
+        profileId: profile.id,
+        destination: transferPath,
+        password: "e2e-transfer-password",
+        includeProxy: true,
+      });
+      assert.ok(existsSync(transferPath));
+      assert.equal(
+        (await readFile(transferPath)).subarray(0, 10).toString("utf8"),
+        "DONPROFILE",
+      );
+
+      const countBeforeWrongPassword = (
+        await app.invoke("list_browser_profiles")
+      ).length;
+      assert.match(
+        await app.invokeError("import_profile_transfer", {
+          source: transferPath,
+          password: "wrong-password",
+          fingerprintMode: "adapt",
+          includeProxy: true,
+        }),
+        /PROFILE_TRANSFER_DECRYPT_FAILED/,
+      );
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).length,
+        countBeforeWrongPassword,
+        "a failed authenticated import must not publish a profile",
+      );
+
+      const transferred = await app.invoke("import_profile_transfer", {
+        source: transferPath,
+        password: "e2e-transfer-password",
+        fingerprintMode: "adapt",
+        includeProxy: true,
+      });
+      assert.notEqual(transferred.profile.id, profile.id);
+      assert.equal(transferred.profile.name, "Renamed Profile (Shared)");
+      assert.deepEqual(transferred.profile.tags, ["alpha", "automation"]);
+      assert.equal(transferred.profile.note, "Extensive E2E metadata");
+      assert.equal(transferred.profile.group_id, null);
+      assert.equal(transferred.profile.launch_hook, null);
+      assert.equal(transferred.profile.password_protected, false);
+      assert.equal(transferred.profile.wayfern_config.fingerprint, null);
+      assert.notEqual(transferred.profile.proxy_id, proxy.id);
+      const transferredProxy = (await app.invoke("get_stored_proxies")).find(
+        (candidate) => candidate.id === transferred.profile.proxy_id,
+      );
+      assert.equal(transferredProxy.name, "Updated Proxy (Shared)");
+      assert.deepEqual(
+        transferredProxy.proxy_settings,
+        updatedProxy.proxy_settings,
+      );
+      assert.equal(
+        await readFile(
+          path.join(
+            app.dataRoot,
+            "data",
+            "profiles",
+            transferred.profile.id,
+            "profile",
+            "Default",
+            "Local Storage",
+            "leveldb",
+            "000003.log",
+          ),
+          "utf8",
+        ),
+        "portable-site-state",
+      );
+
       assert.ok(Array.isArray(await app.invoke("detect_existing_profiles")));
       const legacyRoot =
         process.platform === "darwin"
@@ -565,7 +653,12 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       assert.equal((await app.invoke("get_profile_groups")).length, 1);
 
       await app.invoke("delete_selected_profiles", {
-        profileIds: [profile.id, clone.id, imported.profile_id],
+        profileIds: [
+          profile.id,
+          clone.id,
+          imported.profile_id,
+          transferred.profile.id,
+        ],
       });
       assert.deepEqual(await app.invoke("list_browser_profiles"), []);
       await app.invoke("delete_profile_group", { groupId: group.id });
@@ -575,7 +668,8 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       ).filter(
         (item) =>
           item.name === "Imported Proxy" ||
-          item.name.startsWith("Parsed Proxy"),
+          item.name.startsWith("Parsed Proxy") ||
+          item.name === "Updated Proxy (Shared)",
       )) {
         await app.invoke("delete_stored_proxy", { proxyId: importedProxy.id });
       }
