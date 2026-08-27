@@ -1,0 +1,21 @@
+name = "don-sync-worker"
+main = "src/index.ts"
+compatibility_date = "2024-09-23"
+compatibility_flags = ["nodejs_compat"]
+
+# Cloudflare R2 Bucket Binding for sync object blobs & chunks
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "don-sync-bucket"
+
+# Cloudflare D1 Database Binding for selective sync metadata & user permissions
+[[d1_databases]]
+binding = "DB"
+database_name = "don-sync-db"
+database_id = "your-d1-database-id-here"
+
+[vars]
+# Secret token for authentication (can also be set securely via `wrangler secret put SYNC_TOKEN`)
+SYNC_TOKEN = "don-secret-sync-token"
+# Optional signing secret for HMAC URL signing (falls back to SYNC_TOKEN if omitted)
+SIGNING_SECRET = "don-signing-secret"

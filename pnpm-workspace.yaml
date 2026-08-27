@@ -1,6 +1,7 @@
 packages:
   - nodecar
   - donut-sync
+  - cloudflare-sync-worker
 
 onlyBuiltDependencies:
   - '@biomejs/biome'
@@ -11,6 +12,7 @@ onlyBuiltDependencies:
   - sharp
   - sqlite3
   - unrs-resolver
+  - workerd
 
 # Husky and lint-staged shell out to pnpm without a TTY, so the interactive
 # "purge modules dir?" prompt errors out (ERR_PNPM_ABORTED_REMOVE_MODULES_DIR_NO_TTY)
@@ -40,8 +42,10 @@ overrides:
 
 allowBuilds:
   '@nestjs/core': true
+  esbuild: true
   sharp: true
   unrs-resolver: true
+  workerd: true
 
 minimumReleaseAgeExclude:
   - '@radix-ui/primitive@1.1.5'
