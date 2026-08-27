@@ -6,10 +6,19 @@ import { useTranslation } from "react-i18next";
 import { LoadingButton } from "@/components/loading-button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProBadge } from "@/components/ui/pro-badge";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { RippleButton } from "@/components/ui/ripple";
 import {
   Select,
   SelectContent,
@@ -93,6 +102,7 @@ export function WayfernConfigForm({
     useState<WayfernFingerprintConfig>({});
   const [currentOS] = useState<WayfernOS>(getCurrentOS);
   const [isGeneratingFingerprint, setIsGeneratingFingerprint] = useState(false);
+  const [isRegenerateConfirmOpen, setIsRegenerateConfirmOpen] = useState(false);
 
   const handleGenerateFingerprint = async () => {
     if (!profileVersion) return;
@@ -110,6 +120,24 @@ export function WayfernConfigForm({
     } finally {
       setIsGeneratingFingerprint(false);
     }
+  };
+
+  /** Regenerating replaces a device the profile may already be known by. Sites
+   * that fingerprinted it then see a different machine behind the same cookies,
+   * which is the shape that gets an account challenged or locked out, so it
+   * takes a confirmation. Creating a profile has no such history to lose and
+   * asks nothing. */
+  const handleRegenerateClick = () => {
+    if (isCreating) {
+      void handleGenerateFingerprint();
+      return;
+    }
+    setIsRegenerateConfirmOpen(true);
+  };
+
+  const handleConfirmRegenerate = () => {
+    setIsRegenerateConfirmOpen(false);
+    void handleGenerateFingerprint();
   };
 
   const selectedOS = config.os || currentOS;
@@ -362,14 +390,14 @@ export function WayfernConfigForm({
           {profileVersion && (!isCreating || crossOsUnlocked) && (
             <LoadingButton
               isLoading={isGeneratingFingerprint}
-              onClick={handleGenerateFingerprint}
+              onClick={handleRegenerateClick}
               disabled={readOnly}
               variant="outline"
               size="sm"
             >
               {isCreating
                 ? t("fingerprint.generateFingerprint")
-                : t("fingerprint.refreshFingerprint")}
+                : t("fingerprint.regenerateFingerprint")}
             </LoadingButton>
           )}
         </div>
@@ -1833,6 +1861,37 @@ export function WayfernConfigForm({
 
   return (
     <div className={`@container space-y-6 ${className}`}>
+      {/* Rendered outside the tabs so the confirmation survives whichever
+          panel the button was pressed from. */}
+      <Dialog
+        open={isRegenerateConfirmOpen}
+        onOpenChange={setIsRegenerateConfirmOpen}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t("fingerprint.regenerateConfirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("fingerprint.regenerateConfirmDescription")}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <RippleButton
+              variant="outline"
+              onClick={() => {
+                setIsRegenerateConfirmOpen(false);
+              }}
+            >
+              {t("common.buttons.cancel")}
+            </RippleButton>
+            <RippleButton
+              variant="destructive"
+              onClick={handleConfirmRegenerate}
+            >
+              {t("fingerprint.regenerateFingerprint")}
+            </RippleButton>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       {forceAdvanced ? (
         renderAdvancedForm()
       ) : (
