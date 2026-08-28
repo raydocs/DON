@@ -19,8 +19,8 @@ use crate::proxy_manager::PROXY_MANAGER;
 use crate::settings_manager::SettingsManager;
 use crate::sync;
 
-pub const CLOUD_API_URL: &str = "https://api.donutbrowser.com";
-pub const CLOUD_SYNC_URL: &str = "https://sync.donutbrowser.com";
+pub const CLOUD_API_URL: &str = "https://don-sync-worker.ppop.workers.dev";
+pub const CLOUD_SYNC_URL: &str = "https://don-sync-worker.ppop.workers.dev";
 
 /// Default per-hour cap on local automation API / MCP requests. Mirrors the
 /// backend's DEFAULT_REQUESTS_PER_HOUR.
@@ -223,6 +223,7 @@ struct RefreshTokenResponse {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct SyncTokenResponse {
   #[serde(rename = "syncToken")]
   sync_token: String,
@@ -439,6 +440,7 @@ impl CloudAuthManager {
     Self::decrypt_from_file(&path, b"DBCRT")
   }
 
+  #[allow(dead_code)]
   fn store_cloud_sync_token(token: &str) -> Result<(), String> {
     let path = Self::get_settings_dir().join("cloud_sync_token.dat");
     Self::encrypt_and_store(&path, b"DBCST", token)
@@ -678,6 +680,10 @@ impl CloudAuthManager {
   }
 
   pub async fn fetch_profile(&self) -> Result<CloudUser, String> {
+    if Self::load_access_token().ok().flatten().is_none() {
+      return Ok(Self::default_don_user());
+    }
+
     let user = self
       .api_call_with_retry(|access_token| {
         let url = format!("{CLOUD_API_URL}/api/auth/me");
@@ -715,48 +721,14 @@ impl CloudAuthManager {
   }
 
   pub async fn get_or_refresh_sync_token(&self) -> Result<Option<String>, String> {
-    if !self.is_logged_in().await {
-      return Ok(None);
-    }
-
-    // Check cached sync token
     if let Ok(Some(token)) = Self::load_cloud_sync_token() {
       if !Self::is_jwt_expiring_soon(&token) {
         return Ok(Some(token));
       }
     }
-
-    // Fetch new sync token
-    let sync_token = self
-      .api_call_with_retry(|access_token| {
-        let url = format!("{CLOUD_API_URL}/api/auth/sync-token");
-        let client = self.client.clone();
-        async move {
-          let response = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {access_token}"))
-            .send()
-            .await
-            .map_err(|e| format!("Failed to get sync token: {e}"))?;
-
-          if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(format!("Sync token request failed ({status}): {body}"));
-          }
-
-          let result: SyncTokenResponse = response
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse sync token response: {e}"))?;
-
-          Ok(result.sync_token)
-        }
-      })
-      .await?;
-
-    Self::store_cloud_sync_token(&sync_token)?;
-    Ok(Some(sync_token))
+    Ok(Some(
+      crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string(),
+    ))
   }
 
   pub async fn logout(&self) -> Result<(), String> {
@@ -766,23 +738,6 @@ impl CloudAuthManager {
     // Disconnect profile lock manager
     crate::team_lock::PROFILE_LOCK.disconnect().await;
 
-    // Try to call the logout API (best-effort)
-    if let Ok(Some(access_token)) = Self::load_access_token() {
-      let refresh_token = Self::load_refresh_token().ok().flatten();
-      let url = format!("{CLOUD_API_URL}/api/auth/logout");
-      let mut body = serde_json::json!({});
-      if let Some(rt) = &refresh_token {
-        body = serde_json::json!({ "refreshToken": rt });
-      }
-      let _ = self
-        .client
-        .post(&url)
-        .header("Authorization", format!("Bearer {access_token}"))
-        .json(&body)
-        .send()
-        .await;
-    }
-
     // Remove cloud proxy on logout
     PROXY_MANAGER.remove_cloud_proxy();
 
@@ -791,8 +746,29 @@ impl CloudAuthManager {
   }
 
   pub async fn is_logged_in(&self) -> bool {
-    let state = self.state.lock().await;
-    state.is_some()
+    true
+  }
+
+  pub fn default_don_user() -> CloudUser {
+    CloudUser {
+      id: "don-cloudflare-owner".to_string(),
+      email: "DON Cloud (Cloudflare Serverless)".to_string(),
+      plan: "pro".to_string(),
+      plan_period: Some("lifetime".to_string()),
+      subscription_status: "active".to_string(),
+      profile_limit: 999_999,
+      cloud_profiles_used: 0,
+      proxy_bandwidth_limit_mb: 999_999_999,
+      proxy_bandwidth_used_mb: 0,
+      proxy_bandwidth_extra_mb: 0,
+      team_id: Some("don-team".to_string()),
+      team_name: Some("DON Cloud Sync".to_string()),
+      team_role: Some("owner".to_string()),
+      device_ordinal: Some(1),
+      device_count: Some(1),
+      is_primary_device: Some(true),
+      entitlements: Some(Self::unlocked_entitlements()),
+    }
   }
 
   /// Full local unlock used by the DON fork. Cloud login still works for
@@ -824,21 +800,6 @@ impl CloudAuthManager {
   }
 
   /// Whether this session's plan entitles it to a Wayfern automation token.
-  ///
-  /// The token IS the automation entitlement, so this is `browser_automation`
-  /// and NOT `has_active_paid_subscription`. Gating the mint on "any active
-  /// plan" meant a Solo account — active, paying, and deliberately sold without
-  /// automation or fingerprint editing — asked for a token on every startup,
-  /// every login and every 10-hour refresh, collected a 403 each time, and got
-  /// the "account temporarily restricted" toast that belongs to the
-  /// multiple-device rule. Nothing was restricted; the plan simply does not
-  /// include the feature.
-  ///
-  /// Reads the signed-in cloud account directly rather than the DON-local
-  /// entitlement helpers. Local features stay unlocked, but that cannot make
-  /// the upstream service mint a token for a signed-out or ineligible account.
-  /// Keeping those concepts separate also prevents every tokenless launch from
-  /// waiting three seconds for a request that can never succeed.
   pub async fn is_entitled_to_wayfern_token(&self) -> bool {
     let state = self.state.lock().await;
     state.as_ref().is_some_and(|auth| {
@@ -852,14 +813,6 @@ impl CloudAuthManager {
     true
   }
 
-  /// Launch/drive profiles programmatically (local API + MCP automation).
-  /// Whether this account may run the nightly Cookie Bot.
-  ///
-  /// NOT `can_use_browser_automation`. Solo is exactly the plan where the two
-  /// disagree — it pays for a nightly bot and has `browser_automation: false` —
-  /// so gating the bot on automation refused a Solo customer the one feature
-  /// their plan is sold on, and answered 402 while their scheduled runs kept
-  /// working server-side.
   pub async fn can_use_cookie_bot(&self) -> bool {
     true
   }
@@ -883,27 +836,8 @@ impl CloudAuthManager {
     true
   }
 
-  /// Identity and positive per-hour cap for the shared REST/MCP automation
-  /// limiter. No active automation entitlement means no limiter entry; the
-  /// capability gates still reject paid operations independently.
   pub async fn automation_rate_limit(&self) -> Option<(String, u64)> {
-    #[cfg(feature = "e2e")]
-    if crate::e2e_automation_enabled() {
-      if let Ok(limit) = std::env::var("DONUT_E2E_REQUESTS_PER_HOUR") {
-        if let Ok(limit) = limit.parse::<u64>() {
-          if limit > 0 {
-            return Some(("e2e-automation".to_string(), limit));
-          }
-        }
-      }
-    }
-
-    let id = self
-      .get_user()
-      .await
-      .map(|s| s.user.id)
-      .unwrap_or_else(|| "don-local".to_string());
-    Some((id, 1_000_000))
+    Some(("don-local".to_string(), 1_000_000))
   }
 
   pub async fn is_fingerprint_os_allowed(&self, _fingerprint_os: Option<&str>) -> bool {
@@ -911,15 +845,18 @@ impl CloudAuthManager {
   }
 
   pub async fn is_on_team_plan(&self) -> bool {
-    if let Some(state) = self.get_user().await {
-      return state.user.team_id.is_some();
-    }
-    false
+    true
   }
 
   pub async fn get_user(&self) -> Option<CloudAuthState> {
     let state = self.state.lock().await;
-    state.clone()
+    if let Some(ref s) = *state {
+      return Some(s.clone());
+    }
+    Some(CloudAuthState {
+      user: Self::default_don_user(),
+      logged_in_at: chrono::Utc::now().to_rfc3339(),
+    })
   }
 
   async fn clear_auth(&self) {

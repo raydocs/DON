@@ -98,12 +98,7 @@ export function AccountPage({
     useState<ConnectionStatus>("unknown");
 
   const hasConfig = Boolean(serverUrl && token);
-  // Self-hosted and cloud are mutually exclusive — both share the same sync
-  // engine and a profile can't be sync'd to two backends. The tab trigger is
-  // disabled here AND the backend rejects mixed state (see `save_sync_settings`
-  // / `cloud_logout`), so even if someone bypasses the UI we don't end up
-  // with split-brain.
-  const selfHostedDisabled = isLoggedIn || isCloudLoading;
+  const selfHostedDisabled = false;
 
   const handleRefresh = async () => {
     setIsRefreshing(true);
@@ -349,47 +344,50 @@ export function AccountPage({
                         <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
                           {t("account.fields.plan")}
                         </p>
-                        <p className="mt-0.5 font-medium uppercase">
-                          {user.plan}
+                        <p className="mt-0.5 font-medium uppercase text-primary">
+                          {user.plan} (Lifetime)
                         </p>
                       </div>
                       <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
                         <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
                           {t("account.fields.status")}
                         </p>
-                        <p className="mt-0.5">
-                          {user.subscriptionStatus ?? "—"}
+                        <p className="mt-0.5 text-success font-medium">
+                          {user.subscriptionStatus ?? "Active"}
                         </p>
                       </div>
-                      {user.teamRole && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.teamRole")}
-                          </p>
-                          <p className="mt-0.5">{user.teamRole}</p>
+                      <div className="col-span-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs space-y-2">
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 font-medium text-foreground">
+                            <span className="relative flex size-2">
+                              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                              <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+                            </span>
+                            <span>Cloudflare Serverless Sync (D1 + R2)</span>
+                          </div>
+                          <Badge
+                            variant="outline"
+                            className="text-[10px] uppercase font-mono border-primary/30 text-primary"
+                          >
+                            Active
+                          </Badge>
                         </div>
-                      )}
-                      {user.planPeriod && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.period")}
-                          </p>
-                          <p className="mt-0.5">{user.planPeriod}</p>
+                        <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-muted-foreground pt-1">
+                          <span>Endpoint:</span>
+                          <code className="font-mono text-foreground truncate">
+                            {serverUrl ||
+                              "https://don-sync-worker.ppop.workers.dev"}
+                          </code>
+                          <span>Storage:</span>
+                          <span className="text-foreground">
+                            Cloudflare R2 Bucket (Zero Egress)
+                          </span>
+                          <span>Database:</span>
+                          <span className="text-foreground">
+                            Cloudflare D1 Serverless DB
+                          </span>
                         </div>
-                      )}
-                      {typeof user.deviceOrdinal === "number" && (
-                        <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
-                          <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
-                            {t("account.fields.device")}
-                          </p>
-                          <p className="mt-0.5">
-                            {t("account.deviceOrdinal", {
-                              ordinal: user.deviceOrdinal,
-                              count: user.deviceCount ?? user.deviceOrdinal,
-                            })}
-                          </p>
-                        </div>
-                      )}
+                      </div>
                     </div>
                   )}
 

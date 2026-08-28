@@ -2248,18 +2248,18 @@
       "device": "设备"
     },
     "tabs": {
-      "account": "账户",
-      "selfHosted": "自托管",
+      "account": "DON 云账户",
+      "selfHosted": "同步服务器配置",
       "teamUsage": "团队用量"
     },
     "selfHosted": {
-      "title": "自托管同步服务器",
-      "description": "将 Donut 连接到您自己的 donut-sync 服务器，无需使用托管云即可同步配置文件、代理、组和扩展程序。",
-      "disabledWhileLoggedIn": "登录 Donut 账户时无法使用自托管同步。请先退出登录以使用自定义服务器。",
-      "connectionStatus": "连接：",
+      "title": "DON Cloudflare 同步服务",
+      "description": "基于 Cloudflare D1 + R2 零出口费构建的高性能 Serverless 同步架构，端到端加密同步配置文件、代理、指纹与扩展程序。",
+      "disabledWhileLoggedIn": "自定义同步服务器配置",
+      "connectionStatus": "连接状态：",
       "statusUnknown": "未测试",
       "testConnection": "测试连接",
-      "disconnect": "断开连接"
+      "disconnect": "恢复默认"
     },
     "deviceOrdinal": "第 {{ordinal}} 台，共 {{count}} 台",
     "automationPrimaryOnly": "浏览器自动化仅在您的主设备（设备 1）上运行。请在该设备上退出登录，才能在此设备上使用。",

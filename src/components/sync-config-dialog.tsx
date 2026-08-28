@@ -267,7 +267,7 @@ export function SyncConfigDialog({
   }, [logout, t]);
 
   const cloudBlocked = !isLoggedIn && hasConfig;
-  const selfHostedBlocked = isLoggedIn;
+  const selfHostedBlocked = false;
 
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
@@ -339,21 +339,26 @@ export function SyncConfigDialog({
             </div>
 
             <div className="flex gap-2 pt-2">
-              <Button variant="outline" className="flex-1" asChild>
-                <a
-                  href="https://donutbrowser.com/account"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {t("sync.cloud.manageAccount")}
-                </a>
+              <Button
+                variant="outline"
+                className="flex-1"
+                disabled={isTesting}
+                onClick={() =>
+                  void testConnection(
+                    serverUrl || "https://don-sync-worker.ppop.workers.dev",
+                  )
+                }
+              >
+                {t("sync.config.testConnection")}
               </Button>
               <Button
                 variant="outline"
                 className="flex-1"
-                onClick={() => void handleCloudLogout()}
+                onClick={() => {
+                  setActiveTab("self-hosted");
+                }}
               >
-                {t("sync.cloud.logout")}
+                {t("common.buttons.edit", { defaultValue: "Edit Endpoint" })}
               </Button>
             </div>
           </div>

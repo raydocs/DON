@@ -2248,18 +2248,18 @@
       "device": "Device"
     },
     "tabs": {
-      "account": "Account",
-      "selfHosted": "Self-hosted",
+      "account": "DON Cloud Account",
+      "selfHosted": "Sync Server Config",
       "teamUsage": "Team usage"
     },
     "selfHosted": {
-      "title": "Self-hosted sync server",
-      "description": "Point Donut at your own donut-sync server to sync profiles, proxies, groups, and extensions without using the hosted cloud.",
-      "disabledWhileLoggedIn": "Self-hosted sync is unavailable while you're signed into your Donut account. Sign out to use a custom server.",
-      "connectionStatus": "Connection:",
+      "title": "DON Cloudflare Sync Service",
+      "description": "High-performance Serverless sync architecture backed by Cloudflare D1 + R2 zero egress storage, end-to-end encrypting profiles, proxies, fingerprints and extensions.",
+      "disabledWhileLoggedIn": "Custom sync server configuration",
+      "connectionStatus": "Connection Status:",
       "statusUnknown": "Untested",
       "testConnection": "Test connection",
-      "disconnect": "Disconnect"
+      "disconnect": "Reset to Default"
     },
     "deviceOrdinal": "{{ordinal}} of {{count}}",
     "automationPrimaryOnly": "Browser automation runs only on your primary device (Device 1). Sign out there to use it here.",
