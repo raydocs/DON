@@ -251,7 +251,11 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => void openUrl("https://donutbrowser.com")}
+                    onClick={() =>
+                      void openUrl(
+                        "https://don-sync-worker.ppop.workers.dev/admin",
+                      )
+                    }
                   >
                     {t("about.website")}
                   </Button>
@@ -259,7 +263,7 @@ export function AboutDialog({ isOpen, onClose }: AboutDialogProps) {
                     variant="outline"
                     size="sm"
                     onClick={() =>
-                      void openUrl("https://github.com/zhom/donutbrowser")
+                      void openUrl("https://github.com/raydocs/DON")
                     }
                   >
                     {t("about.github")}
