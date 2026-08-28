@@ -322,6 +322,16 @@ pub async fn acquire_team_lock_if_needed(
   if !profile.is_sync_enabled() {
     return Ok(false);
   }
+  // Only attempt official cloud team locks if the user is authenticated with official cloud credentials
+  let _access_token = match CloudAuthManager::load_access_token() {
+    Ok(Some(token)) if !token.is_empty() => token,
+    _ => return Ok(false),
+  };
+  let _user = match CLOUD_AUTH.get_user().await {
+    Some(u) if u.user.team_id.is_some() => u,
+    _ => return Ok(false),
+  };
+
   if !CLOUD_AUTH.has_active_paid_subscription().await {
     return Ok(false);
   }
@@ -352,6 +362,13 @@ pub async fn acquire_team_lock_if_needed(
 /// Release profile lock if profile is sync-enabled and user has a paid subscription.
 pub async fn release_team_lock_if_needed(profile: &crate::profile::BrowserProfile) {
   if !profile.is_sync_enabled() {
+    return;
+  }
+  if CloudAuthManager::load_access_token()
+    .ok()
+    .flatten()
+    .is_none()
+  {
     return;
   }
   if !CLOUD_AUTH.has_active_paid_subscription().await {
