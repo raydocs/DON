@@ -557,10 +557,26 @@ app.post("/v1/objects/list", async (c) => {
   const body = (await c.req.json()) as ListRequest;
   const user = c.get("user");
 
+  let allowedProfileIds: Set<string> | null = null;
+  if (user.role !== "admin" && c.env.DB) {
+    try {
+      const rows = await c.env.DB.prepare(
+        `SELECT profile_id FROM profile_assignments WHERE user_id = ?
+         UNION
+         SELECT id as profile_id FROM cloud_profiles WHERE owner_id = ? AND is_deleted = 0`,
+      )
+        .bind(user.userId, user.userId)
+        .all<{ profile_id: string }>();
+      allowedProfileIds = new Set(rows.results.map((r) => r.profile_id));
+    } catch (e) {
+      console.warn("Failed to query allowed profile IDs:", e);
+      allowedProfileIds = new Set();
+    }
+  }
+
   const profileId = extractProfileId(body.prefix);
   if (profileId && user.role !== "admin") {
-    const isAuth = await isProfileAuthorized(user, profileId, "read", c.env);
-    if (!isAuth) {
+    if (!allowedProfileIds || !allowedProfileIds.has(profileId)) {
       return c.json(
         { error: `Forbidden: List not permitted for profile ${profileId}` },
         403,
@@ -576,8 +592,16 @@ app.post("/v1/objects/list", async (c) => {
     cursor: body.continuationToken || undefined,
   });
 
-  const objects: ListObjectItem[] = listed.objects.map(
-    (obj: { key: string; size: number; uploaded: Date }) => {
+  const objects: ListObjectItem[] = listed.objects
+    .filter((obj: { key: string }) => {
+      if (user.role === "admin") return true;
+      const profId = extractProfileId(obj.key);
+      if (profId) {
+        return allowedProfileIds ? allowedProfileIds.has(profId) : false;
+      }
+      return true;
+    })
+    .map((obj: { key: string; size: number; uploaded: Date }) => {
       const relativeKey = user.prefix
         ? obj.key.replace(new RegExp(`^${user.prefix}`), "")
         : obj.key;
@@ -586,8 +610,7 @@ app.post("/v1/objects/list", async (c) => {
         size: obj.size,
         lastModified: obj.uploaded.toISOString(),
       };
-    },
-  );
+    });
 
   const res: ListResponse = {
     objects,

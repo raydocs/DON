@@ -106,7 +106,7 @@ export async function authenticateRequest(
           userId: user.id,
           username: user.username,
           role: user.role,
-          prefix: user.role === "admin" ? "" : `users/${user.id}/`,
+          prefix: "",
         };
       }
     } catch (err) {
