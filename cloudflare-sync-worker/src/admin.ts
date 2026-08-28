@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { adminHtmlContent } from "./admin_html.js";
 import { safeEqual } from "./auth.js";
 import type {
   CloudProfileRecord,
@@ -14,8 +15,95 @@ export const adminRouter = new Hono<{
   Variables: { user?: UserContext };
 }>();
 
+// Helper: check if request is authenticated via Cloudflare Access
+function getCfAccessUser(c: any): { email: string } | null {
+  // 1. Direct header injected by Cloudflare Access Edge
+  let email = c.req
+    .header("cf-access-authenticated-user-email")
+    ?.trim()
+    .toLowerCase();
+
+  // 2. JWT assertion header or CF_Authorization cookie from Cloudflare Access
+  if (!email) {
+    const jwt =
+      c.req.header("cf-access-jwt-assertion") ||
+      c.req.header("cookie")?.match(/CF_Authorization=([^;]+)/)?.[1];
+    if (jwt) {
+      try {
+        const parts = jwt.split(".");
+        if (parts.length === 3) {
+          const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+          const payload = JSON.parse(atob(base64));
+          if (payload.email) {
+            email = String(payload.email).trim().toLowerCase();
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // 3. Optional testing header
+  if (!email) {
+    email = c.req.header("x-admin-email")?.trim().toLowerCase();
+  }
+
+  if (!email) return null;
+
+  const allowedEmails = (c.env.ADMIN_EMAILS || "ruiruiwan8@gmail.com")
+    .split(",")
+    .map((e: string) => e.trim().toLowerCase())
+    .filter(Boolean);
+
+  if (allowedEmails.includes(email) || allowedEmails.includes("*")) {
+    return { email };
+  }
+  return null;
+}
+
+// 1. GET /api/admin/auth-status (allows frontend to detect Cloudflare Access without prompt)
+adminRouter.get("/api/admin/auth-status", async (c) => {
+  const cfUser = getCfAccessUser(c);
+  if (cfUser) {
+    return c.json({
+      authenticated: true,
+      method: "cloudflare_access",
+      email: cfUser.email,
+      role: "admin",
+    });
+  }
+
+  const authHeader = c.req.header("Authorization");
+  const token = authHeader?.startsWith("Bearer ")
+    ? authHeader.substring(7).trim()
+    : c.req.query("token") || "";
+
+  if (token && c.env.SYNC_TOKEN && safeEqual(token, c.env.SYNC_TOKEN)) {
+    return c.json({
+      authenticated: true,
+      method: "master_token",
+      username: "Master Admin",
+      role: "admin",
+    });
+  }
+
+  return c.json({ authenticated: false });
+});
+
 // Admin Authentication Middleware
 adminRouter.use("/api/admin/*", async (c, next) => {
+  // 1. Check Cloudflare Access Zero Trust header
+  const cfUser = getCfAccessUser(c);
+  if (cfUser) {
+    c.set("user", {
+      userId: `cf_${cfUser.email}`,
+      username: cfUser.email,
+      role: "admin",
+      prefix: "",
+    });
+    return await next();
+  }
+
+  // 2. Fallback to Master Token / D1 Admin verification
   const authHeader = c.req.header("Authorization");
   const token = authHeader?.startsWith("Bearer ")
     ? authHeader.substring(7).trim()
@@ -45,7 +133,12 @@ adminRouter.use("/api/admin/*", async (c, next) => {
         console.error("Admin auth check error:", e);
       }
     }
-    return c.json({ error: "Unauthorized: Master Admin Token required" }, 401);
+    return c.json(
+      {
+        error: "Unauthorized: Master Admin Token or Cloudflare Access required",
+      },
+      401,
+    );
   }
 
   c.set("user", {
@@ -345,8 +438,6 @@ adminRouter.get("/api/admin/events", async (c) => {
 });
 
 // 5. GET /admin (Modern Web Admin SPA Dashboard)
-const adminHtmlContent = ` + JSON.stringify(html) + `;
-
 adminRouter.get("/admin", (c) => {
   return c.html(adminHtmlContent);
 });

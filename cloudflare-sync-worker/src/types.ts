@@ -4,6 +4,7 @@ export interface Env {
   SYNC_TOKEN?: string;
   SIGNING_SECRET?: string;
   JWT_PUBLIC_KEY?: string;
+  ADMIN_EMAILS?: string;
 }
 
 export interface UserContext {
