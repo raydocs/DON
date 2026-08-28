@@ -2611,9 +2611,6 @@ pub fn run_with_builder(
           // Set the global scheduler so commands can access it
           sync::set_global_scheduler(scheduler.clone());
 
-          // Start initial sync for all enabled profiles
-          scheduler.sync_all_enabled_profiles(&app_handle_sync).await;
-
           // Check for missing synced profiles (deleted locally but exist remotely)
           match sync::SyncEngine::create_from_settings(&app_handle_sync).await {
             Ok(engine) => {
@@ -3012,6 +3009,7 @@ mod tests {
       "generate_sample_fingerprint",
       "cloud_get_wayfern_token",
       "cloud_refresh_wayfern_token",
+      "cloud_get_proxy_usage",
       "lock_profile",
     ];
 

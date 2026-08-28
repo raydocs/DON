@@ -435,7 +435,7 @@ impl ProfileManager {
       // A random-looking pastel derived from the (random) profile id, so every
       // new profile gets a distinct, stable window color it can later override.
       window_color: Some(crate::wayfern_manager::derive_profile_color(&profile_id)),
-      sync_mode: SyncMode::Disabled,
+      sync_mode: SyncMode::Regular,
       encryption_salt: None,
       last_sync: None,
       host_os: Some(get_host_os()),
@@ -461,6 +461,9 @@ impl ProfileManager {
 
     // Save profile info
     self.save_profile(&profile)?;
+
+    // Auto-queue cloud sync for newly created profile
+    crate::sync::queue_profile_sync_if_eligible(&profile);
 
     // Verify the profile was saved correctly
     if !profile_file.exists() {
@@ -1178,7 +1181,11 @@ impl ProfileManager {
       tags: source.tags,
       note: source.note,
       window_color: source.window_color,
-      sync_mode: SyncMode::Disabled,
+      sync_mode: if source.sync_mode == SyncMode::Disabled {
+        SyncMode::Regular
+      } else {
+        source.sync_mode
+      },
       encryption_salt: None,
       last_sync: None,
       host_os: Some(get_host_os()),
@@ -1215,6 +1222,9 @@ impl ProfileManager {
     }
 
     self.save_profile(&new_profile)?;
+
+    // Auto-queue cloud sync for cloned profile
+    crate::sync::queue_profile_sync_if_eligible(&new_profile);
 
     if let Err(e) = events::emit_empty("profiles-changed") {
       log::warn!("Warning: Failed to emit profiles-changed event: {e}");

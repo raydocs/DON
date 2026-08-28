@@ -82,22 +82,18 @@ impl SyncSubscription {
 
     // Fall back to self-hosted settings
     let manager = SettingsManager::instance();
-    let settings = manager
-      .load_settings()
-      .map_err(|e| format!("Failed to load settings: {e}"))?;
+    let settings = manager.load_settings().unwrap_or_default();
 
-    let Some(server_url) = settings.sync_server_url else {
-      return Ok(None);
-    };
+    let server_url = settings
+      .sync_server_url
+      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string());
 
     let token = manager
       .get_sync_token(app_handle)
       .await
-      .map_err(|e| format!("Failed to get sync token: {e}"))?;
-
-    let Some(token) = token else {
-      return Ok(None);
-    };
+      .ok()
+      .flatten()
+      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
 
     Ok(Some(Self::new(
       server_url,
@@ -175,10 +171,15 @@ impl SyncSubscription {
         .get_or_refresh_sync_token()
         .await
         .map_err(|e| format!("Failed to refresh cloud sync token: {e}")),
-      TokenSource::SelfHosted => SettingsManager::instance()
-        .get_sync_token(app_handle)
-        .await
-        .map_err(|e| format!("Failed to refresh self-hosted sync token: {e}")),
+      TokenSource::SelfHosted => {
+        let token = SettingsManager::instance()
+          .get_sync_token(app_handle)
+          .await
+          .ok()
+          .flatten()
+          .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
+        Ok(Some(token))
+      }
     }
   }
 

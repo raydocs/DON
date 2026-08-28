@@ -1543,8 +1543,6 @@ pub async fn restart_sync_service(app_handle: tauri::AppHandle) -> Result<(), St
       let scheduler = Arc::new(sync::SyncScheduler::new());
       sync::set_global_scheduler(scheduler.clone());
 
-      scheduler.sync_all_enabled_profiles(&app_handle_sync).await;
-
       match sync::SyncEngine::create_from_settings(&app_handle_sync).await {
         Ok(engine) => {
           if let Err(e) = engine

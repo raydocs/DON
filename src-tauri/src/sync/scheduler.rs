@@ -347,6 +347,7 @@ impl SyncScheduler {
     let app_handle_clone = app_handle.clone();
 
     tokio::spawn(async move {
+      let mut last_remote_poll = Instant::now();
       while scheduler.running.load(Ordering::SeqCst) {
         tokio::select! {
           Some(work_item) = work_rx.recv() => {
@@ -364,6 +365,15 @@ impl SyncScheduler {
           }
           _ = sleep(Duration::from_millis(2000)) => {
             scheduler.process_pending(&app_handle_clone).await;
+
+            // Periodically check for remote updates / newly added profiles every 30 seconds
+            if last_remote_poll.elapsed() >= Duration::from_secs(30) {
+              last_remote_poll = Instant::now();
+              if let Ok(engine) = super::engine::SyncEngine::create_from_settings(&app_handle_clone).await {
+                let _ = engine.check_for_missing_synced_profiles(&app_handle_clone).await;
+                let _ = engine.check_for_missing_synced_entities(&app_handle_clone).await;
+              }
+            }
           }
         }
       }

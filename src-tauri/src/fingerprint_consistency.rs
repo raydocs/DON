@@ -379,7 +379,7 @@ pub async fn probe_and_check_consistency(
       .map_err(|_| crate::backend_error("EXIT_PROBE_FAILED"))?;
     let exit_ip = fetched.map_err(|e| crate::backend_error_with_detail("EXIT_PROBE_FAILED", e))?;
 
-    match crate::geolocation::get_geolocation(&exit_ip) {
+    match crate::geolocation::get_geolocation_async(&exit_ip, None).await {
       Ok(geo) => Ok(Some(CachedExit {
         fetched_at: crate::proxy_manager::now_secs(),
         identity,
@@ -452,7 +452,7 @@ pub async fn probe_direct_and_check(profile: &BrowserProfile) -> Result<Consiste
     .map_err(|_| crate::backend_error("EXIT_PROBE_FAILED"))?;
   let exit_ip = fetched.map_err(|e| crate::backend_error_with_detail("EXIT_PROBE_FAILED", e))?;
 
-  match crate::geolocation::get_geolocation(&exit_ip) {
+  match crate::geolocation::get_geolocation_async(&exit_ip, None).await {
     Ok(geo) => Ok(compare_exit_to_fingerprint(
       profile,
       Some(geo.timezone),

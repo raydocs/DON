@@ -6,6 +6,7 @@ use maxminddb::{geoip2, Reader};
 use quick_xml::events::Event;
 use quick_xml::Reader as XmlReader;
 use rand::RngExt;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -40,6 +41,9 @@ pub enum GeolocationError {
 
   #[error("IP error: {0}")]
   Ip(#[from] IpError),
+
+  #[error("Network error: {0}")]
+  Network(String),
 }
 
 /// The language part of a locale or language tag: `"en"` from `"en-US"`,
@@ -313,6 +317,127 @@ pub fn get_geolocation(ip: &str) -> Result<Geolocation, GeolocationError> {
   })
 }
 
+#[derive(Debug, Deserialize)]
+struct IpApiResponse {
+  status: String,
+  #[serde(rename = "countryCode")]
+  country_code: Option<String>,
+  timezone: Option<String>,
+  lat: Option<f64>,
+  lon: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IpInfoResponse {
+  country: Option<String>,
+  timezone: Option<String>,
+  loc: Option<String>,
+}
+
+/// Fetch geolocation using online real-time APIs (ip-api.com, ipinfo.io)
+/// falling back to local GeoLite2 MMDB if offline or unreachable.
+pub async fn get_geolocation_async(
+  ip: &str,
+  proxy: Option<&str>,
+) -> Result<Geolocation, GeolocationError> {
+  if let Ok(geo) = fetch_online_geolocation(ip, proxy).await {
+    return Ok(geo);
+  }
+  get_geolocation(ip)
+}
+
+async fn fetch_online_geolocation(
+  ip: &str,
+  proxy: Option<&str>,
+) -> Result<Geolocation, GeolocationError> {
+  let client_builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4));
+  let client = if let Some(proxy_url) = proxy {
+    if let Ok(p) = reqwest::Proxy::all(proxy_url) {
+      client_builder
+        .no_proxy()
+        .proxy(p)
+        .build()
+        .map_err(|e| GeolocationError::Network(e.to_string()))?
+    } else {
+      client_builder
+        .build()
+        .map_err(|e| GeolocationError::Network(e.to_string()))?
+    }
+  } else {
+    client_builder
+      .build()
+      .map_err(|e| GeolocationError::Network(e.to_string()))?
+  };
+
+  // 1. Try ip-api.com
+  let url = format!("http://ip-api.com/json/{}", ip);
+  if let Ok(res) = client.get(&url).send().await {
+    if res.status().is_success() {
+      if let Ok(data) = res.json::<IpApiResponse>().await {
+        if data.status == "success" {
+          if let (Some(tz), Some(lat), Some(lon), Some(cc)) =
+            (data.timezone, data.lat, data.lon, data.country_code)
+          {
+            let selector = LocaleSelector::new()?;
+            let locale = selector.from_region(&cc.to_uppercase())?;
+            log::info!(
+              "Resolved online geolocation via ip-api: {} ({}, {}) -> {}",
+              ip,
+              lat,
+              lon,
+              tz
+            );
+            return Ok(Geolocation {
+              locale,
+              longitude: lon,
+              latitude: lat,
+              timezone: tz,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // 2. Try ipinfo.io
+  let url2 = format!("https://ipinfo.io/{}/json", ip);
+  if let Ok(res) = client.get(&url2).send().await {
+    if res.status().is_success() {
+      if let Ok(data) = res.json::<IpInfoResponse>().await {
+        if let (Some(tz), Some(loc), Some(cc)) = (data.timezone, data.loc, data.country) {
+          let parts: Vec<&str> = loc.split(',').collect();
+          if parts.len() == 2 {
+            if let (Ok(lat), Ok(lon)) = (
+              parts[0].trim().parse::<f64>(),
+              parts[1].trim().parse::<f64>(),
+            ) {
+              let selector = LocaleSelector::new()?;
+              let locale = selector.from_region(&cc.to_uppercase())?;
+              log::info!(
+                "Resolved online geolocation via ipinfo: {} ({}, {}) -> {}",
+                ip,
+                lat,
+                lon,
+                tz
+              );
+              return Ok(Geolocation {
+                locale,
+                longitude: lon,
+                latitude: lat,
+                timezone: tz,
+              });
+            }
+          }
+        }
+      }
+    }
+  }
+
+  Err(GeolocationError::LocationNotFound(format!(
+    "Online lookup failed for {ip}"
+  )))
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -366,5 +491,12 @@ mod tests {
     let zh_hant_us = normalize_locale("zh-Hant-US");
     assert_eq!(zh_hant_us.language, "zh");
     assert_eq!(zh_hant_us.region, Some("US".to_string()));
+  }
+
+  #[tokio::test]
+  async fn test_get_geolocation_async_palo_alto() {
+    let geo = get_geolocation_async("204.252.119.24", None).await.unwrap();
+    assert_eq!(geo.timezone, "America/Los_Angeles");
+    assert_eq!(geo.locale.region, Some("US".to_string()));
   }
 }

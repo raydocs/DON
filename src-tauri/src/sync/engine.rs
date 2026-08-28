@@ -369,9 +369,11 @@ pub fn is_sync_configured() -> bool {
   }
   let manager = SettingsManager::instance();
   if let Ok(settings) = manager.load_settings() {
-    return settings.sync_server_url.is_some();
+    if settings.sync_server_url.is_some() {
+      return true;
+    }
   }
-  false
+  !crate::settings_manager::DEFAULT_DON_SYNC_URL.is_empty()
 }
 
 pub struct SyncEngine {
@@ -2406,17 +2408,13 @@ impl SyncEngine {
     let profiles_dir = profile_manager.get_profiles_dir();
     let profile_dir = profiles_dir.join(profile_id);
 
+    // Validate UUID format
+    if uuid::Uuid::parse_str(profile_id).is_err() {
+      return Ok(false);
+    }
+
     // Check if profile exists locally
-    let profile_uuid = uuid::Uuid::parse_str(profile_id)
-      .map_err(|_| SyncError::InvalidData(format!("Invalid profile ID format: {}", profile_id)))?;
-
-    let profiles = profile_manager
-      .list_profiles()
-      .map_err(|e| SyncError::IoError(format!("Failed to list profiles: {e}")))?;
-
-    let exists_locally = profiles.iter().any(|p| p.id == profile_uuid);
-
-    if exists_locally {
+    if profile_dir.join("metadata.json").exists() {
       log::debug!("Profile {} exists locally, skipping download", profile_id);
       return Ok(false);
     }
@@ -2711,12 +2709,17 @@ impl SyncEngine {
       profiles_to_check.len()
     );
 
+    let profile_manager = ProfileManager::instance();
+    let profiles_dir = profile_manager.get_profiles_dir();
+
     // For each remote profile, check if it exists locally and download if missing.
-    // Skip any profile that has a tombstone — a leftover manifest under a
-    // tombstoned id means delete_prefix raced or partially failed, and
-    // re-downloading it here is what surfaced the "Browsing keeps re-syncing"
-    // bug after a delete.
     for (profile_id, key_prefix) in &profiles_to_check {
+      // Fast check: if profile already exists locally, skip immediately
+      if profiles_dir.join(profile_id).join("metadata.json").exists() {
+        continue;
+      }
+
+      // Profile is missing locally — check tombstone before downloading
       let personal_tombstone = format!("tombstones/profiles/{}.json", profile_id);
       let has_personal_tombstone = matches!(
         self.client.stat(&personal_tombstone).await,
@@ -2779,65 +2782,56 @@ impl SyncEngine {
 
     // Delete local synced profiles that have a remote tombstone (deleted on another device)
     {
-      let profile_manager = ProfileManager::instance();
       let local_synced: Vec<(String, Option<String>)> = profile_manager
         .list_profiles()
         .unwrap_or_default()
-        .iter()
+        .into_iter()
         .filter(|p| p.is_sync_enabled())
-        .map(|p| (p.id.to_string(), p.created_by_id.clone()))
+        .map(|p| (p.id.to_string(), p.created_by_id))
         .collect();
 
-      let team_prefix = if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
-        auth.user.team_id.map(|tid| format!("teams/{}/", tid))
-      } else {
-        None
-      };
-
-      for (pid, created_by_id) in &local_synced {
-        // Check personal tombstone
-        let personal_tombstone = format!("tombstones/profiles/{}.json", pid);
-        let has_personal_tombstone = matches!(
-          self.client.stat(&personal_tombstone).await,
-          Ok(stat) if stat.exists
-        );
-
-        // Check team tombstone
-        let has_team_tombstone = if let (Some(tp), Some(_)) = (&team_prefix, created_by_id) {
-          let team_tombstone = format!("{}tombstones/profiles/{}.json", tp, pid);
-          matches!(
-            self.client.stat(&team_tombstone).await,
-            Ok(stat) if stat.exists
-          )
+      if !local_synced.is_empty() {
+        let personal_tombstones = self.client.list("tombstones/profiles/").await.ok();
+        let team_prefix = if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
+          auth.user.team_id.map(|tid| format!("teams/{}/", tid))
         } else {
-          false
+          None
+        };
+        let team_tombstones = if let Some(ref tp) = team_prefix {
+          let prefix = format!("{}tombstones/profiles/", tp);
+          self.client.list(&prefix).await.ok()
+        } else {
+          None
         };
 
-        if has_personal_tombstone || has_team_tombstone {
-          // Originator guard: re-read the profile right before deleting. If the
-          // local user disabled sync between the snapshot above and this stat
-          // call, they're the one who wrote this tombstone — keep their local
-          // copy. Tombstones must delete remote-originated changes, never the
-          // sender's own data. (Caused mass local deletion in v0.24.x.)
-          let still_sync_enabled = profile_manager
-            .list_profiles()
-            .unwrap_or_default()
-            .iter()
-            .find(|p| p.id.to_string() == *pid)
-            .is_some_and(|p| p.is_sync_enabled());
-          if !still_sync_enabled {
+        for (pid, _created_by_id) in &local_synced {
+          let tombstone_file = format!("{}.json", pid);
+          let has_personal = personal_tombstones
+            .as_ref()
+            .map(|l| l.objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
+            .unwrap_or(false);
+          let has_team = team_tombstones
+            .as_ref()
+            .map(|l| l.objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
+            .unwrap_or(false);
+
+          if has_personal || has_team {
+            let still_sync_enabled = profile_manager
+              .list_profiles()
+              .unwrap_or_default()
+              .iter()
+              .find(|p| p.id.to_string() == *pid)
+              .is_some_and(|p| p.is_sync_enabled());
+            if !still_sync_enabled {
+              continue;
+            }
             log::info!(
-              "Profile {} has a tombstone but sync is no longer enabled locally — keeping local copy (originating device)",
+              "Profile {} has remote tombstone, deleting locally (deleted on another device)",
               pid
             );
-            continue;
-          }
-          log::info!(
-            "Profile {} has remote tombstone, deleting locally (deleted on another device)",
-            pid
-          );
-          if let Err(e) = profile_manager.delete_profile_local_only(pid) {
-            log::warn!("Failed to delete tombstoned profile {}: {}", pid, e);
+            if let Err(e) = profile_manager.delete_profile_local_only(pid) {
+              log::warn!("Failed to delete tombstoned profile {}: {}", pid, e);
+            }
           }
         }
       }

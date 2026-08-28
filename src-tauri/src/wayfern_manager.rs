@@ -1089,7 +1089,8 @@ impl WayfernManager {
           .await
           .map_err(|e| format!("Failed to fetch public IP: {e}"))?,
       };
-      crate::geolocation::get_geolocation(&ip)
+      crate::geolocation::get_geolocation_async(&ip, proxy)
+        .await
         .map_err(|e| format!("Failed to get geolocation for IP {ip}: {e}"))
     }
     .await;
@@ -1672,6 +1673,15 @@ impl WayfernManager {
           obj.insert("timezoneOffset".to_string(), json!(300));
           log::info!("Added default timezoneOffset to fingerprint");
         }
+      }
+
+      // Auto-correct timezone and geolocation if proxy is present
+      let should_geolocate = !matches!(config.geoip.as_ref(), Some(serde_json::Value::Bool(false)));
+      if should_geolocate
+        && (proxy_url.is_some() || config.proxy.is_some() || config.geoip.is_some())
+      {
+        let active_proxy = proxy_url.or(config.proxy.as_deref());
+        Self::apply_geolocation(&mut fingerprint, active_proxy, config.geoip.as_ref()).await;
       }
 
       // Denormalize fingerprint for Wayfern CDP (convert arrays/objects to JSON strings)
