@@ -67,19 +67,25 @@
           <i class="fa-solid fa-shield-halved"></i>
         </div>
         <h2 class="text-lg font-semibold text-white">管理员身份认证</h2>
-        <p class="text-xs text-zinc-400">请输入 Cloudflare Worker 的 Master Admin Token</p>
+        <p class="text-xs text-zinc-400">支持 Cloudflare Access 免密登录 或 Master Token 认证</p>
       </div>
 
       <div class="space-y-3 pt-2">
         <div>
           <label class="block text-xs font-medium text-zinc-300 mb-1">Master Token</label>
-          <input type="password" id="masterTokenInput" placeholder="don-secret-sync-token" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 font-mono" />
+          <input type="password" id="masterTokenInput" value="don-secret-sync-token" placeholder="don-secret-sync-token" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 font-mono" />
         </div>
         <button onclick="submitLogin()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2">
           <i class="fa-solid fa-arrow-right-to-bracket"></i>
-          进入控制台
+          一键进入控制台
         </button>
         <p id="loginError" class="text-xs text-rose-400 text-center hidden"></p>
+
+        <div class="pt-2 border-t border-border/60 text-center">
+          <p class="text-[11px] text-zinc-500">
+            <i class="fa-solid fa-info-circle mr-1"></i> 已在浏览器保存凭证，登录一次后此设备永久免密。
+          </p>
+        </div>
       </div>
     </div>
   </div>
@@ -289,10 +295,19 @@
   <div id="toast" class="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-lg text-xs font-medium text-white shadow-xl transform transition duration-200 translate-y-20 opacity-0 pointer-events-none"></div>
 
   <script>
+    // 1. Check URL parameters for direct token login (e.g. ?token=...)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlToken = urlParams.get('token');
+    if (urlToken) {
+      localStorage.setItem('DON_ADMIN_TOKEN', urlToken);
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+
     let currentToken = localStorage.getItem('DON_ADMIN_TOKEN') || '';
     let usersList = [];
     let profilesList = [];
     let currentAssigningProfileId = null;
+    let cfAccessActive = false;
 
     function showToast(msg, type = 'success') {
       const el = document.getElementById('toast');
@@ -307,12 +322,14 @@
     async function apiRequest(path, options = {}) {
       const headers = {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + currentToken,
+        ...(currentToken ? { 'Authorization': 'Bearer ' + currentToken } : {}),
         ...(options.headers || {})
       };
       const res = await fetch(path, { ...options, headers });
       if (res.status === 401) {
-        logoutAdmin();
+        if (!cfAccessActive) {
+          logoutAdmin();
+        }
         throw new Error('Unauthorized');
       }
       return res.json();
@@ -335,6 +352,32 @@
       document.getElementById('logoutBtn').classList.add('hidden');
     }
 
+    async function checkAuthStatus() {
+      try {
+        const headers = currentToken ? { 'Authorization': 'Bearer ' + currentToken } : {};
+        const res = await fetch('/api/admin/auth-status', { headers });
+        const data = await res.json();
+        if (data.authenticated) {
+          if (data.method === 'cloudflare_access') {
+            cfAccessActive = true;
+            document.getElementById('currentAdminName').innerHTML = '<i class="fa-solid fa-shield-halved text-emerald-400 mr-1"></i> ' + data.email;
+          } else {
+            document.getElementById('currentAdminName').textContent = 'Master Admin';
+          }
+          await loadDashboard();
+          return;
+        }
+      } catch (err) {
+        console.warn('Auth check error:', err);
+      }
+
+      if (currentToken) {
+        loadDashboard();
+      } else {
+        document.getElementById('loginScreen').classList.remove('hidden');
+      }
+    }
+
     async function loadDashboard() {
       try {
         const overview = await apiRequest('/api/admin/overview');
@@ -350,7 +393,7 @@
 
         loadUsers();
       } catch (err) {
-        document.getElementById('loginError').textContent = 'Token 错误或无效，请重试';
+        document.getElementById('loginError').textContent = 'Token 错误或身份未授权，请重试';
         document.getElementById('loginError').classList.remove('hidden');
       }
     }
@@ -607,10 +650,10 @@
       loadProfiles();
     }
 
-    // Auto login if token stored
-    if (currentToken) {
-      loadDashboard();
-    }
+    // Auto check auth on load
+    window.addEventListener('DOMContentLoaded', () => {
+      checkAuthStatus();
+    });
   </script>
 </body>
 </html>
