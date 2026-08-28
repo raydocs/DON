@@ -6,6 +6,8 @@ CREATE TABLE IF NOT EXISTS users (
   username TEXT NOT NULL UNIQUE,
   token_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'member', -- 'admin', 'member'
+  note TEXT,
+  is_active INTEGER NOT NULL DEFAULT 1, -- 1: active, 0: disabled/suspended
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );

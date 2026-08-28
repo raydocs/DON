@@ -138,3 +138,36 @@ export interface CloudProfileRecord {
   created_at: number;
   updated_at: number;
 }
+
+export interface UserRecord {
+  id: string;
+  username: string;
+  token_hash: string;
+  role: "admin" | "member";
+  note?: string | null;
+  is_active: number;
+  created_at: number;
+  updated_at: number;
+  assigned_profiles_count?: number;
+}
+
+export interface ProfileAssignmentRecord {
+  id: string;
+  profile_id: string;
+  user_id: string;
+  can_write: number;
+  is_pinned: number;
+  assigned_at: number;
+  username?: string;
+}
+
+export interface SyncEventRecord {
+  id: number;
+  profile_id: string;
+  user_id: string;
+  username?: string;
+  profile_name?: string;
+  event_type: string;
+  details?: string | null;
+  created_at: number;
+}

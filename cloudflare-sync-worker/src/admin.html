@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DON Cloudflare 云端控制台 (Admin Dashboard)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#ecfdf5',
+              500: '#10b981',
+              600: '#059669',
+              700: '#047857',
+            },
+            card: '#18181b',
+            background: '#09090b',
+            border: '#27272a'
+          }
+        }
+      }
+    }
+  </script>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    body { background-color: #09090b; color: #f4f4f5; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    .glass { background: rgba(24, 24, 27, 0.75); backdrop-filter: blur(12px); border: 1px solid rgba(255, 255, 255, 0.08); }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col antialiased selection:bg-emerald-500 selection:text-white">
+  
+  <!-- Navbar -->
+  <header class="glass sticky top-0 z-50 border-b border-border px-6 py-3.5 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="size-8 rounded-lg bg-emerald-500/20 border border-emerald-500/30 flex items-center justify-center text-emerald-400 font-bold">
+        <i class="fa-solid fa-cloud"></i>
+      </div>
+      <div>
+        <h1 class="text-sm font-semibold tracking-tight text-white flex items-center gap-2">
+          DON Cloudflare 控制台
+          <span class="text-[10px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2 py-0.5 rounded-full font-mono font-normal">v2.0 Serverless</span>
+        </h1>
+        <p class="text-[11px] text-zinc-400">白名单授权 & Profile 环境细粒度分发系统</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <div id="authStatusBadge" class="hidden text-xs px-2.5 py-1 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1.5">
+        <span class="size-1.5 rounded-full bg-emerald-400 animate-pulse"></span>
+        <span id="currentAdminName">Master Admin</span>
+      </div>
+      <button onclick="logoutAdmin()" id="logoutBtn" class="hidden text-xs px-3 py-1.5 rounded-md border border-border hover:bg-zinc-800 text-zinc-300 transition">
+        退出登录
+      </button>
+    </div>
+  </header>
+
+  <!-- Login Modal / Screen -->
+  <div id="loginScreen" class="fixed inset-0 z-50 bg-background/90 backdrop-blur-md flex items-center justify-center p-4">
+    <div class="glass max-w-md w-full rounded-xl p-6 border border-border space-y-4 shadow-2xl">
+      <div class="text-center space-y-1">
+        <div class="inline-flex size-12 rounded-full bg-emerald-500/10 border border-emerald-500/20 items-center justify-center text-emerald-400 text-xl mb-2">
+          <i class="fa-solid fa-shield-halved"></i>
+        </div>
+        <h2 class="text-lg font-semibold text-white">管理员身份认证</h2>
+        <p class="text-xs text-zinc-400">请输入 Cloudflare Worker 的 Master Admin Token</p>
+      </div>
+
+      <div class="space-y-3 pt-2">
+        <div>
+          <label class="block text-xs font-medium text-zinc-300 mb-1">Master Token</label>
+          <input type="password" id="masterTokenInput" placeholder="don-secret-sync-token" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-sm text-white focus:outline-none focus:border-emerald-500 font-mono" />
+        </div>
+        <button onclick="submitLogin()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2">
+          <i class="fa-solid fa-arrow-right-to-bracket"></i>
+          进入控制台
+        </button>
+        <p id="loginError" class="text-xs text-rose-400 text-center hidden"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main Container -->
+  <main id="dashboardContent" class="flex-1 max-w-7xl w-full mx-auto p-6 space-y-6 hidden">
+    
+    <!-- Top Stats -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div class="glass rounded-xl p-4 border border-border space-y-1">
+        <div class="flex items-center justify-between text-zinc-400 text-xs">
+          <span>白名单用户数</span>
+          <i class="fa-solid fa-users text-emerald-400"></i>
+        </div>
+        <p id="statUsers" class="text-2xl font-bold text-white tracking-tight">0</p>
+        <p class="text-[11px] text-zinc-500">拥有专属 Token 的授权成员</p>
+      </div>
+
+      <div class="glass rounded-xl p-4 border border-border space-y-1">
+        <div class="flex items-center justify-between text-zinc-400 text-xs">
+          <span>云端环境数 (Profiles)</span>
+          <i class="fa-solid fa-cubes text-cyan-400"></i>
+        </div>
+        <p id="statProfiles" class="text-2xl font-bold text-white tracking-tight">0</p>
+        <p class="text-[11px] text-zinc-500">备份在 R2 存储的浏览器环境</p>
+      </div>
+
+      <div class="glass rounded-xl p-4 border border-border space-y-1">
+        <div class="flex items-center justify-between text-zinc-400 text-xs">
+          <span>授权分发总数</span>
+          <i class="fa-solid fa-key text-amber-400"></i>
+        </div>
+        <p id="statAssignments" class="text-2xl font-bold text-white tracking-tight">0</p>
+        <p class="text-[11px] text-zinc-500">已分发给各成员的环境绑定</p>
+      </div>
+
+      <div class="glass rounded-xl p-4 border border-border space-y-1">
+        <div class="flex items-center justify-between text-zinc-400 text-xs">
+          <span>R2 存储占用</span>
+          <i class="fa-solid fa-database text-purple-400"></i>
+        </div>
+        <p id="statStorage" class="text-2xl font-bold text-white tracking-tight">0 MB</p>
+        <p class="text-[11px] text-zinc-500">Cloudflare 零出口流量计费</p>
+      </div>
+    </div>
+
+    <!-- Navigation Tabs -->
+    <div class="flex items-center gap-2 border-b border-border pb-3">
+      <button onclick="switchTab('users')" id="tabUsersBtn" class="px-4 py-2 rounded-lg text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-2 transition">
+        <i class="fa-solid fa-user-check"></i>
+        用户白名单管理
+      </button>
+      <button onclick="switchTab('profiles')" id="tabProfilesBtn" class="px-4 py-2 rounded-lg text-xs font-medium text-zinc-400 hover:text-white hover:bg-zinc-800 flex items-center gap-2 transition">
+        <i class="fa-solid fa-share-nodes"></i>
+        Profile 环境分配分发
+      </button>
+      <button onclick="switchTab('events')" id="tabEventsBtn" class="px-4 py-2 rounded-lg text-xs font-medium text-zinc-400 hover:text-white hover:bg-zinc-800 flex items-center gap-2 transition">
+        <i class="fa-solid fa-clock-rotate-left"></i>
+        实时同步审计日志
+      </button>
+    </div>
+
+    <!-- 1. Tab: Users -->
+    <section id="tabUsers" class="space-y-4">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-semibold text-white">用户白名单与 Token 列表</h2>
+          <p class="text-xs text-zinc-400">只有在此白名单内的 Token 才能拉取和同步 DON 浏览器环境，任何其他人均被 401 拦截。</p>
+        </div>
+        <button onclick="openAddUserModal()" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-user-plus"></i>
+          添加授权用户
+        </button>
+      </div>
+
+      <div class="glass rounded-xl border border-border overflow-hidden">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-zinc-900/60 border-b border-border text-zinc-400">
+            <tr>
+              <th class="py-3 px-4">用户名 / 备注</th>
+              <th class="py-3 px-4">角色</th>
+              <th class="py-3 px-4">状态</th>
+              <th class="py-3 px-4">专属 Token / 客户端配置</th>
+              <th class="py-3 px-4">已分发环境</th>
+              <th class="py-3 px-4 text-right">操作</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody" class="divide-y divide-border text-zinc-300">
+            <tr><td colspan="6" class="text-center py-8 text-zinc-500">正在加载用户白名单...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 2. Tab: Profiles -->
+    <section id="tabProfiles" class="space-y-4 hidden">
+      <div class="flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-semibold text-white">Cloud Profile 环境授权分配</h2>
+          <p class="text-xs text-zinc-400">勾选将特定环境分配给指定用户。非管理员用户只能看到被分配给自己的环境。</p>
+        </div>
+        <button onclick="loadProfiles()" class="px-3 py-1.5 border border-border hover:bg-zinc-800 text-zinc-300 rounded-lg text-xs font-medium flex items-center gap-1.5 transition">
+          <i class="fa-solid fa-arrows-rotate"></i>
+          刷新环境
+        </button>
+      </div>
+
+      <div class="glass rounded-xl border border-border overflow-hidden">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-zinc-900/60 border-b border-border text-zinc-400">
+            <tr>
+              <th class="py-3 px-4">Profile 名称</th>
+              <th class="py-3 px-4">内核 / 版本</th>
+              <th class="py-3 px-4">代理 / 节点</th>
+              <th class="py-3 px-4">存储大小</th>
+              <th class="py-3 px-4">已授权用户 (成员)</th>
+              <th class="py-3 px-4 text-right">授权分发</th>
+            </tr>
+          </thead>
+          <tbody id="profilesTableBody" class="divide-y divide-border text-zinc-300">
+            <tr><td colspan="6" class="text-center py-8 text-zinc-500">正在加载云端环境...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- 3. Tab: Events -->
+    <section id="tabEvents" class="space-y-4 hidden">
+      <div>
+        <h2 class="text-sm font-semibold text-white">实时同步审计日志</h2>
+        <p class="text-xs text-zinc-400">记录各用户与设备的上传、拉取、租约与修改事件。</p>
+      </div>
+
+      <div class="glass rounded-xl border border-border overflow-hidden">
+        <table class="w-full text-left text-xs">
+          <thead class="bg-zinc-900/60 border-b border-border text-zinc-400">
+            <tr>
+              <th class="py-3 px-4">时间</th>
+              <th class="py-3 px-4">用户</th>
+              <th class="py-3 px-4">动作类型</th>
+              <th class="py-3 px-4">涉及 Profile</th>
+              <th class="py-3 px-4">详情</th>
+            </tr>
+          </thead>
+          <tbody id="eventsTableBody" class="divide-y divide-border text-zinc-300">
+            <tr><td colspan="5" class="text-center py-8 text-zinc-500">暂无审计日志</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Modal: Add User -->
+  <div id="addUserModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="glass max-w-md w-full rounded-xl p-5 border border-border space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-border pb-3">
+        <h3 class="text-sm font-semibold text-white">添加授权用户到白名单</h3>
+        <button onclick="closeAddUserModal()" class="text-zinc-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="space-y-3">
+        <div>
+          <label class="block text-xs font-medium text-zinc-300 mb-1">用户名 / 标识 <span class="text-rose-400">*</span></label>
+          <input type="text" id="newUsername" placeholder="e.g. employee_alice" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-xs text-white focus:outline-none focus:border-emerald-500" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-zinc-300 mb-1">角色权限</label>
+          <select id="newUserRole" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-xs text-white focus:outline-none focus:border-emerald-500">
+            <option value="member">普通成员 (Member - 仅可见被分配的 Profile)</option>
+            <option value="admin">管理员 (Admin - 可见并管理所有 Profile)</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-zinc-300 mb-1">备注说明</label>
+          <input type="text" id="newUserNote" placeholder="e.g. 跨境运营组 Alice (Windows 电脑)" class="w-full px-3 py-2 bg-zinc-900 border border-border rounded-lg text-xs text-white focus:outline-none focus:border-emerald-500" />
+        </div>
+      </div>
+      <div class="flex items-center justify-end gap-2 pt-2 border-t border-border">
+        <button onclick="closeAddUserModal()" class="px-3 py-1.5 text-xs text-zinc-400 hover:text-white">取消</button>
+        <button onclick="submitAddUser()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition">生成并开通</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Assign Profile -->
+  <div id="assignModal" class="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 hidden">
+    <div class="glass max-w-lg w-full rounded-xl p-5 border border-border space-y-4 shadow-2xl">
+      <div class="flex items-center justify-between border-b border-border pb-3">
+        <div>
+          <h3 class="text-sm font-semibold text-white">分配 Profile 给白名单成员</h3>
+          <p id="assignProfileName" class="text-xs text-emerald-400 font-mono mt-0.5"></p>
+        </div>
+        <button onclick="closeAssignModal()" class="text-zinc-400 hover:text-white"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      
+      <div class="space-y-2 max-h-72 overflow-y-auto pr-1" id="assignUsersList">
+        <!-- populated dynamically -->
+      </div>
+
+      <div class="flex items-center justify-end gap-2 pt-3 border-t border-border">
+        <button onclick="closeAssignModal()" class="px-3 py-1.5 text-xs text-zinc-400 hover:text-white">取消</button>
+        <button onclick="submitAssignProfile()" class="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-medium transition">保存授权变更</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast notification -->
+  <div id="toast" class="fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-lg text-xs font-medium text-white shadow-xl transform transition duration-200 translate-y-20 opacity-0 pointer-events-none"></div>
+
+  <script>
+    let currentToken = localStorage.getItem('DON_ADMIN_TOKEN') || '';
+    let usersList = [];
+    let profilesList = [];
+    let currentAssigningProfileId = null;
+
+    function showToast(msg, type = 'success') {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.className = 'fixed bottom-5 right-5 z-50 px-4 py-2.5 rounded-lg text-xs font-medium text-white shadow-xl transform transition duration-200 ' + 
+        (type === 'success' ? 'bg-emerald-600' : 'bg-rose-600');
+      setTimeout(() => {
+        el.className += ' translate-y-20 opacity-0 pointer-events-none';
+      }, 3000);
+    }
+
+    async function apiRequest(path, options = {}) {
+      const headers = {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + currentToken,
+        ...(options.headers || {})
+      };
+      const res = await fetch(path, { ...options, headers });
+      if (res.status === 401) {
+        logoutAdmin();
+        throw new Error('Unauthorized');
+      }
+      return res.json();
+    }
+
+    function submitLogin() {
+      const input = document.getElementById('masterTokenInput').value.trim();
+      if (!input) return;
+      currentToken = input;
+      localStorage.setItem('DON_ADMIN_TOKEN', currentToken);
+      loadDashboard();
+    }
+
+    function logoutAdmin() {
+      currentToken = '';
+      localStorage.removeItem('DON_ADMIN_TOKEN');
+      document.getElementById('loginScreen').classList.remove('hidden');
+      document.getElementById('dashboardContent').classList.add('hidden');
+      document.getElementById('authStatusBadge').classList.add('hidden');
+      document.getElementById('logoutBtn').classList.add('hidden');
+    }
+
+    async function loadDashboard() {
+      try {
+        const overview = await apiRequest('/api/admin/overview');
+        document.getElementById('loginScreen').classList.add('hidden');
+        document.getElementById('dashboardContent').classList.remove('hidden');
+        document.getElementById('authStatusBadge').classList.remove('hidden');
+        document.getElementById('logoutBtn').classList.remove('hidden');
+
+        document.getElementById('statUsers').textContent = overview.totalUsers;
+        document.getElementById('statProfiles').textContent = overview.totalProfiles;
+        document.getElementById('statAssignments').textContent = overview.totalAssignments;
+        document.getElementById('statStorage').textContent = (overview.totalStorageBytes / (1024 * 1024)).toFixed(1) + ' MB';
+
+        loadUsers();
+      } catch (err) {
+        document.getElementById('loginError').textContent = 'Token 错误或无效，请重试';
+        document.getElementById('loginError').classList.remove('hidden');
+      }
+    }
+
+    function switchTab(tab) {
+      document.getElementById('tabUsers').classList.toggle('hidden', tab !== 'users');
+      document.getElementById('tabProfiles').classList.toggle('hidden', tab !== 'profiles');
+      document.getElementById('tabEvents').classList.toggle('hidden', tab !== 'events');
+
+      const activeClass = 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20';
+      const inactiveClass = 'text-zinc-400 hover:text-white hover:bg-zinc-800';
+
+      document.getElementById('tabUsersBtn').className = 'px-4 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition ' + (tab === 'users' ? activeClass : inactiveClass);
+      document.getElementById('tabProfilesBtn').className = 'px-4 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition ' + (tab === 'profiles' ? activeClass : inactiveClass);
+      document.getElementById('tabEventsBtn').className = 'px-4 py-2 rounded-lg text-xs font-medium flex items-center gap-2 transition ' + (tab === 'events' ? activeClass : inactiveClass);
+
+      if (tab === 'users') loadUsers();
+      if (tab === 'profiles') loadProfiles();
+      if (tab === 'events') loadEvents();
+    }
+
+    async function loadUsers() {
+      const res = await apiRequest('/api/admin/users');
+      usersList = res.users || [];
+      const tbody = document.getElementById('usersTableBody');
+      if (usersList.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-zinc-500">暂无白名单用户，点击右上角添加。</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = usersList.map(u => `
+        <tr class="hover:bg-zinc-900/40 transition">
+          <td class="py-3 px-4">
+            <div class="font-medium text-white">${u.username}</div>
+            <div class="text-[11px] text-zinc-500">${u.note || '—'}</div>
+          </td>
+          <td class="py-3 px-4">
+            <span class="px-2 py-0.5 rounded text-[10px] uppercase font-mono ${u.role === 'admin' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' : 'bg-zinc-800 text-zinc-300'}">
+              ${u.role}
+            </span>
+          </td>
+          <td class="py-3 px-4">
+            <span class="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-[10px] font-medium ${u.is_active ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}">
+              <span class="size-1.5 rounded-full ${u.is_active ? 'bg-emerald-400' : 'bg-rose-400'}"></span>
+              ${u.is_active ? '正常授权' : '已禁用'}
+            </span>
+          </td>
+          <td class="py-3 px-4 font-mono text-[11px]">
+            <div class="flex items-center gap-2">
+              <span class="bg-zinc-900 px-2 py-1 rounded border border-border text-zinc-300 max-w-[160px] truncate">${u.token_hash}</span>
+              <button onclick="copyClientConfig('${u.token_hash}')" class="text-zinc-400 hover:text-emerald-400 text-xs px-2 py-1 rounded hover:bg-zinc-800" title="复制客户端配置">
+                <i class="fa-regular fa-copy"></i>
+              </button>
+            </div>
+          </td>
+          <td class="py-3 px-4">
+            <span class="text-zinc-300 font-medium">${u.assigned_profiles_count || 0} 个环境</span>
+          </td>
+          <td class="py-3 px-4 text-right space-x-1">
+            <button onclick="toggleUserActive('${u.id}', ${u.is_active ? 0 : 1})" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300">
+              ${u.is_active ? '禁用' : '启用'}
+            </button>
+            <button onclick="resetUserToken('${u.id}')" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300" title="重新生成 Token">
+              重置 Token
+            </button>
+            <button onclick="deleteUser('${u.id}', '${u.username}')" class="px-2 py-1 rounded text-xs border border-rose-900/40 text-rose-400 hover:bg-rose-950/40">
+              删除
+            </button>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    async function loadProfiles() {
+      const res = await apiRequest('/api/admin/profiles');
+      profilesList = res.profiles || [];
+      const tbody = document.getElementById('profilesTableBody');
+      if (profilesList.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" class="text-center py-8 text-zinc-500">云端暂无同步的 Profile 环境。在 DON 客户端点击同步即可备份到此处。</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = profilesList.map(p => {
+        const assignedNames = (p.assignments || []).map(a => a.username || 'User').join(', ');
+        return `
+          <tr class="hover:bg-zinc-900/40 transition">
+            <td class="py-3 px-4">
+              <div class="font-medium text-white flex items-center gap-1.5">
+                <i class="fa-solid fa-cube text-emerald-400 text-xs"></i>
+                ${p.name}
+              </div>
+              <div class="text-[10px] text-zinc-500 font-mono">${p.id}</div>
+            </td>
+            <td class="py-3 px-4">
+              <span class="text-zinc-300">${p.browser} ${p.version}</span>
+            </td>
+            <td class="py-3 px-4 font-mono text-[11px] text-zinc-400">
+              ${p.proxy_summary || '直连 (Direct)'}
+            </td>
+            <td class="py-3 px-4 font-mono text-zinc-300">
+              ${(p.size_bytes / 1024).toFixed(1)} KB
+            </td>
+            <td class="py-3 px-4">
+              ${assignedNames ? `<span class="text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded text-[11px]">${assignedNames}</span>` : '<span class="text-zinc-500">仅 Admin 可见</span>'}
+            </td>
+            <td class="py-3 px-4 text-right">
+              <button onclick="openAssignModal('${p.id}')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs transition">
+                <i class="fa-solid fa-user-gear mr-1"></i> 分配授权
+              </button>
+            </td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    async function loadEvents() {
+      const res = await apiRequest('/api/admin/events');
+      const events = res.events || [];
+      const tbody = document.getElementById('eventsTableBody');
+      if (events.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" class="text-center py-8 text-zinc-500">暂无审计日志</td></tr>';
+        return;
+      }
+
+      tbody.innerHTML = events.map(e => `
+        <tr class="hover:bg-zinc-900/40 transition">
+          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px]">${new Date(e.created_at).toLocaleString()}</td>
+          <td class="py-3 px-4 font-medium text-white">${e.username || e.user_id}</td>
+          <td class="py-3 px-4">
+            <span class="px-2 py-0.5 rounded text-[10px] uppercase font-mono bg-zinc-800 text-zinc-300">${e.event_type}</span>
+          </td>
+          <td class="py-3 px-4 text-emerald-400">${e.profile_name || e.profile_id}</td>
+          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px] max-w-xs truncate">${e.details || '—'}</td>
+        </tr>
+      `).join('');
+    }
+
+    function openAddUserModal() {
+      document.getElementById('newUsername').value = '';
+      document.getElementById('newUserNote').value = '';
+      document.getElementById('addUserModal').classList.remove('hidden');
+    }
+
+    function closeAddUserModal() {
+      document.getElementById('addUserModal').classList.add('hidden');
+    }
+
+    async function submitAddUser() {
+      const username = document.getElementById('newUsername').value.trim();
+      const role = document.getElementById('newUserRole').value;
+      const note = document.getElementById('newUserNote').value.trim();
+
+      if (!username) return alert('请输入用户名');
+
+      const res = await apiRequest('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ username, role, note })
+      });
+
+      if (res.success) {
+        showToast('用户添加成功！专属 Token: ' + res.user.token);
+        closeAddUserModal();
+        loadUsers();
+      } else {
+        alert(res.error || '添加失败');
+      }
+    }
+
+    async function toggleUserActive(id, newStatus) {
+      await apiRequest('/api/admin/users/' + id, {
+        method: 'PUT',
+        body: JSON.stringify({ is_active: newStatus })
+      });
+      showToast(newStatus ? '已启用该用户' : '已禁用该用户');
+      loadUsers();
+    }
+
+    async function resetUserToken(id) {
+      if (!confirm('确定重置该用户的访问 Token 吗？旧 Token 将立即失效。')) return;
+      const res = await apiRequest('/api/admin/users/' + id + '/reset-token', { method: 'POST' });
+      if (res.success) {
+        showToast('Token 已更新: ' + res.token);
+        loadUsers();
+      }
+    }
+
+    async function deleteUser(id, username) {
+      if (!confirm(`确定删除用户 "${username}" 吗？其所有环境授权将同步注销。`)) return;
+      await apiRequest('/api/admin/users/' + id, { method: 'DELETE' });
+      showToast('已删除用户');
+      loadUsers();
+    }
+
+    function copyClientConfig(token) {
+      const serverUrl = window.location.origin;
+      const configText = `Sync Server URL: ${serverUrl}\nSync Token: ${token}`;
+      navigator.clipboard.writeText(configText);
+      showToast('已复制用户连接配置到剪贴板！可以直接发给该用户');
+    }
+
+    function openAssignModal(profileId) {
+      currentAssigningProfileId = profileId;
+      const profile = profilesList.find(p => p.id === profileId);
+      document.getElementById('assignProfileName').textContent = profile ? `${profile.name} (${profile.id})` : profileId;
+      
+      const assignedUserIds = new Set((profile?.assignments || []).map(a => a.user_id));
+      
+      const container = document.getElementById('assignUsersList');
+      if (usersList.length === 0) {
+        container.innerHTML = '<p class="text-xs text-zinc-500 py-4 text-center">暂无可分配的用户，请先在白名单添加用户。</p>';
+      } else {
+        container.innerHTML = usersList.map(u => `
+          <label class="flex items-center justify-between p-3 rounded-lg border border-border hover:bg-zinc-900/60 cursor-pointer transition">
+            <div class="flex items-center gap-2.5">
+              <input type="checkbox" value="${u.id}" ${assignedUserIds.has(u.id) ? 'checked' : ''} class="assign-user-checkbox size-4 accent-emerald-500 rounded" />
+              <div>
+                <div class="text-xs font-medium text-white">${u.username}</div>
+                <div class="text-[10px] text-zinc-500">${u.note || u.role}</div>
+              </div>
+            </div>
+            <span class="text-[10px] px-2 py-0.5 rounded ${u.is_active ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}">
+              ${u.is_active ? '有效' : '已禁用'}
+            </span>
+          </label>
+        `).join('');
+      }
+
+      document.getElementById('assignModal').classList.remove('hidden');
+    }
+
+    function closeAssignModal() {
+      document.getElementById('assignModal').classList.add('hidden');
+      currentAssigningProfileId = null;
+    }
+
+    async function submitAssignProfile() {
+      if (!currentAssigningProfileId) return;
+      const checkboxes = document.querySelectorAll('.assign-user-checkbox:checked');
+      const selectedUserIds = Array.from(checkboxes).map(cb => cb.value);
+
+      const assignments = selectedUserIds.map(userId => ({
+        userId,
+        canWrite: true,
+        isPinned: false
+      }));
+
+      await apiRequest(`/api/admin/profiles/${currentAssigningProfileId}/assign`, {
+        method: 'POST',
+        body: JSON.stringify({ assignments })
+      });
+
+      showToast('环境分配成功！');
+      closeAssignModal();
+      loadProfiles();
+    }
+
+    // Auto login if token stored
+    if (currentToken) {
+      loadDashboard();
+    }
+  </script>
+</body>
+</html>

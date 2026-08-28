@@ -1,8 +1,10 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
+import { adminRouter } from "./admin.js";
 import {
   authenticateRequest,
   generateTransferSignature,
+  isProfileAuthorized,
   verifyTransferSignature,
 } from "./auth.js";
 import type {
@@ -88,6 +90,33 @@ async function buildTransferUrl(
   };
 }
 
+// Helper: Extract Profile ID from an object key
+function extractProfileId(key: string): string | null {
+  const match = key.match(/(?:^|\/)profiles\/([a-zA-Z0-9_-]+)/);
+  return match ? match[1] : null;
+}
+
+// Helper: Record a sync audit event in D1
+async function recordSyncEvent(
+  env: Env,
+  profileId: string,
+  userId: string,
+  eventType: string,
+  details?: string,
+) {
+  if (!env.DB) return;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO sync_events (profile_id, user_id, event_type, details, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    )
+      .bind(profileId, userId, eventType, details || null, Date.now())
+      .run();
+  } catch (err) {
+    console.warn("Failed to record sync event:", err);
+  }
+}
+
 // 2. Direct R2 raw binary transfer endpoints (GET / PUT)
 app.get("/raw/get/:signature/:expiresAt/:key", async (c) => {
   const signature = c.req.param("signature");
@@ -107,20 +136,21 @@ app.get("/raw/get/:signature/:expiresAt/:key", async (c) => {
 
   const object = await c.env.BUCKET.get(key);
   if (!object) {
-    return c.text("Object not found", 404);
+    return c.text("Object Not Found", 404);
   }
 
   const headers = new Headers();
   object.writeHttpMetadata(headers);
-  headers.set("etag", object.httpEtag);
-  headers.set("Content-Length", object.size.toString());
-  if (object.customMetadata) {
-    for (const [k, v] of Object.entries(object.customMetadata)) {
-      headers.set(`x-amz-meta-${k}`, String(v));
-    }
-  }
+  headers.set("ETag", object.httpEtag);
+  headers.set(
+    "Content-Type",
+    object.httpMetadata?.contentType || "application/octet-stream",
+  );
 
-  return new Response(object.body, { headers });
+  return new Response(object.body as any, {
+    headers,
+    status: 200,
+  });
 });
 
 app.put("/raw/put/:signature/:expiresAt/:key", async (c) => {
@@ -163,22 +193,43 @@ app.put("/raw/put/:signature/:expiresAt/:key", async (c) => {
   return c.text("OK", 200);
 });
 
-// 3. Auth Guard Middleware for /v1/objects/* and /v1/selective-sync/*
+// 3. Mount Admin Router (/admin and /api/admin/*)
+app.route("/", adminRouter);
+
+// 4. Auth Guard Middleware for /v1/objects/* and /v1/selective-sync/*
 app.use("/v1/*", async (c, next) => {
   const user = await authenticateRequest(c.req.raw, c.env);
   if (!user) {
-    return c.json({ error: "Unauthorized" }, 401);
+    return c.json(
+      { error: "Unauthorized: Invalid or unwhitelisted token" },
+      401,
+    );
   }
   c.set("user", user);
   await next();
 });
 
-// 4. Standard Object Sync Endpoints (matches DON SyncClient exactly)
+// 5. Standard Object Sync Endpoints (matches DON SyncClient exactly)
 
 // POST /v1/objects/stat
 app.post("/v1/objects/stat", async (c) => {
   const body = (await c.req.json()) as StatRequest;
   const user = c.get("user");
+
+  // Profile scope check for members
+  const profileId = extractProfileId(body.key);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "read", c.env);
+    if (!isAuth) {
+      return c.json(
+        {
+          error: `Forbidden: Profile ${profileId} is not assigned to your account`,
+        },
+        403,
+      );
+    }
+  }
+
   const fullKey = user.prefix ? `${user.prefix}${body.key}` : body.key;
 
   const head = await c.env.BUCKET.head(fullKey);
@@ -200,6 +251,21 @@ app.post("/v1/objects/stat", async (c) => {
 app.post("/v1/objects/presign-upload", async (c) => {
   const body = (await c.req.json()) as PresignUploadRequest;
   const user = c.get("user");
+
+  // Profile scope check for members
+  const profileId = extractProfileId(body.key);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "write", c.env);
+    if (!isAuth) {
+      return c.json(
+        {
+          error: `Forbidden: Write access not permitted for profile ${profileId}`,
+        },
+        403,
+      );
+    }
+  }
+
   const fullKey = user.prefix ? `${user.prefix}${body.key}` : body.key;
 
   const { url, expiresAt } = await buildTransferUrl(
@@ -208,6 +274,16 @@ app.post("/v1/objects/presign-upload", async (c) => {
     "PUT",
     body.expiresIn || 3600,
   );
+
+  if (profileId) {
+    void recordSyncEvent(
+      c.env,
+      profileId,
+      user.userId,
+      "upload",
+      `Presigned upload: ${body.key}`,
+    );
+  }
 
   const res: PresignUploadResponse = {
     url,
@@ -222,6 +298,29 @@ app.post("/v1/objects/presign-upload-batch", async (c) => {
   const body = (await c.req.json()) as PresignUploadBatchRequest;
   const user = c.get("user");
   const expiresIn = body.expiresIn || 3600;
+
+  // Profile scope check for members
+  if (user.role !== "admin") {
+    for (const item of body.items) {
+      const profileId = extractProfileId(item.key);
+      if (profileId) {
+        const isAuth = await isProfileAuthorized(
+          user,
+          profileId,
+          "write",
+          c.env,
+        );
+        if (!isAuth) {
+          return c.json(
+            {
+              error: `Forbidden: Write access not permitted for profile ${profileId}`,
+            },
+            403,
+          );
+        }
+      }
+    }
+  }
 
   const items = await Promise.all(
     body.items.map(async (item) => {
@@ -248,6 +347,21 @@ app.post("/v1/objects/presign-upload-batch", async (c) => {
 app.post("/v1/objects/presign-download", async (c) => {
   const body = (await c.req.json()) as PresignDownloadRequest;
   const user = c.get("user");
+
+  // Profile scope check for members
+  const profileId = extractProfileId(body.key);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "read", c.env);
+    if (!isAuth) {
+      return c.json(
+        {
+          error: `Forbidden: Read access not permitted for profile ${profileId}`,
+        },
+        403,
+      );
+    }
+  }
+
   const fullKey = user.prefix ? `${user.prefix}${body.key}` : body.key;
 
   const { url, expiresAt } = await buildTransferUrl(
@@ -256,6 +370,16 @@ app.post("/v1/objects/presign-download", async (c) => {
     "GET",
     body.expiresIn || 3600,
   );
+
+  if (profileId) {
+    void recordSyncEvent(
+      c.env,
+      profileId,
+      user.userId,
+      "download",
+      `Presigned download: ${body.key}`,
+    );
+  }
 
   const res: PresignDownloadResponse = {
     url,
@@ -269,6 +393,29 @@ app.post("/v1/objects/presign-download-batch", async (c) => {
   const body = (await c.req.json()) as PresignDownloadBatchRequest;
   const user = c.get("user");
   const expiresIn = body.expiresIn || 3600;
+
+  // Profile scope check for members
+  if (user.role !== "admin") {
+    for (const key of body.keys) {
+      const profileId = extractProfileId(key);
+      if (profileId) {
+        const isAuth = await isProfileAuthorized(
+          user,
+          profileId,
+          "read",
+          c.env,
+        );
+        if (!isAuth) {
+          return c.json(
+            {
+              error: `Forbidden: Read access not permitted for profile ${profileId}`,
+            },
+            403,
+          );
+        }
+      }
+    }
+  }
 
   const items = await Promise.all(
     body.keys.map(async (key) => {
@@ -295,6 +442,19 @@ app.post("/v1/objects/presign-download-batch", async (c) => {
 app.post("/v1/objects/delete", async (c) => {
   const body = (await c.req.json()) as DeleteRequest;
   const user = c.get("user");
+
+  // Profile scope check for members
+  const profileId = extractProfileId(body.key);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "write", c.env);
+    if (!isAuth) {
+      return c.json(
+        { error: `Forbidden: Delete not permitted for profile ${profileId}` },
+        403,
+      );
+    }
+  }
+
   const fullKey = user.prefix ? `${user.prefix}${body.key}` : body.key;
 
   await c.env.BUCKET.delete(fullKey);
@@ -314,6 +474,16 @@ app.post("/v1/objects/delete", async (c) => {
     tombstoneCreated = true;
   }
 
+  if (profileId) {
+    void recordSyncEvent(
+      c.env,
+      profileId,
+      user.userId,
+      "delete",
+      `Deleted object: ${body.key}`,
+    );
+  }
+
   const res: DeleteResponse = {
     deleted: true,
     tombstoneCreated,
@@ -325,6 +495,20 @@ app.post("/v1/objects/delete", async (c) => {
 app.post("/v1/objects/delete-prefix", async (c) => {
   const body = (await c.req.json()) as DeletePrefixRequest;
   const user = c.get("user");
+
+  const profileId = extractProfileId(body.prefix);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "write", c.env);
+    if (!isAuth) {
+      return c.json(
+        {
+          error: `Forbidden: Delete prefix not permitted for profile ${profileId}`,
+        },
+        403,
+      );
+    }
+  }
+
   const prefix = user.prefix ? `${user.prefix}${body.prefix}` : body.prefix;
 
   let deletedCount = 0;
@@ -372,6 +556,18 @@ app.post("/v1/objects/delete-prefix", async (c) => {
 app.post("/v1/objects/list", async (c) => {
   const body = (await c.req.json()) as ListRequest;
   const user = c.get("user");
+
+  const profileId = extractProfileId(body.prefix);
+  if (profileId && user.role !== "admin") {
+    const isAuth = await isProfileAuthorized(user, profileId, "read", c.env);
+    if (!isAuth) {
+      return c.json(
+        { error: `Forbidden: List not permitted for profile ${profileId}` },
+        403,
+      );
+    }
+  }
+
   const prefix = user.prefix ? `${user.prefix}${body.prefix}` : body.prefix;
 
   const listed = await c.env.BUCKET.list({
@@ -403,7 +599,6 @@ app.post("/v1/objects/list", async (c) => {
 
 // GET /v1/objects/subscribe (SSE stream for live changes)
 app.get("/v1/objects/subscribe", (c) => {
-  // Return SSE stream
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
@@ -430,7 +625,7 @@ app.get("/v1/objects/subscribe", (c) => {
   });
 });
 
-// 5. Selective Sync & Profile Management APIs (backed by D1)
+// 6. Selective Sync & Profile Management APIs (backed by D1)
 
 // GET /v1/selective-sync/profiles (lists cloud profiles available to the current user)
 app.get("/v1/selective-sync/profiles", async (c) => {
@@ -501,6 +696,14 @@ app.post("/v1/selective-sync/profiles/register", async (c) => {
     )
     .run();
 
+  void recordSyncEvent(
+    c.env,
+    body.id,
+    user.userId,
+    "register_profile",
+    `Registered metadata for ${body.name}`,
+  );
+
   return c.json({ success: true });
 });
 
@@ -535,6 +738,14 @@ app.post("/v1/selective-sync/assign", async (c) => {
       now,
     )
     .run();
+
+  void recordSyncEvent(
+    c.env,
+    body.profileId,
+    user.userId,
+    "assign_profile",
+    `Assigned to user ${body.userId}`,
+  );
 
   return c.json({ success: true });
 });

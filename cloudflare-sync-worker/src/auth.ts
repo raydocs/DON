@@ -90,12 +90,16 @@ export async function authenticateRequest(
   // 2. Check D1 database for user tokens
   if (env.DB) {
     try {
-      // For fast lookup, token can be matched or hashed
       const user = await env.DB.prepare(
-        "SELECT id, username, role FROM users WHERE token_hash = ? LIMIT 1",
+        "SELECT id, username, role, is_active FROM users WHERE token_hash = ? AND is_active = 1 LIMIT 1",
       )
         .bind(token)
-        .first<{ id: string; username: string; role: "admin" | "member" }>();
+        .first<{
+          id: string;
+          username: string;
+          role: "admin" | "member";
+          is_active: number;
+        }>();
 
       if (user) {
         return {
@@ -111,4 +115,52 @@ export async function authenticateRequest(
   }
 
   return null;
+}
+
+/** Check if a user is authorized to read or write to a profile */
+export async function isProfileAuthorized(
+  user: UserContext,
+  profileId: string,
+  requiredPermission: "read" | "write",
+  env: Env,
+): Promise<boolean> {
+  if (user.role === "admin") {
+    return true;
+  }
+  if (!env.DB) {
+    return false;
+  }
+
+  try {
+    // Check if user is the original owner
+    const profile = await env.DB.prepare(
+      "SELECT owner_id FROM cloud_profiles WHERE id = ? AND is_deleted = 0 LIMIT 1",
+    )
+      .bind(profileId)
+      .first<{ owner_id: string }>();
+
+    if (profile && profile.owner_id === user.userId) {
+      return true;
+    }
+
+    // Check if assigned in profile_assignments
+    const assignment = await env.DB.prepare(
+      "SELECT can_write FROM profile_assignments WHERE profile_id = ? AND user_id = ? LIMIT 1",
+    )
+      .bind(profileId, user.userId)
+      .first<{ can_write: number }>();
+
+    if (!assignment) {
+      return false;
+    }
+
+    if (requiredPermission === "write" && assignment.can_write !== 1) {
+      return false;
+    }
+
+    return true;
+  } catch (err) {
+    console.error("Profile authorization check failed:", err);
+    return false;
+  }
 }
