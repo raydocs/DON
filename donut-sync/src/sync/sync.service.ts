@@ -654,13 +654,17 @@ export class SyncService implements OnModuleInit {
     ctx: UserContext,
   ): Promise<DeletePrefixResponseDto> {
     const prefix = this.scopeKey(ctx, dto.prefix);
-    // Bulk delete is the highest-blast-radius op, yet it was the only mutating
-    // path that skipped this check — so a client passing an absolute prefix
-    // (one already starting with its own/team scope, which scopeKey returns
-    // verbatim) could wipe an entire shared namespace. Enforce scope, and
-    // refuse an empty scoped prefix (which would match the whole scope).
+    // Refuse to wipe the caller's entire shared namespace in one bulk delete.
+    // scopeKey always prepends ctx.prefix in cloud mode (AuthGuard validates it
+    // to `users/{ownerId}/`), so the *scoped* prefix is never empty there — the
+    // guard must inspect the *unscoped* dto.prefix. An empty or slash-only
+    // dto.prefix scopes to the whole team namespace (all members' data and
+    // every tombstone), which a single bulk delete must not allow.
     this.validateKeyAccess(ctx, prefix);
-    if (ctx.mode === "cloud" && prefix.length === 0) {
+    if (
+      ctx.mode === "cloud" &&
+      (dto.prefix ?? "").replace(/\/+$/, "").length === 0
+    ) {
       throw new ForbiddenException("Refusing to delete an empty prefix");
     }
     let deletedCount = 0;
@@ -680,9 +684,13 @@ export class SyncService implements OnModuleInit {
 
       const objects = listResponse.Contents || [];
       if (objects.length > 0) {
-        // Delete objects in batches of 1000 (S3 limit)
+        // Delete objects in batches of 1000 (S3 limit). Never include this
+        // scope's manifest object in a prefix delete: `list()` strips it from
+        // client results and bumpManifest re-creates it below, so dropping it
+        // here would only remove subscribers' change signal for a broad prefix.
         const deleteObjects = objects
           .filter((obj): obj is typeof obj & { Key: string } => !!obj.Key)
+          .filter((obj) => !obj.Key.endsWith(MANIFEST_KEY))
           .map((obj) => ({ Key: obj.Key }));
 
         if (deleteObjects.length > 0) {
