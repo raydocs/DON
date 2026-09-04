@@ -159,12 +159,24 @@ pub fn normalize_network_dir(default_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(&to)?;
     let dest = to.join(name);
     if dest.exists() {
-      // Both positions hold the file. The one in the source position is the
-      // stale duplicate: on Windows, Chromium's migration would copy it over
-      // the newer file ("overwrite the new file with the old file even if it
-      // exists already", network_sandbox.cc), so it has to go.
-      std::fs::remove_file(&src)?;
-      continue;
+      // Both positions hold the file. Exactly one of them is the stale
+      // duplicate Chromium's migration left behind ("overwrite the new file
+      // with the old file even if it exists already", network_sandbox.cc), and
+      // which one depends on the host — the `from`/`to` pair above is swapped
+      // by `cfg!`, so the source position is only the stale one on Windows.
+      // Deleting the wrong copy is the silent, total loss the header warns
+      // about, so the guard must match the swap.
+      if cfg!(target_os = "windows") {
+        // Windows: `from` is `Default/`, so `src` is the stale pre-migration
+        // file. Drop it and keep the live `Network/` copy already at `dest`.
+        std::fs::remove_file(&src)?;
+        continue;
+      } else {
+        // non-Windows: `from` is `Network/`, so `src` is the live
+        // post-migration file and `dest` (`Default/`) is the stale one. Drop
+        // the stale `dest` and let the live `src` move into place below.
+        std::fs::remove_file(&dest)?;
+      }
     }
     std::fs::rename(&src, &dest).or_else(|_| {
       // Rename across devices can fail even within one tree on some setups.
@@ -376,5 +388,134 @@ mod tests {
     std::fs::create_dir_all(&default_dir).unwrap();
     normalize_network_dir(&default_dir).unwrap();
     assert!(!host_cookie_path(&default_dir).exists());
+  }
+
+  // Characterises the duplicate-removal branch with *distinct* contents. The
+  // existing `stale_duplicate_in_the_source_position_is_removed` seeds both
+  // copies with identical bytes, so it cannot tell which copy wins; this one
+  // distinguishes the stale pre-migration (`Default/`) copy from the live
+  // post-migration (`Network/`) copy.
+  #[test]
+  #[cfg(not(target_os = "windows"))]
+  fn live_network_copy_survives_when_both_positions_hold_the_file() {
+    let dir = TempDir::new().unwrap();
+    let default_dir = dir.path().join("Default");
+    std::fs::create_dir_all(&default_dir).unwrap();
+
+    for name in ["Cookies", "TransportSecurity"] {
+      std::fs::write(default_dir.join(name), b"OLD-stale").unwrap();
+      std::fs::create_dir_all(default_dir.join("Network")).unwrap();
+      std::fs::write(default_dir.join("Network").join(name), b"NEW-live").unwrap();
+    }
+
+    normalize_network_dir(&default_dir).unwrap();
+
+    let kept_cookies = std::fs::read(default_dir.join("Cookies")).unwrap();
+    let kept_ts = std::fs::read(default_dir.join("TransportSecurity")).unwrap();
+    assert_eq!(
+      kept_cookies, b"NEW-live",
+      "the live post-migration Cookies must survive, not the stale pre-migration one"
+    );
+    assert_eq!(
+      kept_ts, b"NEW-live",
+      "the live post-migration TransportSecurity must survive, not the stale pre-migration one"
+    );
+    assert!(
+      !default_dir.join("Network").exists(),
+      "the live Network/ tree should have been emptied and removed"
+    );
+  }
+
+  // End-to-end through the full import pipeline. A Windows-layout source in
+  // the both-exist state (stale `Default/<file>` left by a migration whose cleanup
+  // failed, plus the live `Network/<file>`) is imported onto a non-Windows
+  // host. The live `Network/` content must survive at the host-read position —
+  // not the stale `Default/` snapshot — for both a plain (non-SQLite, non-secret)
+  // network file and a SQLite cookie store that goes through `VACUUM INTO` and
+  // re-encryption.
+  #[test]
+  #[cfg(not(target_os = "windows"))]
+  fn import_into_keeps_the_live_network_copy_when_both_positions_hold_the_file() {
+    use rusqlite::Connection;
+
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("Chrome").join("Default");
+    let dest = dir.path().join("profile");
+    let network_dir = source.join("Network");
+    std::fs::create_dir_all(&network_dir).unwrap();
+    std::fs::write(source.join("Preferences"), b"{}").unwrap();
+
+    // A plain (non-SQLite, non-secret) network file. `copy_profile_tree` copies
+    // it verbatim and `finalize_profile` never touches it, so the bytes that
+    // survive are observable directly.
+    std::fs::write(source.join("TransportSecurity"), b"OLD-stale").unwrap();
+    std::fs::write(network_dir.join("TransportSecurity"), b"NEW-live").unwrap();
+
+    // A real v24 cookie store in each position, so `copy_profile_tree`'s
+    // `VACUUM INTO` snapshots both. The copies carry distinguishable plaintext
+    // rows; after re-encryption the survivor is identified by its `host_key`.
+    let make_cookie_db = |path: &Path, host_key: &str| {
+      std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+      let conn = Connection::open(path).unwrap();
+      conn
+        .execute_batch(
+          "CREATE TABLE cookies(
+           creation_utc INTEGER NOT NULL,
+           host_key TEXT NOT NULL,
+           name TEXT NOT NULL,
+           value TEXT NOT NULL DEFAULT '',
+           encrypted_value BLOB NOT NULL DEFAULT '',
+           path TEXT NOT NULL DEFAULT '/'
+         );
+         CREATE TABLE meta(key LONGVARCHAR NOT NULL UNIQUE PRIMARY KEY, value LONGVARCHAR);
+         INSERT INTO meta VALUES('version','24');
+         INSERT INTO meta VALUES('last_compatible_version','24');",
+        )
+        .unwrap();
+      conn
+        .execute(
+          "INSERT INTO cookies(creation_utc, host_key, name, value, encrypted_value, path)
+         VALUES(0, ?1, 'sid', ?2, X'', '/')",
+          rusqlite::params![host_key, format!("{host_key}-value")],
+        )
+        .unwrap();
+    };
+    make_cookie_db(&source.join("Cookies"), "stale.example");
+    make_cookie_db(&network_dir.join("Cookies"), "live.example");
+
+    // The migration checkpoint: a Windows-migrated profile holds both
+    // positions until Chromium's retry cleanup deletes the stale `Default/`
+    // copy. Its presence is what makes the both-exist state a real Chromium
+    // shape rather than a hand-assembled tree.
+    std::fs::write(network_dir.join("NetworkDataMigrated"), b"").unwrap();
+
+    let report = crate::profile_import::import_into(&source, &dest, "chromium", true)
+      .expect("import should succeed");
+
+    // (a) The plain network file: the live `Network/` bytes win, verbatim, and
+    // the now-empty `Network/` tree is removed.
+    assert_eq!(
+      std::fs::read(dest.join("Default").join("TransportSecurity")).unwrap(),
+      b"NEW-live",
+      "the live post-migration TransportSecurity must survive the full pipeline"
+    );
+    assert!(
+      !dest.join("Default").join("Network").exists(),
+      "the live Network/ tree should have been emptied and removed"
+    );
+
+    // (b) The cookie store: the live row wins and is re-sealed for the host.
+    assert_eq!(
+      report.cookies_migrated, 1,
+      "exactly the live row was carried"
+    );
+    let conn = Connection::open(dest.join("Default").join("Cookies")).unwrap();
+    let host_key: String = conn
+      .query_row("SELECT host_key FROM cookies", [], |r| r.get(0))
+      .unwrap();
+    assert_eq!(
+      host_key, "live.example",
+      "the live post-migration cookie row must survive, not the stale one"
+    );
   }
 }
