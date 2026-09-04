@@ -151,6 +151,7 @@ fn embed_windows_manifest() {
   println!("cargo:rerun-if-changed=app.manifest");
 }
 
+#[allow(clippy::chunks_exact_to_as_chunks)]
 fn generate_tray_icons() {
   use resvg::tiny_skia::{Pixmap, Transform};
   use resvg::usvg::{Options, Tree};
