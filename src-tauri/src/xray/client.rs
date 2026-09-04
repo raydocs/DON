@@ -251,4 +251,22 @@ mod tests {
     ));
     assert!(!error.to_string().contains(&config.reality.public_key));
   }
+
+  #[test]
+  fn non_canonical_address_is_rejected_before_generation() {
+    let mut config = valid_config();
+    for address in ["caf%C3%A9.example.com", "café.example.com"] {
+      config.address = address.to_string();
+      assert!(
+        matches!(
+          build_client_config(&config, &runtime()),
+          Err(XrayError::InvalidField {
+            field: "address",
+            ..
+          })
+        ),
+        "expected address rejection for {address}"
+      );
+    }
+  }
 }

@@ -544,4 +544,42 @@ mod tests {
       "2001:db8::1"
     );
   }
+
+  #[test]
+  fn unicode_host_import_is_rejected_loudly() {
+    let key = public_key();
+    let uri = format!(
+      "vless://{ID}@café.example.com:443?security=reality&flow=xtls-rprx-vision\
+&encryption=none&type=tcp&sni=café.example.com&pbk={key}&sid=01&fp=chrome#donut"
+    );
+    let error = parse_vless_uri(&uri).unwrap_err();
+    assert!(
+      matches!(
+        error,
+        XrayError::InvalidField {
+          field: "address",
+          ..
+        }
+      ),
+      "expected an address validation error, got {error:?}"
+    );
+  }
+
+  #[test]
+  fn punycode_host_imports_and_round_trips() {
+    let key = public_key();
+    let uri = format!(
+      "vless://{ID}@xn--caf-dma.example.com:443?security=reality&flow=xtls-rprx-vision\
+&encryption=none&type=tcp&sni=www.example.com&pbk={key}&sid=01&fp=chrome#donut"
+    );
+    let parsed = parse_vless_uri(&uri).unwrap();
+    assert_eq!(parsed.config.address, "xn--caf-dma.example.com");
+
+    let exported = export_vless_uri(&parsed.config, parsed.name.as_deref()).unwrap();
+    assert!(exported.contains("@xn--caf-dma.example.com:443"));
+    assert_eq!(
+      parse_vless_uri(&exported).unwrap().config.address,
+      "xn--caf-dma.example.com"
+    );
+  }
 }
