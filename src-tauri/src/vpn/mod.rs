@@ -12,8 +12,8 @@ mod tunnel;
 mod wireguard;
 
 pub use config::{
-  detect_vpn_type, parse_wireguard_config, VpnConfig, VpnError, VpnImportResult, VpnStatus,
-  VpnType, WireGuardConfig,
+  count_peer_sections, detect_vpn_type, parse_wireguard_config, VpnConfig, VpnError,
+  VpnImportResult, VpnStatus, VpnType, WireGuardConfig,
 };
 pub use storage::VpnStorage;
 pub use tunnel::{TunnelManager, VpnTunnel};

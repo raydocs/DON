@@ -112,6 +112,28 @@ pub fn detect_vpn_type(content: &str, filename: &str) -> Result<VpnType, VpnErro
   Err(VpnError::UnknownFormat)
 }
 
+/// Count the number of `[Peer]` section headers in a WireGuard config.
+///
+/// `WireGuardConfig` models exactly one peer, so any input with more than one
+/// `[Peer]` section is out-of-domain: `parse_wireguard_config` would silently
+/// flatten every `[Peer]` block into a single spliced peer (per-key
+/// last-write-wins across all sections) instead of rejecting it. The import,
+/// manual-create, and sync-download paths call this to reject such input at the
+/// storage-write boundary rather than storing it verbatim for a later opaque
+/// handshake failure or silent wrong-peer connection.
+///
+/// The detection mirrors `parse_wireguard_config` exactly (strip a leading
+/// BOM, then trim each line and compare to `"[Peer]"`) so the count always
+/// agrees with what the parser would treat as peer headers.
+pub fn count_peer_sections(content: &str) -> usize {
+  let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+  content
+    .lines()
+    .map(str::trim)
+    .filter(|l| *l == "[Peer]")
+    .count()
+}
+
 /// Parse a WireGuard configuration file
 pub fn parse_wireguard_config(content: &str) -> Result<WireGuardConfig, VpnError> {
   let mut interface: HashMap<String, String> = HashMap::new();
@@ -340,5 +362,47 @@ Endpoint = 1.2.3.4:51820
     let result = parse_wireguard_config(content);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("PrivateKey"));
+  }
+
+  #[test]
+  fn test_count_peer_sections_single() {
+    let content = "[Interface]\nPrivateKey = k\n[Peer]\nPublicKey = p";
+    assert_eq!(count_peer_sections(content), 1);
+  }
+
+  #[test]
+  fn test_count_peer_sections_multiple() {
+    let content =
+      "[Interface]\n[Peer]\nPublicKey = a\n[Peer]\nPublicKey = b\n[Peer]\nPublicKey = c";
+    assert_eq!(count_peer_sections(content), 3);
+  }
+
+  #[test]
+  fn test_count_peer_sections_none() {
+    let content = "[Interface]\nPrivateKey = k";
+    assert_eq!(count_peer_sections(content), 0);
+  }
+
+  #[test]
+  fn test_count_peer_sections_ignores_comments_and_inexact_headers() {
+    // Comments, near-misses, and `[Peer]` substrings inside values must not be
+    // counted — this mirrors the parser, which skips `#`/`;` lines and only
+    // treats an exact trimmed `[Peer]` line as a section header.
+    let content = "\u{feff}[Interface]\n\
+                   [Peer ]\n\
+                   # [Peer]\n\
+                   ; [Peer]\n\
+                   AllowedIPs = 0.0.0.0/0 # [Peer]\n\
+                   [Peer]\n\
+                   PublicKey = p";
+    assert_eq!(count_peer_sections(content), 1);
+  }
+
+  #[test]
+  fn test_count_peer_sections_strips_leading_bom() {
+    // A BOM directly before a first-line `[Peer]` must still count, matching
+    // the parser (which strips a leading BOM before splitting lines).
+    let content = "\u{feff}[Peer]\nPublicKey = p";
+    assert_eq!(count_peer_sections(content), 1);
   }
 }

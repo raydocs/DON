@@ -230,6 +230,38 @@ fn test_vpn_storage_import() {
   assert!(!imported.id.is_empty());
 }
 
+/// A WireGuard config with more than one `[Peer]` section is out-of-domain for
+/// this app (its data model holds exactly one peer) and must be rejected at
+/// import time — otherwise it would be stored verbatim and silently flattened
+/// into a spliced peer by `parse_wireguard_config` at connect time.
+#[test]
+#[serial]
+fn test_vpn_storage_import_rejects_multi_peer() {
+  let temp_dir = tempfile::TempDir::new().unwrap();
+  let storage = create_test_storage(&temp_dir);
+
+  let multi_peer = r#"[Interface]
+PrivateKey = YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+Address = 10.0.0.2/24
+
+[Peer]
+PublicKey = YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+
+[Peer]
+PublicKey = Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=
+Endpoint = home.example.com:51820
+AllowedIPs = 10.0.0.0/24
+"#;
+  let result = storage.import_config(multi_peer, "multi.conf", Some("multi".to_string()));
+  assert!(result.is_err(), "multi-peer config should be rejected");
+  assert!(result
+    .unwrap_err()
+    .to_string()
+    .contains("multiple [Peer] sections"));
+}
+
 /// Existing OpenVPN entries on disk should be silently dropped at load time
 /// after support was removed. Stored configs are encrypted at rest, so we
 /// build the on-disk JSON by hand instead of going through `save_config`.
