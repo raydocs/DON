@@ -2048,10 +2048,19 @@ impl AppAutoUpdater {
 
     let proxy_configs = crate::proxy_storage::list_proxy_configs();
     let vpn_configs = crate::vpn_worker_storage::list_vpn_worker_configs();
-    let mut worker_pids: Vec<u32> = proxy_configs
+    // Carry the start time each PID was pinned to so the wait loop can tell a
+    // genuine worker (still ours → wait for it to exit) from a recycled PID
+    // (no longer ours → must not block the update on a process we never
+    // spawned). VPN workers don't yet record a start time, so they keep the
+    // existence-only check that was always in effect for them.
+    let mut worker_pids: Vec<(u32, Option<u64>)> = proxy_configs
       .iter()
-      .filter_map(|config| config.pid)
-      .chain(vpn_configs.iter().filter_map(|config| config.pid))
+      .filter_map(|config| config.pid.map(|pid| (pid, config.pid_start_time)))
+      .chain(
+        vpn_configs
+          .iter()
+          .filter_map(|config| config.pid.map(|pid| (pid, None))),
+      )
       .collect();
     worker_pids.sort_unstable();
     worker_pids.dedup();
@@ -2077,11 +2086,16 @@ impl AppAutoUpdater {
       }
     }
 
+    // Only treat a PID as "still running" if it is still the worker we spawned.
+    // A PID that has been recycled to an unrelated process is alive in the
+    // process table but no longer ours, so it must neither be signalled (the
+    // stopProxyProcess gate already prevents that) nor block the update here —
+    // otherwise a recycled PID would abort every Windows auto-update with a
+    // spurious UPDATE_PREPARATION_FAILED.
     for _ in 0..20 {
-      if worker_pids
-        .iter()
-        .all(|pid| !crate::proxy_storage::is_process_running(*pid))
-      {
+      if worker_pids.iter().all(|(pid, pid_start_time)| {
+        !crate::proxy_storage::worker_pid_is_alive(*pid, *pid_start_time)
+      }) {
         return Ok(());
       }
       tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -2089,7 +2103,10 @@ impl AppAutoUpdater {
 
     let remaining: Vec<u32> = worker_pids
       .into_iter()
-      .filter(|pid| crate::proxy_storage::is_process_running(*pid))
+      .filter(|(pid, pid_start_time)| {
+        crate::proxy_storage::worker_pid_is_alive(*pid, *pid_start_time)
+      })
+      .map(|(pid, _)| pid)
       .collect();
     log::error!(
       "App update aborted because donut-proxy worker PIDs are still running: {:?}",
@@ -2736,6 +2753,124 @@ mod tests {
     fn assert_send<T: Send>(_: T) {}
 
     assert_send(AppAutoUpdater::prepare_windows_installer());
+  }
+
+  /// G8: `prepare_windows_installer`'s stop-all must treat a recycled worker PID
+  /// (live process, but no longer the one we pinned) as "gone", remove its stale
+  /// config via `stop_proxy_process`, leave the unrelated process un-signalled,
+  /// and let the update proceed (Ok) instead of aborting with
+  /// `UPDATE_PREPARATION_FAILED`. Pre-fix the wait loop's bare
+  /// `is_process_running` check kept the recycled PID "alive" forever and the
+  /// update aborted.
+  #[tokio::test]
+  async fn prepare_windows_installer_proceeds_when_worker_pid_was_recycled() {
+    use crate::app_dirs::{set_test_cache_dir, set_test_data_dir};
+    use crate::proxy_storage::{
+      process_start_time, save_proxy_config, worker_pid_is_alive, ProxyConfig,
+    };
+
+    let cache = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let _cache_guard = set_test_cache_dir(cache.path().to_path_buf());
+    let _data_guard = set_test_data_dir(data.path().to_path_buf());
+
+    // A long-lived unrelated process the OS "recycled" our worker's PID to.
+    let mut victim = std::process::Command::new("sleep")
+      .arg("300")
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn()
+      .expect("spawn victim");
+    let victim_pid = victim.id();
+    let victim_start = process_start_time(victim_pid).expect("victim visible");
+
+    // Stale worker config whose `pid` points at the live victim, pinned to a
+    // start time the victim provably does not have: exactly the recycled-PID
+    // condition. (The pinned time is one second off the victim's, which
+    // sysinfo's 1-second start_time granularity can never match.)
+    let mut cfg = ProxyConfig::new("proxy_1_2".to_string(), "DIRECT".to_string(), Some(1080));
+    cfg.pid = Some(victim_pid);
+    cfg.pid_start_time = Some(victim_start.saturating_add(1));
+    save_proxy_config(&cfg).unwrap();
+
+    // The identity gate the wait loop now uses must see this recycled PID as
+    // no-longer-ours — the precondition for the update not aborting on it.
+    assert!(
+      !worker_pid_is_alive(victim_pid, cfg.pid_start_time),
+      "recycled PID must read as gone to the identity-aware wait loop"
+    );
+
+    let result = AppAutoUpdater::prepare_windows_installer().await;
+
+    // The unrelated process must survive un-signalled.
+    let victim_still_alive = victim.try_wait().expect("victim waitable").is_none();
+    let _ = victim.kill();
+    let _ = victim.wait();
+
+    assert!(
+      result.is_ok(),
+      "update must proceed (not abort) when a stale worker PID was recycled; got {:?}",
+      result.err().map(|e| e.to_string())
+    );
+    assert!(
+      victim_still_alive,
+      "the recycled PID (victim) must not be signalled by the pre-update stop-all"
+    );
+    assert!(
+      crate::proxy_storage::get_proxy_config(&cfg.id).is_none(),
+      "the stale recycled-PID config must be removed"
+    );
+  }
+
+  /// G9 (no regression): a config whose PID is still genuinely the worker we
+  /// spawned (identity matches) is still stopped and waited on by the pre-update
+  /// stop-all; the identity-aware wait loop does not let a real live worker slip
+  /// through. We use a long-lived child standing in for the worker, pin it
+  /// truthfully, and let `stop_proxy_process` terminate it.
+  #[tokio::test]
+  async fn prepare_windows_installer_stops_a_genuine_live_worker() {
+    use crate::app_dirs::{set_test_cache_dir, set_test_data_dir};
+    use crate::proxy_storage::{process_start_time, save_proxy_config, ProxyConfig};
+
+    let cache = tempfile::tempdir().unwrap();
+    let data = tempfile::tempdir().unwrap();
+    let _cache_guard = set_test_cache_dir(cache.path().to_path_buf());
+    let _data_guard = set_test_data_dir(data.path().to_path_buf());
+
+    // A long-lived process standing in for a genuine donut-proxy worker.
+    let mut worker = std::process::Command::new("sleep")
+      .arg("300")
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn()
+      .expect("spawn worker");
+    let worker_pid = worker.id();
+    let worker_start = process_start_time(worker_pid).expect("worker visible");
+
+    let mut cfg = ProxyConfig::new("proxy_3_4".to_string(), "DIRECT".to_string(), Some(1081));
+    cfg.pid = Some(worker_pid);
+    cfg.pid_start_time = Some(worker_start);
+    save_proxy_config(&cfg).unwrap();
+
+    let result = AppAutoUpdater::prepare_windows_installer().await;
+
+    assert!(
+      result.is_ok(),
+      "update must proceed once the genuine worker has been stopped; got {:?}",
+      result.err().map(|e| e.to_string())
+    );
+    assert!(
+      crate::proxy_storage::get_proxy_config(&cfg.id).is_none(),
+      "the genuine worker's config must be removed after stop"
+    );
+    // The genuine worker must have been signalled and waited on until exit.
+    let exited = worker.try_wait().expect("worker waitable");
+    assert!(
+      exited.is_some(),
+      "the genuine live worker must have been terminated by the pre-update stop-all"
+    );
   }
 
   #[test]

@@ -1,6 +1,6 @@
 use crate::proxy_storage::{
   delete_proxy_config, generate_proxy_id, get_proxy_config, is_process_running, list_proxy_configs,
-  save_proxy_config, ProxyConfig,
+  resolve_process_start_time, save_proxy_config, worker_identity_is_ours, ProxyConfig,
 };
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -362,9 +362,12 @@ pub async fn start_proxy_process_with_profile(
       processes.insert(id.clone(), pid);
     }
 
-    // Update config with PID
+    // Update config with PID and pin it to this exact process so a recycled
+    // PID can never later be signalled as if it were ours.
+    let pid_start_time = resolve_process_start_time(pid);
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = pid_start_time;
     save_proxy_config(&config_with_pid)?;
 
     // Don't wait for the child - it's detached
@@ -436,9 +439,12 @@ pub async fn start_proxy_process_with_profile(
       processes.insert(id.clone(), pid);
     }
 
-    // Update config with PID
+    // Update config with PID and pin it to this exact process so a recycled
+    // PID can never later be signalled as if it were ours.
+    let pid_start_time = resolve_process_start_time(pid);
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = pid_start_time;
     save_proxy_config(&config_with_pid)?;
 
     drop(child);
@@ -509,6 +515,24 @@ pub async fn stop_proxy_process(id: &str) -> Result<bool, Box<dyn std::error::Er
 
   if let Some(config) = config {
     if let Some(pid) = config.pid {
+      // Only signal the PID if it still belongs to the worker we spawned. A
+      // recycled PID (or a dead worker whose slot was reused) must never be
+      // terminated as if it were ours — killing it would end an unrelated
+      // process the OS assigned our old PID to. Configs written before
+      // `pid_start_time` was recorded fall back to a bare existence check, the
+      // same trade-off `browser_owner_is_alive` makes, so an upgrade never
+      // withholds a stop from a worker that genuinely is the one we spawned.
+      if !worker_identity_is_ours(&config) {
+        // The worker is gone and its PID may have been reused; clean the stale
+        // config up without signalling whatever now owns that PID.
+        {
+          let mut processes = PROXY_PROCESSES.lock().unwrap();
+          processes.remove(id);
+        }
+        delete_proxy_config(id);
+        return Ok(false);
+      }
+
       // Kill the process
       #[cfg(unix)]
       {

@@ -10,6 +10,14 @@ pub struct ProxyConfig {
   pub ignore_proxy_certificate: Option<bool>,
   pub local_url: Option<String>,
   pub pid: Option<u32>,
+  /// Start time of `pid`, pinning the worker to one exact process so a recycled
+  /// PID can never later be signalled as if it were ours. `None` on configs
+  /// written before this field existed; `stop_proxy_process` then falls back to
+  /// a bare existence check (the same trade-off `browser_owner_is_alive` makes
+  /// for the browser PID) so an upgrade never withholds a stop from a worker
+  /// that genuinely is the one we spawned.
+  #[serde(default)]
+  pub pid_start_time: Option<u64>,
   #[serde(default)]
   pub profile_id: Option<String>,
   #[serde(default)]
@@ -50,6 +58,7 @@ impl ProxyConfig {
       ignore_proxy_certificate: None,
       local_url: None,
       pid: None,
+      pid_start_time: None,
       profile_id: None,
       bypass_rules: Vec::new(),
       blocklist_file: None,
@@ -320,6 +329,37 @@ pub fn proxy_config_age_secs(id: &str) -> u64 {
 /// GUI that spawned this worker is gone and nothing will ever claim it.
 pub const UNCLAIMED_WORKER_GRACE_SECS: u64 = 300;
 
+/// Whether a worker PID is still the live process we spawned, given the PID and
+/// (optionally) the start time we pinned it to. Identity-checked whenever a
+/// start time was recorded; otherwise a bare existence check — the same
+/// trade-off `browser_owner_is_alive` makes for the browser PID, so an upgrade
+/// never treats a still-running pre-fix worker as gone. Shared by
+/// `stop_proxy_process` and the pre-update stop-all wait loop so every path
+/// agrees on what "still our worker" means.
+pub fn worker_pid_is_alive(pid: u32, pid_start_time: Option<u64>) -> bool {
+  if pid == 0 {
+    return false;
+  }
+  match pid_start_time {
+    Some(start_time) => process_identity_matches(pid, Some(start_time)),
+    None => is_process_running(pid),
+  }
+}
+
+/// Is the worker this config describes still the same live process we spawned?
+///
+/// `stop_proxy_process` uses this to decide whether to signal `pid`: a recycled
+/// PID (or a dead worker whose slot was reused) must never be terminated as if
+/// it were ours. Identity-checked whenever a start time was recorded. Configs
+/// written before `pid_start_time` existed fall back to a bare existence check,
+/// exactly like `browser_owner_is_alive`, so an upgrade never withholds a stop
+/// from a worker that genuinely is the one we spawned.
+pub fn worker_identity_is_ours(config: &ProxyConfig) -> bool {
+  config
+    .pid
+    .is_some_and(|pid| worker_pid_is_alive(pid, config.pid_start_time))
+}
+
 /// Is the browser this worker serves still the same live process?
 ///
 /// Identity-checked whenever a start time was recorded. Configs written before
@@ -476,6 +516,76 @@ mod tests {
     assert!(!browser_owner_is_alive(&owned_config(Some(0), None)));
   }
 
+  fn worker_config(pid: Option<u32>, pid_start_time: Option<u64>) -> ProxyConfig {
+    let mut config = ProxyConfig::new("proxy_1_2".to_string(), "DIRECT".to_string(), Some(1080));
+    config.pid = pid;
+    config.pid_start_time = pid_start_time;
+    config
+  }
+
+  #[test]
+  fn worker_pid_liveness_is_pinned_to_the_recorded_start_time() {
+    let pid = std::process::id();
+    let start_time = process_start_time(pid).expect("current process should be visible");
+
+    // The exact live process we pinned: still ours.
+    assert!(worker_pid_is_alive(pid, Some(start_time)));
+    // A recycled PID — same PID, different start time — is not ours. Reporting
+    // one as alive is what let stop_proxy_process kill an unrelated process.
+    assert!(!worker_pid_is_alive(
+      pid,
+      Some(start_time.saturating_add(1))
+    ));
+    // A PID that no longer exists is not ours, pinned or not.
+    assert!(!worker_pid_is_alive(u32::MAX, Some(start_time)));
+    // No recorded start time (config written before pid_start_time existed):
+    // existence is all we have, so a live PID we own reads as alive and an
+    // unrelated/dead one does not.
+    assert!(worker_pid_is_alive(pid, None));
+    assert!(!worker_pid_is_alive(u32::MAX, None));
+    // A 0 sentinel is never a real worker PID, regardless of any start time.
+    assert!(!worker_pid_is_alive(0, None));
+    assert!(!worker_pid_is_alive(0, Some(start_time)));
+  }
+
+  #[test]
+  fn worker_identity_is_pinned_to_the_exact_process_that_was_recorded() {
+    let pid = std::process::id();
+    let start_time = process_start_time(pid).expect("current process should be visible");
+
+    // The exact process we spawned and pinned: ours.
+    assert!(worker_identity_is_ours(&worker_config(
+      Some(pid),
+      Some(start_time)
+    )));
+    // Same PID, different start time: a recycled PID. Signalling this would
+    // kill an unrelated process — the bug stop_proxy_process must avoid.
+    assert!(!worker_identity_is_ours(&worker_config(
+      Some(pid),
+      Some(start_time.saturating_add(1))
+    )));
+    // A PID we can no longer see at all (dead, never recycled): not ours.
+    assert!(!worker_identity_is_ours(&worker_config(
+      Some(u32::MAX),
+      Some(start_time)
+    )));
+    // Written before start times were recorded: existence is all we have, and
+    // an upgrade must not withhold a stop from a worker that is still ours.
+    assert!(worker_identity_is_ours(&worker_config(Some(pid), None)));
+    assert!(!worker_identity_is_ours(&worker_config(
+      Some(u32::MAX),
+      None
+    )));
+    // No PID at all (still starting up, or never recorded): nothing to stop.
+    assert!(!worker_identity_is_ours(&worker_config(None, None)));
+    assert!(!worker_identity_is_ours(&worker_config(
+      None,
+      Some(start_time)
+    )));
+    // A 0 sentinel is not a real worker PID.
+    assert!(!worker_identity_is_ours(&worker_config(Some(0), None)));
+  }
+
   #[test]
   fn supervisor_keeps_serving_a_live_owner_and_exits_a_dead_one() {
     let alive = |_: &ProxyConfig| true;
@@ -610,6 +720,11 @@ mod tests {
     let config: ProxyConfig = serde_json::from_value(legacy).unwrap();
     assert_eq!(config.browser_pid, Some(4242));
     assert_eq!(config.browser_pid_start_time, None);
+    // The worker PID identity field is the same story: a config written before
+    // this field existed must still load and fall back to a bare existence
+    // check rather than failing to deserialize.
+    assert_eq!(config.pid, Some(42));
+    assert_eq!(config.pid_start_time, None);
   }
 
   #[test]
