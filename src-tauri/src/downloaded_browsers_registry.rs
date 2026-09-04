@@ -693,10 +693,29 @@ impl DownloadedBrowsersRegistry {
     Ok(cleaned_up)
   }
 
-  /// Consolidate browser versions - keep only the latest version per browser
+  /// Consolidate browser versions - keep only the latest version per browser.
+  ///
+  /// `update_profile_version` is injected via the AppHandle-free
+  /// `consolidate_browser_versions_with` helper so the consolidation logic can
+  /// be unit-tested without constructing a `tauri::AppHandle`, which requires
+  /// the intentionally-disabled `tauri/test` feature.
   pub fn consolidate_browser_versions(
     &self,
     app_handle: &tauri::AppHandle,
+  ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+    let profile_manager = self.profile_manager;
+    let mut update_profile_version = |profile: &BrowserProfile, version: &str| {
+      profile_manager
+        .update_profile_version(app_handle, &profile.id.to_string(), version)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+    };
+    self.consolidate_browser_versions_with(&mut update_profile_version)
+  }
+
+  fn consolidate_browser_versions_with(
+    &self,
+    update_profile_version: &mut dyn FnMut(&BrowserProfile, &str) -> Result<(), String>,
   ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
     log::info!("Starting browser version consolidation...");
 
@@ -773,37 +792,33 @@ impl DownloadedBrowsersRegistry {
             );
           }
         }
+      }
 
-        // Update profiles to latest version
-        for profile in &profiles_to_update {
-          match self.profile_manager.update_profile_version(
-            app_handle,
-            &profile.id.to_string(),
-            latest_version,
-          ) {
-            Ok(_) => {
-              consolidated.push(format!(
-                "Updated profile '{}' from {} to {}",
-                profile.name, profile.version, latest_version
-              ));
-            }
-            Err(e) => {
-              log::error!("Failed to update profile '{}': {}", profile.name, e);
-            }
+      // Update profiles to latest version
+      for profile in &profiles_to_update {
+        match update_profile_version(profile, latest_version) {
+          Ok(_) => {
+            consolidated.push(format!(
+              "Updated profile '{}' from {} to {}",
+              profile.name, profile.version, latest_version
+            ));
+          }
+          Err(e) => {
+            log::error!("Failed to update profile '{}': {}", profile.name, e);
           }
         }
+      }
 
-        // Remove older version binaries that are no longer needed
-        for old_version in &older_versions_to_remove {
-          log::info!("Consolidating: removing old version {browser_name} {old_version}");
-          match self.cleanup_failed_download(browser_name, old_version) {
-            Ok(_) => {
-              consolidated.push(format!("Removed old version: {browser_name} {old_version}"));
-              log::info!("Successfully removed old version: {browser_name} {old_version}");
-            }
-            Err(e) => {
-              log::error!("Failed to cleanup old version {browser_name} {old_version}: {e}");
-            }
+      // Remove older version binaries that are no longer needed
+      for old_version in &older_versions_to_remove {
+        log::info!("Consolidating: removing old version {browser_name} {old_version}");
+        match self.cleanup_failed_download(browser_name, old_version) {
+          Ok(_) => {
+            consolidated.push(format!("Removed old version: {browser_name} {old_version}"));
+            log::info!("Successfully removed old version: {browser_name} {old_version}");
+          }
+          Err(e) => {
+            log::error!("Failed to cleanup old version {browser_name} {old_version}: {e}");
           }
         }
       }
@@ -1393,6 +1408,184 @@ mod tests {
     assert!(
       !registry.is_browser_downloaded("testbrowser", "139.0"),
       "Browser should not be considered downloaded when files don't exist on disk"
+    );
+  }
+
+  /// Regression test for the O(n^2) redundant profile-update / cleanup nesting in
+  /// `consolidate_browser_versions` (introduced in commit 701c8ae). The "update
+  /// profiles" and "remove older version binaries" loops must run exactly once
+  /// after collecting all stale profiles, not once per collected profile over an
+  /// ever-growing accumulator. With `n` non-running profiles on an old version,
+  /// `update_profile_version` must run exactly `n` times (not n(n+1)/2) and
+  /// `cleanup_failed_download` exactly once per old version (not `n` times).
+  #[test]
+  fn test_consolidate_browser_versions_runs_each_step_exactly_once() {
+    use std::cell::RefCell;
+    use tempfile::TempDir;
+
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+
+    let pm = ProfileManager::instance();
+    let binaries_dir = crate::app_dirs::binaries_dir();
+    let old_version = "100.0";
+    let new_version = "200.0";
+
+    // `is_version_downloaded` reports a version as installed when a Wayfern
+    // executable file exists under binaries/<browser>/<version>. Lay down both
+    // versions so the on-disk check passes.
+    for v in [old_version, new_version] {
+      let version_dir = binaries_dir.join("wayfern").join(v);
+      std::fs::create_dir_all(&version_dir).unwrap();
+      std::fs::File::create(version_dir.join("wayfern")).unwrap();
+    }
+
+    let save_profile = |name: &str, version: &str| -> uuid::Uuid {
+      let id = uuid::Uuid::new_v4();
+      let profile = BrowserProfile {
+        id,
+        name: name.to_string(),
+        browser: "wayfern".to_string(),
+        version: version.to_string(),
+        ..Default::default()
+      };
+      pm.save_profile(&profile).unwrap();
+      id
+    };
+    // Like `save_profile` but marks the profile as running (`process_id` set),
+    // which consolidation must skip (guarantee G4) even though its version is
+    // stale. The live startup path can't exercise this because the auto-updater
+    // pre-empts consolidation; assert it here directly.
+    let save_running_profile = |name: &str, version: &str, pid: u32| -> uuid::Uuid {
+      let id = uuid::Uuid::new_v4();
+      let profile = BrowserProfile {
+        id,
+        name: name.to_string(),
+        browser: "wayfern".to_string(),
+        version: version.to_string(),
+        process_id: Some(pid),
+        ..Default::default()
+      };
+      pm.save_profile(&profile).unwrap();
+      id
+    };
+
+    // One profile already on the latest version (so `available_versions` holds
+    // both versions and `latest_version == new_version`) plus three stale,
+    // non-running profiles on the old version, plus one stale *running* profile
+    // on the old version that must be skipped, not updated.
+    save_profile("latest", new_version);
+    let stale: Vec<uuid::Uuid> = (0..3)
+      .map(|i| save_profile(&format!("stale{i}"), old_version))
+      .collect();
+    let running_stale = save_running_profile("running-stale", old_version, 99999);
+
+    // Register the old version so `cleanup_failed_download` can remove it.
+    let registry = DownloadedBrowsersRegistry::new();
+    registry.add_browser(DownloadedBrowserInfo {
+      browser: "wayfern".to_string(),
+      version: old_version.to_string(),
+      file_path: binaries_dir.join("wayfern").join(old_version),
+    });
+
+    // Inject a fake `update_profile_version` that records who it was called on,
+    // so the test can assert call counts directly (independent of log format).
+    let update_calls = RefCell::new(Vec::<uuid::Uuid>::new());
+    let mut update = |profile: &BrowserProfile, _version: &str| {
+      update_calls.borrow_mut().push(profile.id);
+      Ok::<(), String>(())
+    };
+
+    let consolidated = registry
+      .consolidate_browser_versions_with(&mut update)
+      .expect("consolidation should succeed");
+
+    // (1) Each stale profile is updated exactly once; the latest one never.
+    let calls = update_calls.borrow();
+    assert_eq!(
+      calls.len(),
+      stale.len(),
+      "update_profile_version must be called once per stale profile; got {}: {:?}",
+      calls.len(),
+      calls,
+    );
+    for id in &stale {
+      assert_eq!(
+        calls.iter().filter(|c| **c == *id).count(),
+        1,
+        "stale profile {id} must be updated exactly once; calls: {calls:?}",
+      );
+    }
+    // (G4) A stale profile that is currently running is never updated.
+    assert!(
+      !calls.contains(&running_stale),
+      "running-stale profile {running_stale} must be skipped (not updated); calls: {calls:?}",
+    );
+    drop(calls);
+
+    // (G4) No "Updated" message for the running profile.
+    let running_msg =
+      format!("Updated profile 'running-stale' from {old_version} to {new_version}");
+    let running_msg_count = consolidated
+      .iter()
+      .filter(|m| m.as_str() == running_msg.as_str())
+      .count();
+    assert_eq!(
+      running_msg_count, 0,
+      "running-stale profile must not appear in consolidated updates; got {running_msg_count} in {consolidated:?}",
+    );
+
+    // (2) Exactly one "Updated" message per stale profile, no duplicates.
+    for i in 0..stale.len() {
+      let msg = format!("Updated profile 'stale{i}' from {old_version} to {new_version}");
+      let count = consolidated
+        .iter()
+        .filter(|m| m.as_str() == msg.as_str())
+        .count();
+      assert_eq!(
+        count, 1,
+        "expected exactly one {msg:?}; got {count} in {consolidated:?}",
+      );
+    }
+
+    // (3) Exactly one "Removed" message for the old version, and nothing else.
+    let removed_msg = format!("Removed old version: wayfern {old_version}");
+    let removed_count = consolidated
+      .iter()
+      .filter(|m| m.as_str() == removed_msg.as_str())
+      .count();
+    assert_eq!(
+      removed_count, 1,
+      "old version must be removed exactly once; got {removed_count} in {consolidated:?}",
+    );
+    assert_eq!(
+      consolidated.len(),
+      stale.len() + 1,
+      "expected {} Updated + 1 Removed entries; got {consolidated:?}",
+      stale.len(),
+    );
+
+    // (4) The old version is deregistered and its binary deleted; the latest
+    // version's binary is preserved.
+    assert!(
+      !registry.is_browser_registered("wayfern", old_version),
+      "old version must be deregistered after consolidation",
+    );
+    assert!(
+      !binaries_dir
+        .join("wayfern")
+        .join(old_version)
+        .join("wayfern")
+        .exists(),
+      "old version executable must be deleted",
+    );
+    assert!(
+      binaries_dir
+        .join("wayfern")
+        .join(new_version)
+        .join("wayfern")
+        .exists(),
+      "latest version executable must be preserved",
     );
   }
 }
