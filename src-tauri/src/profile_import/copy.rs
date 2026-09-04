@@ -74,6 +74,14 @@ const SKIP_FILES: &[&str] = &[
   "Login Data For Account-journal",
   "Account Web Data",
   "Account Web Data-journal",
+  // Root-level SNSS session files, the siblings of the `Sessions` directory
+  // above. Same format, same payload: they replay the source machine's
+  // windows and can embed absolute local paths in PageState blobs, so they
+  // are dropped on import for the same reason.
+  "Current Session",
+  "Current Tabs",
+  "Last Session",
+  "Last Tabs",
 ];
 
 /// Suffixes that belong to a database we snapshot separately, or to scratch
@@ -376,6 +384,31 @@ mod tests {
       .join("CURRENT")
       .exists());
     assert!(!dest.join("History-journal").exists());
+  }
+
+  #[test]
+  fn root_snss_session_files_are_dropped() {
+    let dir = TempDir::new().unwrap();
+    let source = dir.path().join("src");
+    let dest = dir.path().join("dst");
+    touch(&source.join("Preferences"), b"{}");
+    for f in &[
+      "Current Session",
+      "Current Tabs",
+      "Last Session",
+      "Last Tabs",
+    ] {
+      touch(&source.join(f), b"SNSS-blob-with-source-machine-paths");
+    }
+    copy_profile_tree(&source, &dest).unwrap();
+    for f in &[
+      "Current Session",
+      "Current Tabs",
+      "Last Session",
+      "Last Tabs",
+    ] {
+      assert!(!dest.join(f).exists(), "{f} should be dropped on import");
+    }
   }
 
   #[test]
