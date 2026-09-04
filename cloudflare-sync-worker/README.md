@@ -42,12 +42,17 @@ npx wrangler d1 create don-sync-db
 npx wrangler d1 execute don-sync-db --remote --file=./schema.sql
 ```
 
-### 4. 设置你的安全同步 Token
+### 4. 设置你的安全同步 Token 与签名密钥
 ```bash
-# 设置主访问密钥（此 Token 将填入 DON 桌面客户端）
+# 主访问密钥（此 Token 将填入 DON 桌面客户端，用于 /v1/* 接口鉴权）
 npx wrangler secret put SYNC_TOKEN
+# HMAC 签名密钥（用于 /raw/get 与 /raw/put 直连 R2 传输 URL 的签名与校验）
+# 强烈建议单独设置；若未设置，将回退到 SYNC_TOKEN
+npx wrangler secret put SIGNING_SECRET
 ```
-*(输入你自定义的强密码，如 `my-super-secret-sync-token-2026`)*
+*（输入自定义的强随机值，例如 `openssl rand -hex 32`。切勿使用仓库中曾经出现的公共默认值 `don-signing-secret` / `don-secret-sync-token` / `default-don-signing-secret`，Worker 会在启动后首次签名/校验时直接拒绝此类已知公共占位符。）*
+
+> **⚠️ 安全须知 / 迁移提示**：`wrangler.toml` 的 `[vars]` 不再包含 `SYNC_TOKEN` / `SIGNING_SECRET` 明文默认值（Cloudflare 的 `[vars]` 为明文配置，任何能读取仓库的人都能看到，不能存放敏感信息）。请务必在 `wrangler deploy` **之前**通过上面的 `wrangler secret put` 设置好这两个 secret；否则 Worker 会在首次签名或校验 `/raw/*` 传输 URL 时抛出错误并返回 5xx（拒绝服务），这是 fail-closed 行为，确保不会使用可伪造的公共密钥签发/放行传输 URL。
 
 ### 5. 一键部署到 Cloudflare Workers
 ```bash

@@ -10,9 +10,37 @@ export function safeEqual(a: string, b: string): boolean {
   return result === 0;
 }
 
-/** Get signing key from Env */
+/** Known-public placeholder secrets committed in this repo's history. Refusing
+ * these prevents a leftover `[vars]` value from `wrangler.toml` (or the prior
+ * hardcoded fallback) from silently remaining in effect as a usable signing key. */
+const KNOWN_PLACEHOLDER_SECRETS = new Set([
+  "default-don-signing-secret",
+  "don-signing-secret",
+  "don-secret-sync-token",
+]);
+
+/** Get signing key from Env.
+ *
+ * SECURITY: Fail closed. There is NO public-constant fallback. If neither
+ * `SIGNING_SECRET` nor `SYNC_TOKEN` is configured via `wrangler secret put`, or
+ * the configured value is one of the known-public placeholders historically
+ * committed in this repo, this throws and signing/verification refuses to run.
+ * A thrown error propagates out of `generateTransferSignature` /
+ * `verifyTransferSignature`, so the `/raw/*` transfers and `/v1/objects/presign-*`
+ * endpoints never serve or mint a URL with a forgeable key. */
 function getSigningSecret(env: Env): string {
-  return env.SIGNING_SECRET || env.SYNC_TOKEN || "default-don-signing-secret";
+  const secret = env.SIGNING_SECRET || env.SYNC_TOKEN;
+  if (!secret) {
+    throw new Error(
+      "SIGNING_SECRET (or SYNC_TOKEN) must be configured via `wrangler secret put` before the worker can sign/verify transfer URLs",
+    );
+  }
+  if (KNOWN_PLACEHOLDER_SECRETS.has(secret)) {
+    throw new Error(
+      "SIGNING_SECRET/SYNC_TOKEN is set to a known-public placeholder; set a real, unique secret via `wrangler secret put`",
+    );
+  }
+  return secret;
 }
 
 /** Generate an HMAC-SHA256 signature for a raw file transfer URL */
