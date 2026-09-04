@@ -178,6 +178,32 @@ fn normalize_domain(raw: &str) -> Option<String> {
   if d.contains(char::is_whitespace) || d.contains("://") {
     return None;
   }
+  // Reject the loopback / reserved-name bodies that every hosts-format
+  // blocklist ships as a *header* (StevenBlack, AdAway): the sink IP is stripped
+  // above, leaving tokens like `localhost`, `localhost.localdomain`, `local`,
+  // `ip6-localhost`, `ip6-loopback`. These are connection metadata, not block
+  // targets — and `BlocklistMatcher` suffix-matches, so emitting `local` would
+  // block every `*.local` mDNS/LAN host, `localhost.localdomain` every
+  // `*.localhost.localdomain`, etc. Also reject bare sink IP literals
+  // (`0.0.0.0`, `127.0.0.1`, `::`, `::1`, …) that have no trailing hostname: they
+  // pass the guards above but must never be block domains.
+  if matches!(
+    d.as_str(),
+    "localhost"
+      | "localhost.localdomain"
+      | "local"
+      | "ip6-localhost"
+      | "ip6-loopback"
+      | "ip6-allnodes"
+      | "ip6-allrouters"
+      | "ip6-mcastprefix"
+      | "broadcasthost"
+  ) {
+    return None;
+  }
+  if d.parse::<std::net::IpAddr>().is_ok() {
+    return None;
+  }
   Some(d)
 }
 
@@ -822,6 +848,122 @@ mod tests {
     assert_eq!(normalize_domain("0.0.0.0 # just a comment"), None);
     // Full-line comments stay rejected.
     assert_eq!(normalize_domain("! adblock header"), None);
+  }
+
+  // Regression for the StevenBlack/AdAway hosts-header pollution: after the
+  // leading sink IP is stripped, the loopback-name bodies those header lines
+  // carry (`localhost`, `localhost.localdomain`, `local`, `ip6-*`) must NOT be
+  // emitted as block domains, and bare sink IP literals must NOT either.
+  #[test]
+  fn test_normalize_domain_rejects_hosts_header_metadata() {
+    // The exact header of `https://raw.githubusercontent.com/StevenBlack/hosts`
+    // (and the AdAway overlap is `localhost`), parsed line by line.
+    assert_eq!(normalize_domain("127.0.0.1 localhost"), None);
+    assert_eq!(normalize_domain("127.0.0.1 localhost.localdomain"), None);
+    assert_eq!(normalize_domain("127.0.0.1 local"), None);
+    assert_eq!(normalize_domain("::1 localhost"), None);
+    assert_eq!(normalize_domain("::1 ip6-localhost"), None);
+    assert_eq!(normalize_domain("::1 ip6-loopback"), None);
+    assert_eq!(normalize_domain("::1 ip6-allnodes"), None);
+    assert_eq!(normalize_domain("::1 ip6-allrouters"), None);
+    assert_eq!(normalize_domain("255.255.255.255 broadcasthost"), None);
+    // Manual entry of any reserved name is rejected too.
+    assert_eq!(normalize_domain("localhost"), None);
+    assert_eq!(normalize_domain("Local"), None); // case-insensitive
+    assert_eq!(normalize_domain("*.local"), None);
+    assert_eq!(normalize_domain("||localhost.localdomain^"), None);
+    // Bare sink IP literals (a parse-function edge — no real blocklist the
+    // parser targets ships one, but the function must never return an IP).
+    assert_eq!(normalize_domain("0.0.0.0"), None);
+    assert_eq!(normalize_domain("127.0.0.1"), None);
+    assert_eq!(normalize_domain("::"), None);
+    assert_eq!(normalize_domain("::1"), None);
+    assert_eq!(normalize_domain("0.0.0.0 0.0.0.0"), None);
+    // Legitimate hosts-format entries still pass through unchanged.
+    assert_eq!(
+      normalize_domain("0.0.0.0 ads.example.com"),
+      Some("ads.example.com".into())
+    );
+    assert_eq!(
+      normalize_domain("127.0.0.1 tracker.net"),
+      Some("tracker.net".into())
+    );
+    assert_eq!(
+      normalize_domain("::1 v6.example.com"),
+      Some("v6.example.com".into())
+    );
+  }
+
+  // End-to-end regression: feed the real StevenBlack header through the same
+  // insert loop `compile_custom_blocklist` uses, serialize to a file the way
+  // the compiler does, then load it through `BlocklistMatcher::from_file_with_mode`
+  // (which, like the production load, does NOT re-normalize). The matcher must
+  // not block `*.local` / `localhost` / `ip6-*`, while still blocking a real
+  // entry that a hosts-format list would contribute.
+  #[test]
+  fn test_compile_does_not_block_local_from_hosts_header() {
+    use crate::proxy_server::BlocklistMatcher;
+    use std::collections::HashSet;
+
+    let header = "127.0.0.1 localhost\n\
+                  127.0.0.1 localhost.localdomain\n\
+                  127.0.0.1 local\n\
+                  255.255.255.255 broadcasthost\n\
+                  ::1 localhost\n\
+                  ::1 ip6-localhost\n\
+                  ::1 ip6-loopback\n";
+
+    // Mirror `compile_custom_blocklist`'s source-parsing loop exactly.
+    let mut domains: HashSet<String> = HashSet::new();
+    for line in header.lines() {
+      if let Some(d) = normalize_domain(line) {
+        domains.insert(d);
+      }
+    }
+    // None of the header metadata survives normalization.
+    for toxic in [
+      "localhost",
+      "localhost.localdomain",
+      "local",
+      "ip6-localhost",
+      "ip6-loopback",
+      "broadcasthost",
+    ] {
+      assert!(
+        !domains.contains(toxic),
+        "`{toxic}` leaked into the compiled domain set"
+      );
+    }
+    // A real blocklist entry still compiles through.
+    domains.insert("ads.example.com".to_string());
+
+    // Serialize exactly as `compile_custom_blocklist` writes `custom.txt`.
+    let mut sorted: Vec<&str> = domains.iter().map(String::as_str).collect();
+    sorted.sort_unstable();
+    let body = sorted.join("\n");
+
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("custom.txt");
+    std::fs::write(&path, &body).expect("write custom.txt");
+    let matcher = BlocklistMatcher::from_file_with_mode(path.to_str().expect("utf8 path"), false)
+      .expect("load matcher");
+
+    // The header tokens must no longer block anything they would have blocked
+    // via the matcher's parent-domain suffix matching (`set_contains`).
+    assert!(
+      !matcher.is_blocked("myprinter.local"),
+      "myprinter.local blocked"
+    );
+    assert!(!matcher.is_blocked("localhost"), "localhost blocked");
+    assert!(!matcher.is_blocked("dev.localhost.localdomain"));
+    assert!(!matcher.is_blocked("ip6-localhost"));
+    assert!(!matcher.is_blocked("ip6-loopback"));
+    // An unrelated host the header never named is also not blocked.
+    assert!(!matcher.is_blocked("example.com"));
+    // The real entry that survived compilation is still enforced, including
+    // via suffix matching on a subdomain.
+    assert!(matcher.is_blocked("ads.example.com"));
+    assert!(matcher.is_blocked("tracker.ads.example.com"));
   }
 
   #[test]
