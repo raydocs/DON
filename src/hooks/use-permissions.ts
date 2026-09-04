@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { waitForPermissionGrant } from "@/lib/mac-permission-poll";
 import { getCurrentOS, type OperatingSystem } from "@/lib/platform";
 
 // Platform-specific imports
@@ -93,16 +94,25 @@ export function usePermissions(active = true): UsePermissionsReturn {
           return granted;
         };
 
-        if (type === "microphone") {
-          await permissions.requestMicrophonePermission();
-        } else {
-          await permissions.requestCameraPermission();
-        }
+        const request = async () => {
+          if (type === "microphone") {
+            await permissions.requestMicrophonePermission();
+          } else {
+            await permissions.requestCameraPermission();
+          }
+        };
 
-        // Read once immediately. The hook's macOS poll keeps watching for
-        // delayed TCC propagation without holding this request (and any next
-        // system prompt) open for several extra seconds.
-        return readPermission();
+        // The macOS permission request (tauri-plugin-macos-permissions) is
+        // fire-and-forget: it dispatches the TCC prompt with a null completion
+        // handler and resolves as soon as the prompt has been *shown*, before
+        // the user has answered. A single immediate read would return
+        // `notDetermined` (false) while the prompt is still on screen, so
+        // callers branched on "denied" and opened System Settings + showed a
+        // "still not granted" toast while the prompt was still waiting for an
+        // answer. Poll the grant status to give the user a bounded window to
+        // answer, making the returned Promise<boolean> reflect the post-prompt
+        // state instead of the pre-answer read.
+        return waitForPermissionGrant(request, readPermission);
       } catch (error) {
         console.error(`Failed to request ${type} permission on macOS:`, error);
         return false;
