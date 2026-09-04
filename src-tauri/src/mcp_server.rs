@@ -2422,7 +2422,7 @@ impl McpServer {
       }
       // No capability gate on the stop. A lapsed plan must never be the reason
       // an agent cannot end something that is spending hours.
-      "stop_remote_session" => Self::handle_stop_remote_session(arguments).await,
+      "stop_remote_session" => self.handle_stop_remote_session(arguments).await,
       // Remote fleet observability. Reads only, and free: being unable to see
       // that a session you are already paying for has become usable is not a
       // feature worth withholding.
@@ -6023,15 +6023,27 @@ impl McpServer {
 
   /// Stop a remote session and settle what it cost.
   async fn handle_stop_remote_session(
+    &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let session_id = Self::require_str(arguments, "session_id")?;
+    let app = {
+      let inner = self.inner.lock().await;
+      inner.app_handle.clone().ok_or_else(|| McpError {
+        code: -32000,
+        message: "MCP server not properly initialized".to_string(),
+      })?
+    };
     let outcome = crate::remote_session::end_remote_session(session_id)
       .await
       .map_err(|e| McpError {
         code: -32000,
         message: e.to_error_json(),
       })?;
+    // The stream normally reports the close, but a stop must not depend on a
+    // socket being up: without this the session's gate stays held and the
+    // profile cannot be launched locally until the stream reconnects.
+    crate::remote_session::note_session_stopped(&app, session_id);
     Self::json_content(&outcome)
   }
 
