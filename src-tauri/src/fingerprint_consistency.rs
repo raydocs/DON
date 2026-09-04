@@ -95,7 +95,7 @@ struct InFlightExitProbe {
 #[derive(Default)]
 struct ExitCacheState {
   cache: HashMap<ExitCacheKey, CachedExit>,
-  generations: HashMap<String, u64>,
+  generations: HashMap<ExitCacheKey, u64>,
   in_flight: HashMap<ExitCacheKey, InFlightExitProbe>,
 }
 
@@ -266,7 +266,7 @@ where
     }
     state.cache.remove(key);
 
-    let generation = *state.generations.get(&key.scope).unwrap_or(&0);
+    let generation = *state.generations.get(key).unwrap_or(&0);
     let result_cell = state
       .in_flight
       .entry(key.clone())
@@ -282,7 +282,7 @@ where
   let result = result_cell.get_or_init(probe).await.clone();
 
   let mut state = exit_cache();
-  let current_generation = *state.generations.get(&key.scope).unwrap_or(&0);
+  let current_generation = *state.generations.get(key).unwrap_or(&0);
   let is_current = state.in_flight.get(key).is_some_and(|in_flight| {
     in_flight.generation == generation && Arc::ptr_eq(&in_flight.result, &result_cell)
   });
@@ -323,14 +323,10 @@ pub fn invalidate_exit_cache(profile: &BrowserProfile) {
 
 fn invalidate_exit_cache_key(key: &ExitCacheKey) {
   let mut state = exit_cache();
-  let generation = state.generations.entry(key.scope.clone()).or_default();
+  let generation = state.generations.entry(key.clone()).or_default();
   *generation = generation.wrapping_add(1);
-  state
-    .cache
-    .retain(|cached_key, _| cached_key.scope != key.scope);
-  state
-    .in_flight
-    .retain(|probe_key, _| probe_key.scope != key.scope);
+  state.cache.remove(key);
+  state.in_flight.remove(key);
 }
 
 /// Measure the exit through an already-normalized upstream and compare it to
@@ -933,6 +929,92 @@ mod tests {
     assert!(cached_exit(&key).is_none());
   }
 
+  #[tokio::test]
+  async fn sibling_identity_probe_survives_invalidation_of_another_identity_in_scope() {
+    use std::sync::Arc;
+
+    let scope = format!("proxy:singleflight-sibling-{}", uuid::Uuid::new_v4());
+    let key_a = ExitCacheKey {
+      scope: scope.clone(),
+      identity: "http://session-a@gateway:8080".into(),
+    };
+    let key_b = ExitCacheKey {
+      scope: scope.clone(),
+      identity: "http://session-b@gateway:8080".into(),
+    };
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let probe_key_b = key_b.clone();
+    let probe = tokio::spawn({
+      let started = Arc::clone(&started);
+      let release = Arc::clone(&release);
+      async move {
+        let identity = probe_key_b.identity.clone();
+        cached_or_probe_exit(&probe_key_b, || async move {
+          started.notify_one();
+          release.notified().await;
+          Ok(Some(CachedExit {
+            fetched_at: crate::proxy_manager::now_secs(),
+            identity,
+            timezone: Some("Europe/Berlin".into()),
+            country_code: Some("DE".into()),
+            ip: Some("192.0.2.1".into()),
+          }))
+        })
+        .await
+      }
+    });
+    started.notified().await;
+    invalidate_exit_cache_key(&key_a);
+    release.notify_one();
+    let result = probe.await.unwrap().unwrap();
+    assert!(
+      result.is_some(),
+      "sibling probe should return its measured result, got None"
+    );
+    assert!(cached_exit(&key_b).is_some());
+    invalidate_exit_cache_key(&key_a);
+    invalidate_exit_cache_key(&key_b);
+  }
+
+  #[test]
+  fn invalidating_one_identity_keeps_a_sibling_identity_cached_verdict() {
+    let scope = format!("proxy:sibling-cache-{}", uuid::Uuid::new_v4());
+    let key_a = ExitCacheKey {
+      scope: scope.clone(),
+      identity: "http://session-a@gateway:8080".into(),
+    };
+    let key_b = ExitCacheKey {
+      scope: scope.clone(),
+      identity: "http://session-b@gateway:8080".into(),
+    };
+    for key in [&key_a, &key_b] {
+      exit_cache().cache.insert(
+        key.clone(),
+        CachedExit {
+          fetched_at: crate::proxy_manager::now_secs(),
+          identity: key.identity.clone(),
+          timezone: Some("Europe/Berlin".into()),
+          country_code: Some("DE".into()),
+          ip: Some("192.0.2.3".into()),
+        },
+      );
+    }
+
+    invalidate_exit_cache_key(&key_a);
+
+    assert!(
+      cached_exit(&key_a).is_none(),
+      "own cached verdict must be removed on invalidation"
+    );
+    assert!(
+      cached_exit(&key_b).is_some(),
+      "sibling cached verdict must survive a different identity's invalidation"
+    );
+    invalidate_exit_cache_key(&key_a);
+    invalidate_exit_cache_key(&key_b);
+  }
+
   #[test]
   fn exit_cache_survives_a_poisoned_lock() {
     // A panic under this lock must degrade the check, not brick every
@@ -943,6 +1025,9 @@ mod tests {
     })
     .join();
     assert!(EXIT_CACHE.is_poisoned());
-    exit_cache().generations.remove("nonexistent-scope");
+    exit_cache().generations.remove(&ExitCacheKey {
+      scope: "nonexistent-scope".into(),
+      identity: String::new(),
+    });
   }
 }
