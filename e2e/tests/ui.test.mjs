@@ -1869,3 +1869,159 @@ test("a folder with no manifest fails with the translated reason, not a raw code
     assert.equal((await restoreFolderPicker(app)).length, 1);
   });
 });
+
+test("bulk delete skips a proxy used by a non-synced profile (no direct-launch footgun)", async () => {
+  await withApp("ui-bulk-delete-in-use-guard", async (app) => {
+    const proxyName = "E2E In-Use Proxy";
+
+    const proxy = await app.invoke("create_stored_proxy", {
+      name: proxyName,
+      proxySettings: {
+        proxy_type: "http",
+        host: "127.0.0.1",
+        port: 9,
+        username: "e2e-user",
+        password: "e2e-pass",
+      },
+    });
+
+    const profile = await app.invoke("create_browser_profile_new", {
+      name: "E2E Non-Synced Profile",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+
+    await app.invoke("update_profile_proxy", {
+      profileId: profile.id,
+      proxyId: proxy.id,
+    });
+    await app.invoke("set_profile_sync_mode", {
+      profileId: profile.id,
+      syncMode: "Disabled",
+    });
+
+    try {
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).length,
+        1,
+        "the non-synced profile is the only one referencing the proxy",
+      );
+      assert.equal(
+        await app.invoke("is_proxy_in_use_by_synced_profile", {
+          proxyId: proxy.id,
+        }),
+        false,
+        "synced-only in-use is false because the profile is not synced",
+      );
+
+      await app.clickSelector('[aria-label="Network"]');
+      await app.waitForText(proxyName);
+
+      const rowDeletedButtonDisabled = await app.execute(
+        `
+          const name = arguments[0];
+          const rows = [...document.querySelectorAll("table tr")];
+          const row = rows.find((tr) => (tr.textContent || "").includes(name));
+          if (!row) return { found: false };
+          const buttons = [...row.querySelectorAll("button")];
+          const trash = buttons[buttons.length - 1];
+          return { found: Boolean(trash), disabled: trash ? trash.disabled : null };
+        `,
+        [proxyName],
+      );
+      assert.ok(rowDeletedButtonDisabled.found, "per-row delete button found");
+      assert.equal(
+        rowDeletedButtonDisabled.disabled,
+        true,
+        "the per-row delete button must be disabled for a proxy in use by any profile",
+      );
+
+      const checkbox = await app.execute(
+        `
+          const name = arguments[0];
+          const rows = [...document.querySelectorAll("table tr")];
+          const row = rows.find((tr) => (tr.textContent || "").includes(name));
+          if (!row) return null;
+          return row.querySelector('[role="checkbox"][aria-label="Select row"]');
+        `,
+        [proxyName],
+      );
+      assert.ok(checkbox, "selectable row checkbox found");
+      await app.clickElement(checkbox, "proxy row checkbox");
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return Boolean(document.querySelector('[role="toolbar"]'));`,
+          ),
+        { description: "bulk action toolbar to appear" },
+      );
+
+      const toolbarDelete = await app.execute(
+        `
+          const toolbar = document.querySelector('[role="toolbar"]');
+          if (!toolbar) return null;
+          return toolbar.querySelector("button.bg-destructive");
+        `,
+        [],
+      );
+      assert.ok(toolbarDelete, "bulk-delete action button found in toolbar");
+      await app.clickElement(toolbarDelete, "bulk-delete toolbar button");
+
+      await app.waitForText(en.proxies.bulkDelete.proxiesTitle);
+      await app.clickTextIn(
+        '[role="dialog"]',
+        en.proxies.bulkDelete.confirmButton.replace("{{count}}", "1"),
+        { roles: ["button"] },
+      );
+
+      const skippedToast = en.proxies.bulkDelete.skippedSome.replace(
+        "{{count}}",
+        "1",
+      );
+      await app.waitFor(
+        async () =>
+          (await toastTexts(app)).some((t) => t.includes(skippedToast)),
+        { description: "skipped-some warning toast" },
+      );
+
+      const stillStored = await app.invoke("get_stored_proxies");
+      assert.ok(
+        stillStored.some((p) => p.id === proxy.id),
+        "the in-use proxy must NOT be deleted by bulk delete",
+      );
+      const profiles = await app.invoke("list_browser_profiles");
+      const ref = profiles.find((p) => p.id === profile.id);
+      assert.equal(
+        ref?.proxy_id,
+        proxy.id,
+        "the profile's proxy_id must not be left dangling after the (refused) bulk delete",
+      );
+
+      const successToasts = (await toastTexts(app)).filter((t) =>
+        t.includes(en.proxies.management.deleteSuccess),
+      );
+      assert.equal(
+        successToasts.length,
+        0,
+        "no success toast should fire because nothing was deleted",
+      );
+    } finally {
+      await app.invoke("delete_profile", { profileId: profile.id });
+      // Delete the proxy if it still exists; tolerate the buggy path having
+      // already deleted it so the body's assertion is what surfaces on
+      // regression.
+      const remaining = await app.invoke("get_stored_proxies");
+      if (remaining.some((p) => p.id === proxy.id)) {
+        await app.invoke("delete_stored_proxy", { proxyId: proxy.id });
+      }
+    }
+  });
+});

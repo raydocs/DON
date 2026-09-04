@@ -595,7 +595,9 @@
       "proxiesDescription": "Esta acción no se puede deshacer. Se eliminarán permanentemente {{count}} proxy(s): {{names}}.",
       "vpnsTitle": "Eliminar VPN seleccionadas",
       "vpnsDescription": "Esta acción no se puede deshacer. Se eliminarán permanentemente {{count}} VPN(s): {{names}}.",
-      "confirmButton": "Eliminar {{count}}"
+      "confirmButton": "Eliminar {{count}}",
+      "skippedSome": "{{count}} proxy(s) seleccionados están en uso por perfiles y no se eliminaron.",
+      "vpnsSkippedSome": "{{count}} VPN(s) seleccionadas están en uso por perfiles y no se eliminaron."
     }
   },
   "groups": {

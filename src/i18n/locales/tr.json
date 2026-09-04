@@ -595,7 +595,9 @@
       "proxiesDescription": "Bu işlem geri alınamaz. {{count}} proxy kalıcı olarak silinecek: {{names}}.",
       "vpnsTitle": "Seçili VPN'leri Sil",
       "vpnsDescription": "Bu işlem geri alınamaz. {{count}} VPN kalıcı olarak silinecek: {{names}}.",
-      "confirmButton": "{{count}} Öğeyi Sil"
+      "confirmButton": "{{count}} Öğeyi Sil",
+      "skippedSome": "{{count}} seçili proxy profiller tarafından kullanılıyor ve silinmedi.",
+      "vpnsSkippedSome": "{{count}} seçili VPN profiller tarafından kullanılıyor ve silinmedi."
     }
   },
   "groups": {

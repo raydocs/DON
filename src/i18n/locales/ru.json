@@ -595,7 +595,9 @@
       "proxiesDescription": "Это действие нельзя отменить. Будет безвозвратно удалено прокси: {{count}} — {{names}}.",
       "vpnsTitle": "Удалить выбранные VPN",
       "vpnsDescription": "Это действие нельзя отменить. Будет безвозвратно удалено VPN: {{count}} — {{names}}.",
-      "confirmButton": "Удалить {{count}}"
+      "confirmButton": "Удалить {{count}}",
+      "skippedSome": "{{count}} выбранных прокси используются профилями и не были удалены.",
+      "vpnsSkippedSome": "{{count}} выбранных VPN используются профилями и не были удалены."
     }
   },
   "groups": {
