@@ -1052,6 +1052,46 @@ impl ProfileManager {
     app_handle: &tauri::AppHandle,
     profile_ids: Vec<String>,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    // The AppHandle-free deletion core does the full per-profile side-store
+    // cleanup contract and returns the ids whose remote copies still need to
+    // be deleted from S3. Only that fan-out needs a live `AppHandle`, so it is
+    // the sole thing kept here; the contract itself lives in `bulk_delete_local`
+    // where it can be exercised without a running UI.
+    let sync_enabled_ids = self.bulk_delete_local(profile_ids)?;
+
+    // Delete sync-enabled profiles from S3
+    if !sync_enabled_ids.is_empty() {
+      let app_handle_clone = app_handle.clone();
+      tauri::async_runtime::spawn(async move {
+        if let Ok(engine) = crate::sync::SyncEngine::create_from_settings(&app_handle_clone).await {
+          for profile_id in sync_enabled_ids {
+            if let Err(e) = engine.delete_profile(&profile_id).await {
+              log::warn!("Failed to delete profile {} from sync: {}", profile_id, e);
+            }
+          }
+        }
+      });
+    }
+
+    // Emit profile deletion event
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+    }
+
+    Ok(())
+  }
+
+  /// Bulk-deletion core that does not need a live `AppHandle`. It mirrors the
+  /// per-profile side-store cleanup contract of `delete_profile` for every id
+  /// (launch-gate acknowledgements, ephemeral directory, per-domain traffic
+  /// history) so a bulk delete leaves the machine in the same state as deleting
+  /// the same profiles one-by-one, then reaps the shared tag index and unused
+  /// browser binaries. Returns the ids of deleted profiles that had sync
+  /// enabled so the caller can fan out the remote S3 deletion.
+  fn bulk_delete_local(
+    &self,
+    profile_ids: Vec<String>,
+  ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let profiles = self.list_profiles()?;
     let mut sync_enabled_ids: Vec<String> = Vec::new();
 
@@ -1079,6 +1119,20 @@ impl ProfileManager {
         sync_enabled_ids.push(profile_id.clone());
       }
 
+      // Launch-gate acknowledgements are keyed by profile id and are not
+      // synced, so nothing else would ever clean them up.
+      crate::launch_gate_prefs::forget_profile(&profile_id);
+
+      // A decrypted or in-memory copy would otherwise outlive the profile it
+      // belonged to with nothing left that knew to reap it. No-ops when the
+      // profile has no ephemeral directory.
+      crate::ephemeral_dirs::remove_ephemeral_dir(&profile_id);
+
+      // Per-domain traffic history lives outside the profile directory, so it
+      // survives the delete otherwise. It is zero-overwritten on removal so the
+      // bulk path must not skip it (a skip leaves readable history on disk).
+      crate::traffic_stats::delete_traffic_stats(&profile_id);
+
       // Delete the profile
       let profiles_dir = self.get_profiles_dir();
       let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
@@ -1088,26 +1142,17 @@ impl ProfileManager {
       }
     }
 
-    // Delete sync-enabled profiles from S3
-    if !sync_enabled_ids.is_empty() {
-      let app_handle_clone = app_handle.clone();
-      tauri::async_runtime::spawn(async move {
-        if let Ok(engine) = crate::sync::SyncEngine::create_from_settings(&app_handle_clone).await {
-          for profile_id in sync_enabled_ids {
-            if let Err(e) = engine.delete_profile(&profile_id).await {
-              log::warn!("Failed to delete profile {} from sync: {}", profile_id, e);
-            }
-          }
-        }
-      });
+    // The shared tag index would otherwise keep referencing tags that only
+    // belonged to deleted profiles until the next unrelated single-profile
+    // tag mutation.
+    self.rebuild_tag_suggestions();
+
+    // Always perform cleanup after profile deletion to remove unused binaries.
+    if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
+      log::warn!("Warning: Failed to cleanup unused binaries after bulk deletion: {e}");
     }
 
-    // Emit profile deletion event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-    }
-
-    Ok(())
+    Ok(sync_enabled_ids)
   }
 
   fn generate_clone_name(&self, original_name: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -2073,6 +2118,317 @@ mod tests {
 
     let result_none = super::validate_launch_hook(None).unwrap();
     assert!(result_none.is_none());
+  }
+
+  // ---- bulk deletion side-store cleanup contract ----
+  //
+  // `delete_multiple_profiles` delegates to the AppHandle-free `bulk_delete_local`
+  // core. These tests exercise that core directly, since a `tauri::AppHandle`
+  // cannot be built inside a `cargo test --lib` worker thread (the Wry event loop
+  // must initialize on the main thread). The public wrapper is covered by the
+  // native e2e `entities` suite; these unit tests pin the per-profile and
+  // post-loop cleanup contract that the bug report identified as missing.
+
+  fn make_profile(name: &str) -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: name.to_string(),
+      browser: "wayfern".to_string(),
+      ..BrowserProfile::default()
+    }
+  }
+
+  fn make_cross_os_profile(name: &str) -> BrowserProfile {
+    let other_os = if crate::profile::types::get_host_os() == "linux" {
+      "windows"
+    } else {
+      "linux"
+    };
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: name.to_string(),
+      browser: "wayfern".to_string(),
+      host_os: Some(other_os.to_string()),
+      ..BrowserProfile::default()
+    }
+  }
+
+  fn write_traffic_stats_files(id: &str, contents: &str) {
+    let dir = crate::traffic_stats::get_traffic_stats_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in [format!("{id}.json"), format!("{id}.session.json")] {
+      std::fs::write(dir.join(name), contents).unwrap();
+    }
+  }
+
+  fn traffic_stats_files_exist(id: &str) -> bool {
+    let dir = crate::traffic_stats::get_traffic_stats_dir();
+    [format!("{id}.json"), format!("{id}.session.json")]
+      .iter()
+      .any(|n| dir.join(n).exists())
+  }
+
+  fn ack_launch_gate(profile: &BrowserProfile) {
+    crate::launch_gate_prefs::ack_fingerprint(profile, "exit-endpoint");
+    crate::launch_gate_prefs::ack_extensions(&profile.id.to_string(), &["vpn-ext".to_string()]);
+  }
+
+  fn launch_gate_acked(profile_id: &str) -> bool {
+    let prefs = crate::launch_gate_prefs::load();
+    prefs.fingerprint_acks.contains_key(profile_id)
+      || prefs.vpn_extension_acks.contains_key(profile_id)
+  }
+
+  /// Redirects the ephemeral base to a scratch dir for the duration of the
+  /// test. The env var is process-global, so every test that touches the real
+  /// ephemeral base must be `#[serial]` and must pair this guard with a Drop.
+  #[allow(dead_code)]
+  struct EphemeralRoot(tempfile::TempDir);
+
+  impl EphemeralRoot {
+    fn new() -> Self {
+      let tmp = tempfile::tempdir().unwrap();
+      std::env::set_var("DONUTBROWSER_EPHEMERAL_ROOT", tmp.path());
+      EphemeralRoot(tmp)
+    }
+  }
+
+  impl Drop for EphemeralRoot {
+    fn drop(&mut self) {
+      std::env::remove_var("DONUTBROWSER_EPHEMERAL_ROOT");
+    }
+  }
+
+  #[test]
+  fn bulk_delete_returns_sync_enabled_ids_in_input_order() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let mut synced = make_profile("synced");
+    synced.sync_mode = crate::profile::types::SyncMode::Regular;
+    let plain = make_profile("plain");
+    manager.save_profile(&synced).unwrap();
+    manager.save_profile(&plain).unwrap();
+
+    let sync_ids = manager
+      .bulk_delete_local(vec![plain.id.to_string(), synced.id.to_string()])
+      .unwrap();
+
+    assert_eq!(sync_ids, vec![synced.id.to_string()]);
+  }
+
+  #[test]
+  fn bulk_delete_rejects_running_profile_without_cleaning_it_up() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let mut running = make_profile("running");
+    running.process_id = Some(4242);
+    manager.save_profile(&running).unwrap();
+    // Pre-populate the side stores so we can prove the running-browser guard
+    // short-circuits before any cleanup runs (matching `delete_profile`).
+    ack_launch_gate(&running);
+    write_traffic_stats_files(&running.id.to_string(), "history");
+    assert!(launch_gate_acked(&running.id.to_string()));
+    assert!(traffic_stats_files_exist(&running.id.to_string()));
+
+    let err = manager
+      .bulk_delete_local(vec![running.id.to_string()])
+      .unwrap_err();
+
+    assert!(err.to_string().contains("browser is running"), "{}", err);
+    // Nothing was deleted and nothing was cleaned up.
+    assert!(manager
+      .get_profiles_dir()
+      .join(running.id.to_string())
+      .exists());
+    assert!(launch_gate_acked(&running.id.to_string()));
+    assert!(traffic_stats_files_exist(&running.id.to_string()));
+  }
+
+  #[test]
+  fn bulk_delete_removes_launch_gate_prefs_for_every_profile() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let deleted_a = make_profile("deleted-a");
+    let deleted_b = make_profile("deleted-b");
+    let survivor = make_profile("survivor");
+    manager.save_profile(&deleted_a).unwrap();
+    manager.save_profile(&deleted_b).unwrap();
+    manager.save_profile(&survivor).unwrap();
+    ack_launch_gate(&deleted_a);
+    ack_launch_gate(&deleted_b);
+    ack_launch_gate(&survivor);
+    assert!(launch_gate_acked(&deleted_a.id.to_string()));
+    assert!(launch_gate_acked(&deleted_b.id.to_string()));
+    assert!(launch_gate_acked(&survivor.id.to_string()));
+
+    manager
+      .bulk_delete_local(vec![deleted_a.id.to_string(), deleted_b.id.to_string()])
+      .unwrap();
+
+    assert!(!launch_gate_acked(&deleted_a.id.to_string()));
+    assert!(!launch_gate_acked(&deleted_b.id.to_string()));
+    // A non-deleted profile keeps its acknowledgements (no over-deletion).
+    assert!(launch_gate_acked(&survivor.id.to_string()));
+  }
+
+  #[test]
+  fn bulk_delete_removes_traffic_stats_for_every_profile() {
+    let data = TempDir::new().unwrap();
+    let _data_guard = crate::app_dirs::set_test_data_dir(data.path().to_path_buf());
+    let cache = TempDir::new().unwrap();
+    let _cache_guard = crate::app_dirs::set_test_cache_dir(cache.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let deleted = make_profile("deleted");
+    let survivor = make_profile("survivor");
+    manager.save_profile(&deleted).unwrap();
+    manager.save_profile(&survivor).unwrap();
+    // Simulate readable per-domain browsing history for both profiles.
+    write_traffic_stats_files(&deleted.id.to_string(), "domain-visits: [...]");
+    write_traffic_stats_files(&survivor.id.to_string(), "domain-visits: [...]");
+    assert!(traffic_stats_files_exist(&deleted.id.to_string()));
+    assert!(traffic_stats_files_exist(&survivor.id.to_string()));
+
+    manager
+      .bulk_delete_local(vec![deleted.id.to_string()])
+      .unwrap();
+
+    assert!(
+      !traffic_stats_files_exist(&deleted.id.to_string()),
+      "bulk delete must reap per-domain traffic history for deleted profiles"
+    );
+    assert!(
+      traffic_stats_files_exist(&survivor.id.to_string()),
+      "bulk delete must not touch a surviving profile's traffic history"
+    );
+  }
+
+  #[test]
+  fn bulk_delete_rebuilds_tag_suggestions() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let a = tagged_profile("deleted-tag");
+    let b = tagged_profile("other-deleted-tag");
+    let survivor = tagged_profile("survivor-tag");
+    manager.save_profile(&a).unwrap();
+    manager.save_profile(&b).unwrap();
+    manager.save_profile(&survivor).unwrap();
+    assert_eq!(
+      read_tag_suggestions(),
+      vec!["deleted-tag", "other-deleted-tag", "survivor-tag"]
+    );
+
+    manager
+      .bulk_delete_local(vec![a.id.to_string(), b.id.to_string()])
+      .unwrap();
+
+    // The shared index no longer references tags that only belonged to the
+    // deleted profiles; the surviving profile's tag remains.
+    assert_eq!(read_tag_suggestions(), vec!["survivor-tag"]);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn bulk_delete_removes_ephemeral_dir_for_every_profile() {
+    let _root = EphemeralRoot::new();
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let manager = ProfileManager::instance();
+    let deleted = make_profile("deleted");
+    let survivor = make_profile("survivor");
+    manager.save_profile(&deleted).unwrap();
+    manager.save_profile(&survivor).unwrap();
+    // Register a decrypted/in-memory tree for each. The keep-decrypted opt-in
+    // leaves exactly this tree populated after the browser quits, so the bulk
+    // delete path must reap it itself.
+    let deleted_tree =
+      crate::ephemeral_dirs::create_ephemeral_dir(&deleted.id.to_string()).unwrap();
+    let survivor_tree =
+      crate::ephemeral_dirs::create_ephemeral_dir(&survivor.id.to_string()).unwrap();
+    assert!(deleted_tree.is_dir());
+    assert!(crate::ephemeral_dirs::get_ephemeral_dir(&deleted.id.to_string()).is_some());
+
+    manager
+      .bulk_delete_local(vec![deleted.id.to_string()])
+      .unwrap();
+
+    assert!(
+      !deleted_tree.exists(),
+      "bulk delete must reap the decrypted ephemeral tree"
+    );
+    assert!(crate::ephemeral_dirs::get_ephemeral_dir(&deleted.id.to_string()).is_none());
+    // A non-deleted profile keeps its tree.
+    assert!(survivor_tree.exists());
+    assert!(crate::ephemeral_dirs::get_ephemeral_dir(&survivor.id.to_string()).is_some());
+  }
+
+  #[test]
+  fn bulk_delete_matches_one_by_one_state_for_mixed_profiles() {
+    // End-to-end contract: a bulk delete must leave each deleted profile's
+    // out-of-directory side stores reaped and surviving profiles untouched,
+    // i.e. exactly the state `delete_profile` leaves one-by-one.
+    let data = TempDir::new().unwrap();
+    let _data_guard = crate::app_dirs::set_test_data_dir(data.path().to_path_buf());
+    let cache = TempDir::new().unwrap();
+    let _cache_guard = crate::app_dirs::set_test_cache_dir(cache.path().to_path_buf());
+    let manager = ProfileManager::instance();
+
+    let mut tagged_cross_os = make_cross_os_profile("tagged-cross-os");
+    tagged_cross_os.tags = vec!["cross-tag".to_string()];
+    tagged_cross_os.process_id = Some(99);
+    let plain = tagged_profile("plain-tag");
+    let survivor = tagged_profile("survivor-tag");
+    manager.save_profile(&tagged_cross_os).unwrap();
+    manager.save_profile(&plain).unwrap();
+    manager.save_profile(&survivor).unwrap();
+
+    // Populate every side store for the two to-be-deleted profiles.
+    ack_launch_gate(&tagged_cross_os);
+    ack_launch_gate(&plain);
+    ack_launch_gate(&survivor);
+    write_traffic_stats_files(&tagged_cross_os.id.to_string(), "history-cross");
+    write_traffic_stats_files(&plain.id.to_string(), "history-plain");
+    write_traffic_stats_files(&survivor.id.to_string(), "history-survivor");
+
+    manager
+      .bulk_delete_local(vec![tagged_cross_os.id.to_string(), plain.id.to_string()])
+      .unwrap();
+
+    // Deleted profiles: UUID dir, launch-gate prefs, and traffic stats all gone.
+    assert!(!manager
+      .get_profiles_dir()
+      .join(tagged_cross_os.id.to_string())
+      .exists());
+    assert!(!manager
+      .get_profiles_dir()
+      .join(plain.id.to_string())
+      .exists());
+    assert!(!launch_gate_acked(&tagged_cross_os.id.to_string()));
+    assert!(!launch_gate_acked(&plain.id.to_string()));
+    assert!(!traffic_stats_files_exist(&tagged_cross_os.id.to_string()));
+    assert!(!traffic_stats_files_exist(&plain.id.to_string()));
+
+    // The cross-OS profile was running (process_id set) but the running-browser
+    // guard is skipped for cross-OS, so it was still deleted.
+
+    // Survivor: everything intact.
+    assert!(manager
+      .get_profiles_dir()
+      .join(survivor.id.to_string())
+      .exists());
+    assert!(launch_gate_acked(&survivor.id.to_string()));
+    assert!(traffic_stats_files_exist(&survivor.id.to_string()));
+
+    // Tag index reflects only the surviving profile.
+    assert_eq!(read_tag_suggestions(), vec!["survivor-tag"]);
+    // Only the survivor remains in the profile list.
+    let remaining = manager.list_profiles().unwrap();
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, survivor.id);
+    assert_eq!(remaining[0].tags, vec!["survivor-tag"]);
   }
 }
 
