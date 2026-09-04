@@ -1579,11 +1579,17 @@ mod tests {
       !registry.is_browser_registered("wayfern", old_version),
       "old version must be deregistered after consolidation",
     );
+    #[cfg(target_os = "windows")]
+    let exe_name = "wayfern.exe";
+    #[cfg(target_os = "macos")]
+    let exe_name = "wayfern.app";
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let exe_name = "wayfern";
     assert!(
       !binaries_dir
         .join("wayfern")
         .join(old_version)
-        .join("wayfern")
+        .join(exe_name)
         .exists(),
       "old version executable must be deleted",
     );
@@ -1591,7 +1597,7 @@ mod tests {
       binaries_dir
         .join("wayfern")
         .join(new_version)
-        .join("wayfern")
+        .join(exe_name)
         .exists(),
       "latest version executable must be preserved",
     );
