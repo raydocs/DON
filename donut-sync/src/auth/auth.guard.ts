@@ -139,8 +139,14 @@ export class AuthGuard implements CanActivate {
           const scope = sub ? await this.resolveTeamScope(sub) : null;
           if (scope && /^[^/]+$/.test(scope.ownerId)) {
             effectivePrefix = `users/${scope.ownerId}/`;
-            if (scope.teamProfileLimit > 0) {
-              effectiveProfileLimit = scope.teamProfileLimit;
+            // Adopt the team's effective limit, including 0 (the codebase's
+            // "unlimited" sentinel — see sync.service.ts checkProfileLimit).
+            // The `as TeamScope` cast performs no runtime validation, so validate
+            // at this trust boundary: a non-number or negative value keeps the
+            // personal cap in place (fail-closed), matching the ownerId guard.
+            const teamLimit = scope.teamProfileLimit;
+            if (typeof teamLimit === "number" && teamLimit >= 0) {
+              effectiveProfileLimit = teamLimit;
             }
           }
         } catch (err) {
