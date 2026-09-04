@@ -942,23 +942,49 @@ impl Downloader {
     };
     let _ = events::emit("download-progress", &progress);
 
-    // Auto-update non-running profiles to the latest installed version and cleanup unused binaries
+    // Auto-update profiles to the freshly downloaded version (defers running profiles via pending_updates) and clean up unused binaries
     {
+      let browser_for_update = browser_str.clone();
+      let version_for_update = version.clone();
       let app_handle_for_update = app_handle.clone();
       tauri::async_runtime::spawn(async move {
         let auto_updater = crate::auto_updater::AutoUpdater::instance();
-        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+        match auto_updater
+          .auto_update_profile_versions(
+            &app_handle_for_update,
+            &browser_for_update,
+            &version_for_update,
+          )
+          .await
+        {
           Ok(updated) => {
             if !updated.is_empty() {
               log::info!(
-                "Auto-updated {} profiles to latest installed versions: {:?}",
+                "Auto-updated {} profiles to {} {}: {:?}",
                 updated.len(),
+                browser_for_update,
+                version_for_update,
                 updated
               );
             }
           }
           Err(e) => {
             log::error!("Failed to auto-update profile versions: {e}");
+          }
+        }
+
+        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+          Ok(updated) => {
+            if !updated.is_empty() {
+              log::info!(
+                "Updated {} profiles to latest installed versions: {:?}",
+                updated.len(),
+                updated
+              );
+            }
+          }
+          Err(e) => {
+            log::error!("Failed to update profiles to latest installed versions: {e}");
           }
         }
 

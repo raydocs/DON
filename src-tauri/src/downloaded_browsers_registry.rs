@@ -1395,6 +1395,99 @@ mod tests {
       "Browser should not be considered downloaded when files don't exist on disk"
     );
   }
+
+  /// A freshly-downloaded version that no profile references is deleted by
+  /// cleanup unless a `pending_updates` entry for it exists and a profile for
+  /// that browser is running. That pending entry is exactly what
+  /// `AutoUpdater::auto_update_profile_versions` records for a running
+  /// profile, and it is what keeps the just-downloaded version alive until
+  /// the running profile closes and is bumped via `get_pending_update`.
+  #[test]
+  fn test_cleanup_pending_guard_protects_freshly_downloaded_version() {
+    use tempfile::TempDir;
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+
+    let binaries = crate::app_dirs::binaries_dir();
+    let v50_dir = binaries.join("wayfern").join("138.0.7204.50");
+    let v60_dir = binaries.join("wayfern").join("138.0.7204.60");
+    std::fs::create_dir_all(&v50_dir).unwrap();
+    std::fs::create_dir_all(&v60_dir).unwrap();
+    std::fs::File::create(v50_dir.join("chrome.exe")).unwrap();
+    std::fs::File::create(v60_dir.join("chrome.exe")).unwrap();
+
+    let registry = DownloadedBrowsersRegistry::new();
+    registry.add_browser(DownloadedBrowserInfo {
+      browser: "wayfern".to_string(),
+      version: "138.0.7204.50".to_string(),
+      file_path: v50_dir.clone(),
+    });
+    registry.add_browser(DownloadedBrowserInfo {
+      browser: "wayfern".to_string(),
+      version: "138.0.7204.60".to_string(),
+      file_path: v60_dir.clone(),
+    });
+
+    // Single running profile on the older version: the freshly-downloaded
+    // 60 is referenced by no profile — exactly the bug trigger.
+    let active = vec![("wayfern".to_string(), "138.0.7204.50".to_string())];
+    let running = active.clone();
+
+    // With a pending update recorded for the running profile, cleanup must
+    // keep the freshly-downloaded 60.
+    let state = crate::auto_updater::AutoUpdateState {
+      pending_updates: vec![crate::auto_updater::UpdateNotification {
+        id: "wayfern_138.0.7204.50_to_138.0.7204.60".to_string(),
+        browser: "wayfern".to_string(),
+        current_version: "138.0.7204.50".to_string(),
+        new_version: "138.0.7204.60".to_string(),
+        affected_profiles: vec!["P1".to_string()],
+        timestamp: 1000,
+      }],
+      ..Default::default()
+    };
+    crate::auto_updater::AutoUpdater::instance()
+      .save_auto_update_state(&state)
+      .unwrap();
+
+    let cleaned = registry
+      .cleanup_unused_binaries_internal(&active, &running)
+      .unwrap();
+    assert!(
+      !cleaned.contains(&"wayfern 138.0.7204.60".to_string()),
+      "freshly-downloaded version with a pending update for a running profile must survive cleanup, got: {cleaned:?}"
+    );
+    assert!(
+      !cleaned.contains(&"wayfern 138.0.7204.50".to_string()),
+      "the running profile's version must never be cleaned up, got: {cleaned:?}"
+    );
+    assert!(
+      registry.is_browser_registered("wayfern", "138.0.7204.60"),
+      "the freshly-downloaded version must still be registered"
+    );
+
+    // Without a pending update (the pre-fix state), the freshly-downloaded
+    // 60 is unreferenced, not running, and not pending — so it is deleted.
+    crate::auto_updater::AutoUpdater::instance()
+      .save_auto_update_state(&crate::auto_updater::AutoUpdateState::default())
+      .unwrap();
+
+    let cleaned = registry
+      .cleanup_unused_binaries_internal(&active, &running)
+      .unwrap();
+    assert!(
+      cleaned.contains(&"wayfern 138.0.7204.60".to_string()),
+      "without a pending update the freshly-downloaded version is deleted (the bug), got: {cleaned:?}"
+    );
+    assert!(
+      !cleaned.contains(&"wayfern 138.0.7204.50".to_string()),
+      "the running profile's version must still never be cleaned up, got: {cleaned:?}"
+    );
+    assert!(
+      !registry.is_browser_registered("wayfern", "138.0.7204.60"),
+      "the freshly-downloaded version must be deregistered after deletion"
+    );
+  }
 }
 
 #[tauri::command]
