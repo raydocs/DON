@@ -876,17 +876,12 @@ impl CookieManager {
         }
       };
 
-      let is_running = profile_manager
-        .check_browser_status(app_handle.clone(), target)
-        .await
-        .unwrap_or(false);
-
-      if is_running {
+      if let Some(reason) = Self::paste_blocker(app_handle, target).await {
         results.push(CookieCopyResult {
           target_profile_id: target_id.clone(),
           cookies_copied: 0,
           cookies_replaced: 0,
-          errors: vec![format!("Browser is running for profile: {}", target.name)],
+          errors: vec![reason],
         });
         continue;
       }

@@ -142,75 +142,6 @@ impl SynchronizerManager {
       follower_profiles.push(fp);
     }
 
-    // Check no profile is part of another active session
-    {
-      let inner = self.inner.lock().await;
-      for session in inner.sessions.values() {
-        if session.leader_profile_id == leader_profile_id {
-          return Err("Leader profile is already in another sync session.".to_string());
-        }
-        for fid in &follower_profile_ids {
-          if session.leader_profile_id == *fid || session.followers.contains_key(fid) {
-            return Err(format!(
-              "Profile '{fid}' is already part of another sync session."
-            ));
-          }
-        }
-      }
-    }
-
-    let session_id = uuid::Uuid::new_v4().to_string();
-
-    log::info!(
-      "Synchronizer: launching leader '{}' and {} followers",
-      leader.name,
-      follower_profiles.len()
-    );
-
-    // Launch leader first so it gets focus
-    crate::browser_runner::launch_browser_profile(app_handle.clone(), leader.clone(), None, None)
-      .await
-      .map_err(|e| format!("Failed to launch leader: {e}"))?;
-
-    // Launch followers in parallel batches of MAX_CONCURRENT_LAUNCHES
-    for chunk in follower_profiles.chunks(MAX_CONCURRENT_LAUNCHES) {
-      let mut set = tokio::task::JoinSet::new();
-      for fp in chunk {
-        let ah = app_handle.clone();
-        let fp = fp.clone();
-        set.spawn(async move {
-          crate::browser_runner::launch_browser_profile(ah, fp.clone(), None, None)
-            .await
-            .map_err(|e| (fp.name.clone(), e.to_string()))
-        });
-      }
-      while let Some(result) = set.join_next().await {
-        match result {
-          Ok(Ok(_)) => {}
-          Ok(Err((name, e))) => {
-            log::error!("Failed to launch follower '{name}': {e}");
-            // Kill leader and all already-launched followers
-            let _ =
-              crate::browser_runner::kill_browser_profile(app_handle.clone(), leader.clone()).await;
-            for fp in &follower_profiles {
-              let _ =
-                crate::browser_runner::kill_browser_profile(app_handle.clone(), fp.clone()).await;
-            }
-            return Err(format!("Failed to launch follower '{name}': {e}"));
-          }
-          Err(e) => {
-            log::error!("Launch task panicked: {e}");
-            let _ =
-              crate::browser_runner::kill_browser_profile(app_handle.clone(), leader.clone()).await;
-            return Err(format!("Launch task panicked: {e}"));
-          }
-        }
-      }
-    }
-
-    // Bring leader window to front after all followers launched
-    Self::focus_leader_window(&leader).await;
-
     // Build follower states
     let mut followers = HashMap::new();
     for fp in &follower_profiles {
@@ -224,6 +155,7 @@ impl SynchronizerManager {
       );
     }
 
+    let session_id = uuid::Uuid::new_v4().to_string();
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
 
     let session = SyncSession {
@@ -234,17 +166,92 @@ impl SynchronizerManager {
       cancel_tx,
     };
 
+    // Check no profile is part of another active session AND register session atomically
+    {
+      let mut inner = self.inner.lock().await;
+      for session in inner.sessions.values() {
+        if session.leader_profile_id == leader_profile_id {
+          return Err("Leader profile is already in another sync session.".to_string());
+        }
+        for fid in &follower_profile_ids {
+          if session.leader_profile_id == *fid || session.followers.contains_key(fid) {
+            return Err(format!(
+              "Profile '{fid}' is already part of another sync session."
+            ));
+          }
+        }
+      }
+      inner.sessions.insert(session_id.clone(), session);
+    }
+
+    log::info!(
+      "Synchronizer: launching leader '{}' and {} followers",
+      leader.name,
+      follower_profiles.len()
+    );
+
+    let launch_result: Result<(), String> = async {
+      // Launch leader first so it gets focus
+      crate::browser_runner::launch_browser_profile(app_handle.clone(), leader.clone(), None, None)
+        .await
+        .map_err(|e| format!("Failed to launch leader: {e}"))?;
+
+      // Launch followers in parallel batches of MAX_CONCURRENT_LAUNCHES
+      for chunk in follower_profiles.chunks(MAX_CONCURRENT_LAUNCHES) {
+        let mut set = tokio::task::JoinSet::new();
+        for fp in chunk {
+          let ah = app_handle.clone();
+          let fp = fp.clone();
+          set.spawn(async move {
+            crate::browser_runner::launch_browser_profile(ah, fp.clone(), None, None)
+              .await
+              .map_err(|e| (fp.name.clone(), e.to_string()))
+          });
+        }
+        while let Some(result) = set.join_next().await {
+          match result {
+            Ok(Ok(_)) => {}
+            Ok(Err((name, e))) => {
+              log::error!("Failed to launch follower '{name}': {e}");
+              // Kill leader and all already-launched followers
+              let _ =
+                crate::browser_runner::kill_browser_profile(app_handle.clone(), leader.clone())
+                  .await;
+              for fp in &follower_profiles {
+                let _ =
+                  crate::browser_runner::kill_browser_profile(app_handle.clone(), fp.clone()).await;
+              }
+              return Err(format!("Failed to launch follower '{name}': {e}"));
+            }
+            Err(e) => {
+              log::error!("Launch task panicked: {e}");
+              let _ =
+                crate::browser_runner::kill_browser_profile(app_handle.clone(), leader.clone())
+                  .await;
+              return Err(format!("Launch task panicked: {e}"));
+            }
+          }
+        }
+      }
+      Ok(())
+    }
+    .await;
+
+    if let Err(e) = launch_result {
+      let mut inner = self.inner.lock().await;
+      inner.sessions.remove(&session_id);
+      return Err(e);
+    }
+
+    // Bring leader window to front after all followers launched
+    Self::focus_leader_window(&leader).await;
+
     let info = SyncSessionInfo {
       id: session_id.clone(),
       leader_profile_id: leader_profile_id.clone(),
       leader_profile_name: leader.name.clone(),
       followers: followers.values().cloned().collect(),
     };
-
-    {
-      let mut inner = self.inner.lock().await;
-      inner.sessions.insert(session_id.clone(), session);
-    }
 
     // Emit initial session event
     let _ = app_handle.emit("sync-session-changed", &info);
