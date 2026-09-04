@@ -49,6 +49,7 @@ const suiteFiles = {
   smoke: ["diagnostics.test.mjs", "smoke.test.mjs", "coverage.test.mjs"],
   ui: ["ui.test.mjs"],
   entities: ["entities.test.mjs"],
+  "cookie-collisions": ["cookie-export-collisions.test.mjs"],
   network: ["network.test.mjs"],
   integrations: ["integrations.test.mjs"],
   sync: ["sync.test.mjs"],

@@ -34,6 +34,15 @@ import {
 } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { translateBackendError } from "@/lib/backend-errors";
+import {
+  cookieKey,
+  countSelectedCookies,
+  getSelectedCookies as getSelectedCookiesPure,
+  initSelectionFromCookieData,
+  type SelectionState,
+  selectDomain,
+  toggleCookie as toggleCookiePure,
+} from "@/lib/cookie-export-selection";
 import type {
   BrowserProfile,
   CookieAnalysis,
@@ -50,14 +59,6 @@ interface CookieManagementDialogProps {
   profile: BrowserProfile | null;
   initialTab?: "import" | "export";
 }
-
-type SelectionState = Record<
-  string,
-  {
-    allSelected: boolean;
-    cookies: Set<string>;
-  }
->;
 
 /** Long enough that a paste is not re-parsed on every keystroke of a fix. */
 const ANALYZE_DEBOUNCE_MS = 250;
@@ -98,17 +99,6 @@ function formatNetscapeCookies(cookies: UnifiedCookie[]): string {
   return lines.join("\n");
 }
 
-function initSelectionFromCookieData(data: CookieReadResult): SelectionState {
-  const sel: SelectionState = {};
-  for (const d of data.domains) {
-    sel[d.domain] = {
-      allSelected: true,
-      cookies: new Set(d.cookies.map((c) => c.name)),
-    };
-  }
-  return sel;
-}
-
 export function CookieManagementDialog({
   isOpen,
   onClose,
@@ -140,21 +130,10 @@ export function CookieManagementDialog({
   );
   const [activeTab, setActiveTab] = useState<string>(initialTab);
 
-  const selectedExportCount = useMemo(() => {
-    let count = 0;
-    for (const domain of Object.keys(exportSelection)) {
-      const ds = exportSelection[domain];
-      if (ds.allSelected) {
-        const domainData = exportCookieData?.domains.find(
-          (d) => d.domain === domain,
-        );
-        count += domainData?.cookie_count ?? 0;
-      } else {
-        count += ds.cookies.size;
-      }
-    }
-    return count;
-  }, [exportSelection, exportCookieData]);
+  const selectedExportCount = useMemo(
+    () => countSelectedCookies(exportCookieData, exportSelection),
+    [exportCookieData, exportSelection],
+  );
 
   const loadExportCookies = useCallback(
     async (profileId: string) => {
@@ -301,18 +280,7 @@ export function CookieManagementDialog({
   }, [pasteContent, isAnalyzing, analysis, t]);
 
   const getSelectedCookies = useCallback((): UnifiedCookie[] => {
-    if (!exportCookieData) return [];
-    const result: UnifiedCookie[] = [];
-    for (const domain of exportCookieData.domains) {
-      const ds = exportSelection[domain.domain];
-      if (!ds) continue;
-      if (ds.allSelected) {
-        result.push(...domain.cookies);
-      } else {
-        result.push(...domain.cookies.filter((c) => ds.cookies.has(c.name)));
-      }
-    }
-    return result;
+    return getSelectedCookiesPure(exportCookieData, exportSelection);
   }, [exportCookieData, exportSelection]);
 
   const handleExport = useCallback(async () => {
@@ -355,54 +323,21 @@ export function CookieManagementDialog({
 
   const toggleDomain = useCallback(
     (domain: string, cookies: UnifiedCookie[]) => {
-      setExportSelection((prev) => {
-        // `prev[domain]` is `undefined` when the domain was previously fully
-        // deselected (entries are deleted on empty — see toggleCookie). Treat
-        // missing as "not selected" so re-enabling falls through to the add
-        // branch instead of crashing on `.allSelected`.
-        if (prev[domain]?.allSelected) {
-          const next = { ...prev };
-          delete next[domain];
-          return next;
-        }
-        return {
-          ...prev,
-          [domain]: {
-            allSelected: true,
-            cookies: new Set(cookies.map((c) => c.name)),
-          },
-        };
-      });
+      setExportSelection((prev) => selectDomain(prev, domain, cookies));
     },
     [],
   );
 
   const toggleCookie = useCallback(
-    (domain: string, cookieName: string, totalCookies: number) => {
-      setExportSelection((prev) => {
-        const current = prev[domain] ?? {
-          allSelected: false,
-          cookies: new Set<string>(),
-        };
-        const newCookies = new Set(current.cookies);
-        if (newCookies.has(cookieName)) {
-          newCookies.delete(cookieName);
-        } else {
-          newCookies.add(cookieName);
-        }
-        if (newCookies.size === 0) {
-          const next = { ...prev };
-          delete next[domain];
-          return next;
-        }
-        return {
-          ...prev,
-          [domain]: {
-            allSelected: newCookies.size === totalCookies,
-            cookies: newCookies,
-          },
-        };
-      });
+    (
+      domain: string,
+      cookieName: string,
+      cookiePath: string,
+      totalCookies: number,
+    ) => {
+      setExportSelection((prev) =>
+        toggleCookiePure(prev, domain, cookieName, cookiePath, totalCookies),
+      );
     },
     [],
   );
@@ -668,6 +603,7 @@ interface ExportDomainRowProps {
   onToggleCookie: (
     domain: string,
     cookieName: string,
+    cookiePath: string,
     totalCookies: number,
   ) => void;
   onToggleExpand: (domain: string) => void;
@@ -681,6 +617,7 @@ function ExportDomainRow({
   onToggleCookie,
   onToggleExpand,
 }: ExportDomainRowProps) {
+  const { t } = useTranslation();
   const domainSelection = selection[domain.domain];
   const isAllSelected = domainSelection?.allSelected ?? false;
   const selectedCount = domainSelection?.cookies.size ?? 0;
@@ -719,10 +656,11 @@ function ExportDomainRow({
         className="ml-7 space-y-0.5 border-l pl-2"
       >
         {domain.cookies.map((cookie) => {
-          const isSelected = domainSelection?.cookies.has(cookie.name) ?? false;
+          const isSelected =
+            domainSelection?.cookies.has(cookieKey(cookie)) ?? false;
           return (
             <div
-              key={`${domain.domain}-${cookie.name}`}
+              key={`${domain.domain}-${cookie.name}-${cookie.path}`}
               className="flex items-center gap-2 rounded p-1 text-sm hover:bg-accent/30"
             >
               <Checkbox
@@ -731,11 +669,15 @@ function ExportDomainRow({
                   onToggleCookie(
                     domain.domain,
                     cookie.name,
+                    cookie.path,
                     domain.cookie_count,
                   );
                 }}
               />
               <span className="truncate">{cookie.name}</span>
+              <span className="ml-auto truncate text-xs text-muted-foreground">
+                {t("cookies.export.pathLabel")}: {cookie.path}
+              </span>
             </div>
           );
         })}

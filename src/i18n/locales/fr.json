@@ -917,6 +917,7 @@
       "title": "Exporter les Cookies",
       "description": "Exporter les cookies de ce profil.",
       "formatLabel": "Format",
+      "pathLabel": "Chemin",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "Cookies exportés avec succès",
