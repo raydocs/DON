@@ -64,6 +64,17 @@ pub const WINDOW_STATE_FILENAME: &str = ".window-state.json";
 /// True when app state has been moved off the platform default location, by
 /// portable mode or by either directory override.
 fn state_is_relocated() -> bool {
+  // In unit tests the `TEST_DATA_DIR` thread-local is the codebase's race-free
+  // seam for a relocated data dir (env vars are process-global and would race
+  // under `cargo test`'s parallel threads). Treat it as relocated here too, so
+  // `window_state_path_override` can be exercised through the same path the
+  // env-var / portable triggers take at runtime.
+  #[cfg(test)]
+  {
+    if TEST_DATA_DIR.with(|cell| cell.borrow().is_some()) {
+      return true;
+    }
+  }
   std::env::var_os("DONUTBROWSER_DATA_DIR").is_some_and(|v| !v.is_empty())
     || data_root().is_some()
     || portable_dir().is_some()
@@ -80,8 +91,21 @@ fn state_is_relocated() -> bool {
 /// host machine. If a future plugin version sanitises the name to a bare file
 /// component this silently reverts to the default directory, which is why the
 /// first-run probe in `lib.rs` reads this same function rather than assuming.
+///
+/// The absolute-path precondition is enforced here: a relocated `data_dir`
+/// that is relative (e.g. `DONUTBROWSER_DATA_DIR=data`, or
+/// `DONUTBROWSER_DATA_ROOT=data` yielding `data/data`) cannot drive the join
+/// trick. Handing the plugin a relative "filename" makes its
+/// `create_dir_all(app_config_dir)` parent only the base while its write
+/// targets an uncreated nested dir, so `std::fs::write` fails `ENOENT` and the
+/// `RunEvent::Exit` handler swallows the error — nothing persists and every
+/// launch behaves like a first run. Returning `None` makes both probe and
+/// plugin fall back to the platform default `app_config_dir/.window-state.json`,
+/// where they agree and persist.
 pub fn window_state_path_override() -> Option<PathBuf> {
-  state_is_relocated().then(|| data_dir().join(WINDOW_STATE_FILENAME))
+  state_is_relocated()
+    .then(|| data_dir().join(WINDOW_STATE_FILENAME))
+    .filter(|path| path.is_absolute())
 }
 
 /// Where the window-state file actually is, override or not. Used for the
@@ -399,6 +423,39 @@ mod tests {
       data_dir().join(WINDOW_STATE_FILENAME),
       tmp.join(".window-state.json")
     );
+    // An absolute data_dir relocates the plugin's file: `app_config_dir().join`
+    // of an absolute name discards the base, landing it in the relocated dir.
+    assert_eq!(
+      window_state_path_override(),
+      Some(tmp.join(WINDOW_STATE_FILENAME))
+    );
+  }
+
+  #[test]
+  fn relative_data_dir_does_not_relocate_window_state() {
+    // A relative override must NOT be handed to the plugin. The relocation
+    // relies on `window_state_path_override` returning an ABSOLUTE path so
+    // `app_config_dir().join(filename)` discards the base (see the doc comment
+    // on `window_state_path_override` and `absolute_filename_escapes_the_plugin_base_dir`).
+    // A relative name breaks that: the plugin joins it onto `app_config_dir`,
+    // its `create_dir_all` parents only the base, the write then fails `ENOENT`
+    // against an uncreated nested dir and the error is swallowed — geometry
+    // resets every launch — while the probe still checks a CWD-relative path
+    // and the two diverge. The override must return `None` so both probe and
+    // plugin fall back to `app_config_dir/.window-state.json` and persist.
+    //
+    // `DONUTBROWSER_DATA_DIR=data` produces `data_dir() == "data"`:
+    {
+      let _guard = set_test_data_dir(PathBuf::from("data"));
+      assert!(!data_dir().is_absolute());
+      assert_eq!(window_state_path_override(), None);
+    }
+    // `DONUTBROWSER_DATA_ROOT=data` produces `data_dir() == "data/data"`:
+    {
+      let _guard = set_test_data_dir(PathBuf::from("data/data"));
+      assert!(!data_dir().is_absolute());
+      assert_eq!(window_state_path_override(), None);
+    }
   }
 
   #[test]
