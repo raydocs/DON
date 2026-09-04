@@ -317,18 +317,33 @@ pub fn reencrypt_changed_files(
   Ok(rewrote)
 }
 
-/// Re-encrypt every file under `encrypted_dir` from `old_key` to `new_key` in
-/// place. Used when changing a profile password without launching it.
+/// Re-encrypt every file under `encrypted_dir` from `old_key` to `new_key`.
+/// Used when changing a profile password without launching it.
+///
+/// Crash-safe: the new tree (files + verifier) is built in a sibling staging
+/// directory first, so the original `encrypted_dir` is left untouched until the
+/// new tree is fully written. Only then is it atomically swapped into place via
+/// a backup, mirroring `set_profile_password` / `remove_profile_password`. A
+/// failure (I/O error) at any point leaves either the old or the new state
+/// intact on disk, instead of deleting files in place with no backup.
 pub fn rekey_profile_dir(
   old_key: &[u8; 32],
   new_key: &[u8; 32],
   encrypted_dir: &Path,
 ) -> PasswordResult<()> {
+  let staging = encrypted_dir.with_extension("rekeying");
+  if staging.exists() {
+    let _ = std::fs::remove_dir_all(&staging);
+  }
+  std::fs::create_dir_all(&staging)?;
+
+  // Step 1: decrypt each file with `old_key` straight from `encrypted_dir` and
+  // re-encrypt it with `new_key` into the staging directory. The original dir is
+  // never written to or deleted from here, so a failure or crash during this
+  // phase loses nothing — the original remains fully intact and unlockable.
   let entries: Vec<_> = std::fs::read_dir(encrypted_dir)?
     .filter_map(|r| r.ok())
     .collect();
-
-  let mut decrypted: Vec<(String, Vec<u8>)> = Vec::new();
   for entry in &entries {
     let path = entry.path();
     if !path.is_file() {
@@ -343,24 +358,27 @@ pub fn rekey_profile_dir(
     }
     let bytes = std::fs::read(&path)?;
     let (relpath, content) = decrypt_profile_file(old_key, &bytes)?;
-    decrypted.push((relpath, content));
-  }
-
-  // Decryption succeeded for every file; safe to rewrite the directory.
-  for entry in entries {
-    let path = entry.path();
-    if path.is_file() {
-      let _ = std::fs::remove_file(&path);
-    }
-  }
-
-  for (relpath, content) in decrypted {
     let encrypted = encrypt_profile_file(new_key, &relpath, &content)?;
-    let on_disk = encrypted_dir.join(hmac_filename(new_key, &relpath));
-    atomic_write(&on_disk, &encrypted)?;
+    atomic_write(&staging.join(hmac_filename(new_key, &relpath)), &encrypted)?;
   }
+  write_verifier(new_key, &staging)?;
 
-  write_verifier(new_key, encrypted_dir)?;
+  // Step 2: move the original aside, then atomically swap the staging tree in.
+  // On swap failure the original is restored from the backup, so the only
+  // unrecoverable window is a single atomic `rename` — the same primitive the
+  // sibling password routines already rely on.
+  let backup = encrypted_dir.with_extension("rekey-backup");
+  if backup.exists() {
+    let _ = std::fs::remove_dir_all(&backup);
+  }
+  std::fs::rename(encrypted_dir, &backup)?;
+  if let Err(e) = std::fs::rename(&staging, encrypted_dir) {
+    let _ = std::fs::rename(&backup, encrypted_dir);
+    return Err(e.into());
+  }
+  if let Err(e) = std::fs::remove_dir_all(&backup) {
+    log::warn!("Failed to remove rekey backup at {}: {e}", backup.display());
+  }
   Ok(())
 }
 
@@ -652,6 +670,184 @@ mod tests {
     let restored = work.path().join("restored");
     decrypt_profile_dir(&new, &enc, &restored).unwrap();
     assert_eq!(std::fs::read(restored.join("x")).unwrap(), b"data");
+  }
+
+  #[test]
+  fn test_rekey_preserves_multi_file_tree_and_cleans_artifacts() {
+    let old = make_key();
+    let new = make_key();
+    let work = TempDir::new().unwrap();
+    let plain = work.path().join("plain");
+    let enc = work.path().join("enc");
+    std::fs::create_dir_all(plain.join("Default")).unwrap();
+    std::fs::write(plain.join("Default/Cookies"), b"cookies").unwrap();
+    std::fs::write(plain.join("Default/Bookmarks"), b"{\"k\":1}").unwrap();
+    std::fs::write(plain.join("Local State"), b"state").unwrap();
+    encrypt_profile_dir(&old, &plain, &enc, &[]).unwrap();
+
+    // Old-key ciphertext names must all be replaced by their new-key counterparts.
+    let relpaths = ["Default/Cookies", "Default/Bookmarks", "Local State"];
+    let old_names: Vec<String> = relpaths.iter().map(|p| hmac_filename(&old, p)).collect();
+
+    rekey_profile_dir(&old, &new, &enc).unwrap();
+
+    for n in &old_names {
+      assert!(!enc.join(n).exists(), "old-key file {n} should be removed");
+    }
+    for p in relpaths {
+      assert!(
+        enc.join(hmac_filename(&new, p)).exists(),
+        "new-key file for {p} missing"
+      );
+    }
+
+    verify_key_against_dir(&new, &enc).unwrap();
+    assert!(matches!(
+      verify_key_against_dir(&old, &enc),
+      Err(PasswordError::WrongPassword)
+    ));
+
+    let restored = work.path().join("restored");
+    decrypt_profile_dir(&new, &enc, &restored).unwrap();
+    assert_eq!(
+      std::fs::read(restored.join("Default/Cookies")).unwrap(),
+      b"cookies"
+    );
+    assert_eq!(
+      std::fs::read(restored.join("Default/Bookmarks")).unwrap(),
+      b"{\"k\":1}"
+    );
+    assert_eq!(
+      std::fs::read(restored.join("Local State")).unwrap(),
+      b"state"
+    );
+
+    // A successful rekey must not leave staging/backup siblings lying around.
+    assert!(
+      !enc.with_extension("rekeying").exists(),
+      "staging dir leaked after success"
+    );
+    assert!(
+      !enc.with_extension("rekey-backup").exists(),
+      "backup dir leaked after success"
+    );
+  }
+
+  #[test]
+  fn test_rekey_build_phase_failure_preserves_original_dir() {
+    // A failure during the build phase (here: a corrupted ciphertext that fails
+    // AES-GCM auth) must leave the original encrypted dir byte-identical and
+    // still unlockable with the old key. This is the core crash-safety
+    // guarantee the in-place delete-before-rewrite sequence lacked: nothing the
+    // build phase can do may mutate or delete the original on the failure path.
+    let old = make_key();
+    let new = make_key();
+    let work = TempDir::new().unwrap();
+    let plain = work.path().join("plain");
+    let enc = work.path().join("enc");
+    std::fs::create_dir_all(plain.join("Default")).unwrap();
+    std::fs::write(plain.join("Default/Cookies"), b"cookies-data").unwrap();
+    std::fs::write(plain.join("Default/Bookmarks"), b"bookmarks-data").unwrap();
+    std::fs::write(plain.join("Local State"), b"state").unwrap();
+    encrypt_profile_dir(&old, &plain, &enc, &[]).unwrap();
+
+    // Corrupt one data file's auth tag so decrypt_profile_file(old, ...) fails.
+    let corrupt_name = hmac_filename(&old, "Default/Cookies");
+    let corrupt_path = enc.join(&corrupt_name);
+    let mut bytes = std::fs::read(&corrupt_path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xFF;
+    std::fs::write(&corrupt_path, &bytes).unwrap();
+
+    // Snapshot the exact on-disk state (corrupted file included) that the
+    // failure path is obligated to preserve.
+    let snapshot: HashMap<String, Vec<u8>> = std::fs::read_dir(&enc)
+      .unwrap()
+      .filter_map(|e| e.ok())
+      .map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let data = std::fs::read(e.path()).unwrap();
+        (name, data)
+      })
+      .collect();
+
+    let err = rekey_profile_dir(&old, &new, &enc).unwrap_err();
+    assert!(
+      matches!(err, PasswordError::WrongPassword),
+      "expected decrypt failure, got {err:?}"
+    );
+
+    // The original dir must be byte-for-byte unchanged: nothing deleted, nothing rewritten.
+    let after: HashMap<String, Vec<u8>> = std::fs::read_dir(&enc)
+      .unwrap()
+      .filter_map(|e| e.ok())
+      .map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let data = std::fs::read(e.path()).unwrap();
+        (name, data)
+      })
+      .collect();
+    assert_eq!(
+      snapshot, after,
+      "original encrypted dir must be unchanged on build-phase failure"
+    );
+
+    // Verifier untouched -> the old key still verifies -> the profile stays unlockable.
+    verify_key_against_dir(&old, &enc).unwrap();
+
+    // Non-corrupted files remain fully recoverable with the old key, proving no
+    // data was lost (the destructive sub-case the bug was reported for).
+    let bm = hmac_filename(&old, "Default/Bookmarks");
+    let (rel, content) =
+      decrypt_profile_file(&old, &std::fs::read(enc.join(&bm)).unwrap()).unwrap();
+    assert_eq!(rel, "Default/Bookmarks");
+    assert_eq!(content, b"bookmarks-data");
+
+    // The swap phase never started on a build-phase failure, so no backup was created.
+    assert!(
+      !enc.with_extension("rekey-backup").exists(),
+      "no backup should exist when failure precedes the swap"
+    );
+  }
+
+  #[test]
+  fn test_rekey_recovers_from_stale_staging_dir() {
+    // Simulate a process death during a previous rekey that left a half-written
+    // `*.rekeying` staging dir behind. A retry must wipe it and rebuild cleanly
+    // rather than mixing stale partial ciphertext into the new tree.
+    let old = make_key();
+    let new = make_key();
+    let work = TempDir::new().unwrap();
+    let plain = work.path().join("plain");
+    let enc = work.path().join("enc");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("a"), b"AAA").unwrap();
+    std::fs::write(plain.join("b"), b"BBB").unwrap();
+    encrypt_profile_dir(&old, &plain, &enc, &[]).unwrap();
+
+    // Stale staging from a crashed prior attempt: garbage plus a file that
+    // collides with a real rekeyed name, to ensure it is overwritten not reused.
+    let staging = enc.with_extension("rekeying");
+    std::fs::create_dir_all(&staging).unwrap();
+    std::fs::write(staging.join("stale-garbage"), b"junk").unwrap();
+    std::fs::write(staging.join(hmac_filename(&new, "a")), b"stale-ciphertext").unwrap();
+
+    rekey_profile_dir(&old, &new, &enc).unwrap();
+
+    verify_key_against_dir(&new, &enc).unwrap();
+    assert!(
+      !staging.exists(),
+      "stale staging dir must be cleared on retry"
+    );
+
+    let restored = work.path().join("restored");
+    decrypt_profile_dir(&new, &enc, &restored).unwrap();
+    assert_eq!(
+      std::fs::read(restored.join("a")).unwrap(),
+      b"AAA",
+      "stale ciphertext must not leak into the rekeyed tree"
+    );
+    assert_eq!(std::fs::read(restored.join("b")).unwrap(), b"BBB");
   }
 
   #[test]
