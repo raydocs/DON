@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useState } from "react";
 import i18n from "@/i18n";
 import { getBrowserDisplayName } from "@/lib/browser-utils";
+import { planDownloadErrorToast } from "@/lib/download-error-toast";
 import { isOnboardingActive } from "@/lib/onboarding-signal";
 import {
   dismissToast,
@@ -38,6 +39,14 @@ interface DownloadProgress {
   speed_bytes_per_sec: number;
   eta_seconds?: number;
   stage: string;
+  // Discriminator for `stage === "error"`. Absent on non-error stages and on
+  // payloads from older backends. See planDownloadErrorToast for the values.
+  error_type?:
+    | "download_failed"
+    | "extraction_failed"
+    | "verification_failed"
+    | "download_timeout"
+    | string;
 }
 
 interface BrowserVersionsResult {
@@ -390,17 +399,20 @@ export function useBrowserDownload() {
               // During first-run onboarding the welcome dialog surfaces a
               // concrete setup error itself, so suppress the global toast.
               if (!isOnboardingActive()) {
-                showErrorToast(
-                  i18n.t("browserDownload.toast.extractionFailed", {
-                    browser: browserName,
-                    version: progress.version,
-                  }),
-                  {
-                    description: i18n.t(
-                      "browserDownload.toast.extractionFailedDescription",
-                    ),
-                  },
+                // The backend uses `stage: "error"` as a generic terminal-error
+                // marker across several failure modes (download-phase,
+                // extraction, verification, background auto-download timeout).
+                // Pick the toast label from `error_type` so a download timeout
+                // or verification failure is not mislabeled as "extraction
+                // failed"; unknown values fall back to a generic download error.
+                const plan = planDownloadErrorToast(
+                  progress.error_type,
+                  browserName,
+                  progress.version,
                 );
+                const title = i18n.t(plan.titleKey, plan.titleParams);
+                const description = i18n.t(plan.descriptionKey);
+                showErrorToast(title, { description });
               }
             } else if (progress.stage === "completed") {
               setDownloadingBrowsers((prev) => {
