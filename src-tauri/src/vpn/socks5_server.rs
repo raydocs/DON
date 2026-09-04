@@ -1090,6 +1090,31 @@ impl WireGuardSocks5Server {
             }
           }
 
+          // Tunnel-side half-close: the remote peer sent FIN and the smoltcp rx
+          // buffer has drained (socket is in CloseWait). `can_recv()` only reports
+          // buffer contents, so once the final bytes are read the smoltcp→Client
+          // block above stops running with no EOF forwarded to the browser. The
+          // predicate distinguishes CloseWait-drained from idle Established:
+          // `may_recv()` is true unconditionally in Established but falls through
+          // to its default arm (false, since `can_recv()` is false once drained)
+          // in CloseWait; `is_open()` is true in CloseWait/LastAck but false once
+          // the socket reaches Closed/TimeWait. Forward the EOF to the browser by
+          // half-closing the *write* half of conn.tcp_stream (delivers Ok(0) to the
+          // browser's reads), then drive the smoltcp socket out of CloseWait via
+          // close() (CloseWait → LastAck; the peer's ACK then moves it to Closed
+          // so the completion check below reclaims the Connection + its buffers).
+          // Do NOT completed.push(idx) here: removing the socket before the peer
+          // ACKs our FIN would lose the LastAck → Closed transition. Both calls
+          // are idempotent, so re-entry on the next iteration (still LastAck) is a
+          // no-op until Closed is reached and the existing completion check fires.
+          // tokio's AsyncWriteExt::shutdown on a TcpStream resolves ready on the
+          // first poll (it issues a non-blocking shutdown(Write) syscall), so the
+          // .await does not stall the sequential relay loop.
+          if !socket.can_recv() && !socket.may_recv() && socket.is_open() {
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut conn.tcp_stream).await;
+            socket.close();
+          }
+
           // Check if smoltcp socket closed
           if !socket.is_open() && !socket.is_active() {
             completed.push(idx);
@@ -1165,5 +1190,175 @@ mod tests {
   #[test]
   fn test_parse_key_invalid() {
     assert!(parse_key("not-valid").is_err());
+  }
+
+  #[test]
+  fn test_tunnel_half_close_predicate_false_on_closed_socket() {
+    // A freshly-created smoltcp TcpSocket is in the Closed state: there is no
+    // peer half-close to forward. The tunnel→browser half-close predicate added
+    // to the smoltcp→client relay must NOT fire here — otherwise the relay would
+    // shutdown() the browser's write half and close() the smoltcp socket of a
+    // connection whose tunnel socket was never (or is no longer) established.
+    let socket = TcpSocket::new(
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_RX_BUF]),
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_TX_BUF]),
+    );
+    assert!(!socket.can_recv());
+    assert!(!socket.may_recv());
+    assert!(!socket.is_open());
+    assert!(!(!socket.can_recv() && !socket.may_recv() && socket.is_open()));
+  }
+
+  /// Drive a real smoltcp TCP handshake over a Loopback device, then have the
+  /// peer half-close (send FIN). Verifies the fix's half-close predicate fires
+  /// exactly when the under-test socket is in CloseWait with a drained rx
+  /// buffer, that the bytes sent before the FIN were delivered first, and that
+  /// close()+poll drives LastAck → Closed so the completion check becomes true.
+  #[test]
+  fn test_tunnel_half_close_predicate_fires_on_closewait_after_peer_fin() {
+    use smoltcp::phy::{Loopback, Medium};
+
+    let mut device = Loopback::new(Medium::Ip);
+    let mut iface = Interface::new(
+      IfaceConfig::new(HardwareAddress::Ip),
+      &mut device,
+      SmolInstant::now(),
+    );
+    iface.update_ip_addrs(|addrs| {
+      let _ = addrs.push(IpCidr::new(
+        IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)),
+        24,
+      ));
+    });
+
+    let mut sockets = SocketSet::new(vec![]);
+
+    // Server socket (the under-test socket, analogous to conn.smol_handle).
+    let server = TcpSocket::new(
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_RX_BUF]),
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_TX_BUF]),
+    );
+    let server_handle = sockets.add(server);
+    sockets
+      .get_mut::<TcpSocket>(server_handle)
+      .listen(80u16)
+      .unwrap();
+
+    // Client socket (the "tunnel peer" that will send data then FIN).
+    let client = TcpSocket::new(
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_RX_BUF]),
+      SocketBuffer::new(vec![0u8; SMOLTCP_TCP_TX_BUF]),
+    );
+    let client_handle = sockets.add(client);
+    sockets
+      .get_mut::<TcpSocket>(client_handle)
+      .connect(
+        iface.context(),
+        (IpAddress::Ipv4(Ipv4Address::new(10, 0, 0, 1)), 80),
+        12345,
+      )
+      .unwrap();
+
+    // Drive the handshake to Established.
+    let mut now = SmolInstant::now();
+    for _ in 0..50 {
+      now += smoltcp::time::Duration::from_millis(10);
+      let _ = iface.poll(now, &mut device, &mut sockets);
+      let server_ready = sockets.get_mut::<TcpSocket>(server_handle).may_recv();
+      let client_ready = sockets.get_mut::<TcpSocket>(client_handle).may_send();
+      if server_ready && client_ready {
+        break;
+      }
+    }
+
+    // G5: idle Established (rx buffer empty) must NOT fire the half-close
+    // predicate — `may_recv()` is unconditionally true in Established, so the
+    // relay does not shutdown(Write) the browser between keep-alive responses.
+    {
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::Established);
+      assert!(!server.can_recv()); // empty rx buffer
+      assert!(server.may_recv()); // ...but Established still reports may_recv true
+      assert!(server.is_open());
+      assert!(!(!server.can_recv() && !server.may_recv() && server.is_open()));
+    }
+
+    // Both halves Established. Send data client → server, then peer FIN.
+    let payload = b"WG-TUNNEL-OK";
+    {
+      let client = sockets.get_mut::<TcpSocket>(client_handle);
+      assert!(client.can_send());
+      let _ = client.send_slice(payload);
+      client.close(); // peer half-close: sends FIN after the data
+    }
+
+    // Drain + process: poll until the server has consumed the data and the FIN.
+    let mut received: Vec<u8> = Vec::new();
+    let mut reached_closewait = false;
+    for _ in 0..50 {
+      now += smoltcp::time::Duration::from_millis(10);
+      let _ = iface.poll(now, &mut device, &mut sockets);
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      // Forward any buffered bytes (the data-before-FIN ordering guarantee).
+      if server.can_recv() {
+        if let Ok(data) = server.recv(|data| (data.len(), data.to_vec())) {
+          received.extend_from_slice(&data);
+        }
+      }
+      // The fix's half-close predicate.
+      if !server.can_recv() && !server.may_recv() && server.is_open() {
+        reached_closewait = true;
+      }
+    }
+
+    // G3: bytes sent before the FIN were delivered before the EOF condition.
+    assert_eq!(received, payload);
+    // G1: the half-close predicate fired (server is in CloseWait, rx drained).
+    assert!(
+      reached_closewait,
+      "half-close predicate should fire on CloseWait"
+    );
+    {
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::CloseWait);
+    }
+
+    // G2: close() drives CloseWait → LastAck.
+    {
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      server.close();
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::LastAck);
+    }
+
+    // G7: close() is idempotent on re-entry — repeated calls keep the socket in
+    // LastAck (the documented no-op) without advancing the state machine.
+    {
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      server.close();
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::LastAck);
+      server.close();
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::LastAck);
+    }
+
+    // G2/G4: poll until the peer ACKs our FIN, server reaches Closed, and the
+    // existing completion check becomes true.
+    let mut completion_ready = false;
+    for _ in 0..50 {
+      now += smoltcp::time::Duration::from_millis(10);
+      let _ = iface.poll(now, &mut device, &mut sockets);
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      if !server.is_open() && !server.is_active() {
+        completion_ready = true;
+        break;
+      }
+    }
+    assert!(
+      completion_ready,
+      "socket should reach Closed after peer ACKs our FIN"
+    );
+    {
+      let server = sockets.get_mut::<TcpSocket>(server_handle);
+      assert_eq!(server.state(), smoltcp::socket::tcp::State::Closed);
+    }
   }
 }
