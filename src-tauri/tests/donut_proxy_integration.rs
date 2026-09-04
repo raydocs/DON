@@ -1972,3 +1972,169 @@ async fn worker_exits_when_its_config_is_deleted(
   tracker.cleanup_all().await;
   Ok(())
 }
+
+/// The spawn-side half of the fix: `start_proxy_process_with_profile` must
+/// record a `pid_start_time` alongside the worker PID, pinning it to the exact
+/// process it spawned. Without it, `stop_proxy_process` has nothing to compare
+/// a later PID against and the recycled-PID gate below is meaningless.
+#[tokio::test]
+#[serial]
+async fn start_proxy_process_records_the_worker_pid_start_time(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let binary_path = setup_test().await?;
+  let config = start_lifecycle_worker("lifecycle-pid-start-time").await?;
+  let mut tracker = ProxyTestTracker::new(binary_path);
+  tracker.track_proxy(config.id.clone());
+
+  let worker_pid = config.pid.ok_or("worker did not report a PID")?;
+  let recorded_start_time = donutbrowser_lib::proxy_storage::get_proxy_config(&config.id)
+    .and_then(|cfg| cfg.pid_start_time)
+    .ok_or("worker did not record a pid_start_time")?;
+
+  // The recorded start time must pin the live worker to itself, exactly the
+  // identity `stop_proxy_process` will later compare against.
+  assert_eq!(
+    donutbrowser_lib::proxy_storage::process_start_time(worker_pid),
+    Some(recorded_start_time),
+    "recorded pid_start_time must match the live worker's actual start time"
+  );
+
+  // Happy path, no regression: the worker is alive and is ours, so stopping it
+  // must signal it, remove its config, and report that it stopped something —
+  // the identity gate must never withhold a stop from a genuine worker.
+  let stopped = donutbrowser_lib::proxy_runner::stop_proxy_process(&config.id)
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+  assert!(
+    stopped,
+    "stop_proxy_process must stop a live worker that still matches its recorded identity"
+  );
+  assert!(
+    donutbrowser_lib::proxy_storage::get_proxy_config(&config.id).is_none(),
+    "stopping a live worker must remove its config"
+  );
+
+  let mut worker_gone = false;
+  for _ in 0..100 {
+    if !donutbrowser_lib::proxy_storage::is_process_running(worker_pid) {
+      worker_gone = true;
+      break;
+    }
+    sleep(Duration::from_millis(100)).await;
+  }
+  assert!(
+    worker_gone,
+    "the worker must exit after being stopped while it was still ours"
+  );
+
+  tracker.cleanup_all().await;
+  Ok(())
+}
+
+/// The stop-side half of the fix, and the actual reported bug: if the worker
+/// dies without self-cleaning (OOM kill, segfault, external `SIGKILL`, Task
+/// Manager) and the OS later hands its freed PID to an unrelated process, the
+/// routine stop paths (app restart, dead-browser reaper, Windows pre-update
+/// stop-all, stale profileless reaper) used to `kill -TERM` / `taskkill /F`
+/// that unrelated process and return `Ok(true)` as if the cleanup had
+/// succeeded.
+///
+/// Simulating the exact precondition deterministically requires the OS to
+/// reuse a PID, which is probabilistic. Instead we shape the on-disk config to
+/// look exactly the way it would in that scenario — its `pid` now belongs to a
+/// different live process whose start time is not the one we pinned — and
+/// assert `stop_proxy_process` refuses to signal it.
+#[tokio::test]
+#[serial]
+async fn stop_proxy_process_will_not_signal_a_recycled_worker_pid(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let binary_path = setup_test().await?;
+  let config = start_lifecycle_worker("lifecycle-stop-recycled-pid").await?;
+  let mut tracker = ProxyTestTracker::new(binary_path);
+  tracker.track_proxy(config.id.clone());
+
+  let worker_pid = config.pid.ok_or("worker did not report a PID")?;
+  let worker_start_time = donutbrowser_lib::proxy_storage::get_proxy_config(&config.id)
+    .and_then(|cfg| cfg.pid_start_time)
+    .ok_or("worker did not record a pid_start_time")?;
+
+  // The recorded start time must pin the live worker to itself (the spawn-side
+  // half of the fix) — checked here too so a regression in either half fails
+  // this scenario.
+  assert_eq!(
+    donutbrowser_lib::proxy_storage::process_start_time(worker_pid),
+    Some(worker_start_time),
+    "the recorded pid_start_time must match the live worker's actual start time"
+  );
+
+  // An unrelated live process — what the OS hands the worker's recycled PID to.
+  // It must survive stop_proxy_process unscathed. (Reaped on drop for safety.)
+  let victim = StubBrowser::spawn();
+  let victim_pid = victim.pid();
+  let victim_start_time = donutbrowser_lib::proxy_storage::resolve_process_start_time(victim_pid)
+    .ok_or("victim process not visible in the process table")?;
+
+  // The dangerous precondition, shaped the way the OS would leave it: the
+  // worker died without self-cleaning (its config survives) and its PID was
+  // reused. The config still pins a start time for that PID, which no longer
+  // matches the live process now occupying it. We can't force a real PID reuse
+  // (probabilistic), so we point the config's `pid` at the live victim and keep
+  // a pinned start time the victim provably does not have — exactly what a
+  // recycled PID looks like from `stop_proxy_process`'s side. (The sibling
+  // browser-PID recycle test does the same with `Some(1)`.) We avoid reusing
+  // `worker_start_time` verbatim because both processes were spawned within the
+  // same second and `start_time` has one-second granularity, so they can collide.
+  let mut stale = donutbrowser_lib::proxy_storage::get_proxy_config(&config.id)
+    .ok_or("worker config vanished before stop")?;
+  stale.pid = Some(victim_pid);
+  stale.pid_start_time = Some(victim_start_time.saturating_add(1));
+  assert!(donutbrowser_lib::proxy_storage::update_proxy_config(&stale));
+
+  // Pre-fix this terminated the victim and returned Ok(true). The fix must
+  // leave the victim untouched, remove the stale config, and report that it
+  // stopped nothing — the PID no longer belongs to our worker.
+  let stopped = donutbrowser_lib::proxy_runner::stop_proxy_process(&config.id)
+    .await
+    .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+  assert!(
+    !stopped,
+    "stop_proxy_process must report it stopped nothing when the worker PID is no longer ours"
+  );
+  assert!(
+    donutbrowser_lib::proxy_storage::get_proxy_config(&config.id).is_none(),
+    "the stale config must be removed even when its PID was recycled"
+  );
+
+  // The victim must still be the exact same live process: stop_proxy_process
+  // must never have signalled the PID now owned by an unrelated process.
+  assert!(
+    donutbrowser_lib::proxy_storage::is_process_running(victim_pid),
+    "the recycled PID ({victim_pid}) was signalled even though it no longer belongs to our worker"
+  );
+  assert_eq!(
+    donutbrowser_lib::proxy_storage::process_start_time(victim_pid),
+    Some(victim_start_time),
+    "the victim must still be the same process, not a killed-and-replaced one"
+  );
+
+  // The real worker (worker_pid) is still running, its config now removed.
+  // Its own watchdog self-reaps on the next ~300 ms tick once it sees the
+  // config is gone (ExitConfigRemoved), so wait for that and assert no orphan
+  // is left behind.
+  let mut worker_gone = false;
+  for _ in 0..100 {
+    if !donutbrowser_lib::proxy_storage::is_process_running(worker_pid) {
+      worker_gone = true;
+      break;
+    }
+    sleep(Duration::from_millis(100)).await;
+  }
+  assert!(
+    worker_gone,
+    "the real worker ({worker_pid}) must self-exit after its stale config was removed"
+  );
+
+  drop(victim);
+  tracker.cleanup_all().await;
+  Ok(())
+}
