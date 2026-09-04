@@ -5,7 +5,8 @@ import { pathToFileURL } from "node:url";
 const URL_PATTERN = /\b[a-z][a-z\d+.-]{1,20}:\/\/[^\s<>"'`]+/giu;
 const PRIVATE_KEY_PATTERN =
   /-----BEGIN [^-\r\n]*PRIVATE KEY-----[\s\S]*?-----END [^-\r\n]*PRIVATE KEY-----/giu;
-const BEARER_PATTERN = /\bBearer\s+[A-Za-z\d._~+/=-]+/giu;
+const AUTH_SCHEME_PATTERN =
+  /\b(Bearer|Basic|Token|Negotiate)\s+[A-Za-z\d._~+/=-]+/giu;
 const SECRET_ASSIGNMENT_PATTERN =
   /\b(?:api[_-]?key|authorization|password|passwd|private[_-]?key|proxy[_-]?(?:password|username)|refresh[_-]?token|secret|token|username)\b\s*[:=]\s*[^\s,;]+/giu;
 const JWT_PATTERN = /\beyJ[A-Za-z\d_-]+\.[A-Za-z\d_-]+\.[A-Za-z\d_-]+\b/gu;
@@ -66,7 +67,7 @@ export function redactSensitiveText(text, { sensitiveValues = [] } = {}) {
   return redacted
     .replace(PRIVATE_KEY_PATTERN, "<redacted-private-key>")
     .replace(URL_PATTERN, safeUrlLabel)
-    .replace(BEARER_PATTERN, "Bearer <redacted-secret>")
+    .replace(AUTH_SCHEME_PATTERN, "$1 <redacted-secret>")
     .replace(SECRET_ASSIGNMENT_PATTERN, "<redacted-secret>")
     .replace(JWT_PATTERN, "<redacted-token>")
     .replace(TOKEN_PATTERN, "<redacted-token>")

@@ -8,8 +8,10 @@ static PRIVATE_KEY_RE: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new(r"(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?-----END [^-\r\n]*PRIVATE KEY-----")
     .expect("valid private-key regex")
 });
-static BEARER_RE: LazyLock<Regex> =
-  LazyLock::new(|| Regex::new(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+").expect("valid bearer regex"));
+static AUTH_SCHEME_RE: LazyLock<Regex> = LazyLock::new(|| {
+  Regex::new(r"(?i)\b(Bearer|Basic|Token|Negotiate)\s+[A-Za-z0-9._~+/=-]+")
+    .expect("valid auth-scheme regex")
+});
 static SECRET_RE: LazyLock<Regex> = LazyLock::new(|| {
   Regex::new(
     r"(?i)\b(api[_-]?key|authorization|password|passwd|private[_-]?key|proxy[_-]?(password|username)|refresh[_-]?token|secret|token|username)\b\s*[:=]\s*[^\s,;]+",
@@ -41,7 +43,7 @@ pub fn url_label(value: &str) -> String {
 pub fn text(value: &str) -> String {
   let redacted = PRIVATE_KEY_RE.replace_all(value, "<redacted-private-key>");
   let redacted = URL_RE.replace_all(&redacted, "<redacted-url>");
-  let redacted = BEARER_RE.replace_all(&redacted, "Bearer <redacted-secret>");
+  let redacted = AUTH_SCHEME_RE.replace_all(&redacted, "${1} <redacted-secret>");
   let redacted = SECRET_RE.replace_all(&redacted, "<redacted-secret>");
   let redacted = EMAIL_RE.replace_all(&redacted, "<redacted-email>");
   let redacted = UNIX_HOME_RE.replace_all(&redacted, "/<redacted-home>");
@@ -83,6 +85,16 @@ mod tests {
     ] {
       assert!(!output.contains(sensitive), "log output leaked {sensitive}");
     }
+  }
+
+  #[test]
+  fn redacts_basic_auth_credential() {
+    let out = text("Authorization: Basic dXNlcjpwYXNz");
+    assert!(!out.contains("dXNlcjpwYXNz"), "LEAKED in {out:?}");
+    assert!(
+      out.contains("<redacted-secret>"),
+      "expected redaction placeholder in {out:?}"
+    );
   }
 
   #[test]
