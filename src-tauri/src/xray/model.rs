@@ -170,11 +170,13 @@ fn validate_endpoint_address(address: &str) -> XrayResult<()> {
   if address.parse::<IpAddr>().is_ok() {
     return Ok(());
   }
-  Host::parse(address).map_err(|_| XrayError::InvalidField {
-    field: "address",
-    reason: "must be a valid hostname or IP address",
-  })?;
-  Ok(())
+  match Host::parse(address) {
+    Ok(host) if host.to_string().eq_ignore_ascii_case(address) => Ok(()),
+    _ => Err(XrayError::InvalidField {
+      field: "address",
+      reason: "must be a valid hostname or IP address",
+    }),
+  }
 }
 
 fn validate_server_name(server_name: &str) -> XrayResult<()> {
@@ -280,6 +282,21 @@ mod tests {
   }
 
   #[test]
+  fn endpoint_accepts_mixed_case_and_punycode_hosts() {
+    for address in [
+      "vpn.example.com",
+      "VPN.Example.com",
+      "VPN.EXAMPLE.COM",
+      "aBc.example.com",
+      "xn--caf-dma.example.com",
+    ] {
+      let mut config = valid_config();
+      config.address = address.to_string();
+      assert_eq!(config.validate(), Ok(()), "{address}");
+    }
+  }
+
+  #[test]
   fn endpoint_rejects_empty_whitespace_and_invalid_hosts() {
     for address in [
       "",
@@ -297,6 +314,28 @@ mod tests {
           ..
         })
       ));
+    }
+  }
+
+  #[test]
+  fn endpoint_rejects_non_canonical_idn_hosts() {
+    for address in [
+      "caf%C3%A9.example.com",
+      "café.example.com",
+      "a%20b.example.com",
+    ] {
+      let mut config = valid_config();
+      config.address = address.to_string();
+      assert!(
+        matches!(
+          config.validate(),
+          Err(XrayError::InvalidField {
+            field: "address",
+            ..
+          })
+        ),
+        "expected rejection for {address}"
+      );
     }
   }
 

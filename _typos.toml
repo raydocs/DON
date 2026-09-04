@@ -12,6 +12,9 @@ extend-exclude = [
 [default.extend-words]
 DBE = "DBE"
 nd = "nd"
+# Punycode fragment of `xn--caf-dma` (the IDN encoding of `café`); not a
+# misspelling of `calf`.
+caf = "caf"
 
 [default.extend-identifiers]
 # Chrome Web Store extension name in the known-VPN list.
