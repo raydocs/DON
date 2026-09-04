@@ -4437,7 +4437,12 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to list extensions: {e}"),
     })?;
-    Ok(serde_json::to_value(extensions).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&extensions).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_list_extension_groups(&self) -> Result<serde_json::Value, McpError> {
@@ -4452,7 +4457,12 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to list extension groups: {e}"),
     })?;
-    Ok(serde_json::to_value(groups).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&groups).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_add_extension(
@@ -4488,7 +4498,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to add extension: {e}"),
       })?;
-    Ok(serde_json::to_value(extension).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&extension).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_update_extension(
@@ -4534,7 +4549,12 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to update extension: {e}"),
     })?;
-    Ok(serde_json::to_value(extension).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&extension).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_create_extension_group(
@@ -4559,7 +4579,12 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to create extension group: {e}"),
     })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&group).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_update_extension_group(
@@ -4599,7 +4624,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to update extension group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&group).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_add_extension_to_group(
@@ -4620,7 +4650,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to add extension to group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&group).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_remove_extension_from_group(
@@ -4641,7 +4676,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to remove extension from group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&group).unwrap_or_default()
+      }]
+    }))
   }
 
   fn group_and_extension_ids(arguments: &serde_json::Value) -> Result<(&str, &str), McpError> {
@@ -4686,7 +4726,9 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to delete extension: {e}"),
       })?;
-    Ok(serde_json::json!({"success": true}))
+    Ok(serde_json::json!({
+      "content": [{ "type": "text", "text": "Extension deleted" }]
+    }))
   }
 
   async fn handle_delete_extension_group_mcp(
@@ -4716,7 +4758,9 @@ impl McpServer {
     if let Err(e) = crate::events::emit_empty("extensions-changed") {
       log::error!("Failed to emit extensions-changed event: {e}");
     }
-    Ok(serde_json::json!({"success": true}))
+    Ok(serde_json::json!({
+      "content": [{ "type": "text", "text": "Extension group deleted" }]
+    }))
   }
 
   async fn handle_assign_extension_group_to_profile(
@@ -4778,7 +4822,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to assign extension group: {e}"),
       })?;
-    Ok(serde_json::to_value(profile).unwrap())
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": serde_json::to_string_pretty(&profile).unwrap_or_default()
+      }]
+    }))
   }
 
   async fn handle_get_team_locks(&self) -> Result<serde_json::Value, McpError> {
@@ -6611,5 +6660,86 @@ mod tests {
       "tools/list",
       None
     )));
+  }
+
+  // The eleven extension-management tools must return MCP-conformant
+  // CallToolResult objects: a JSON object with a required `content` array of
+  // content blocks (per PROTOCOL_VERSION 2025-11-25). Every other tool in this
+  // file wraps its result this way; the extension block once returned bare
+  // arrays/objects (`Ok(serde_json::to_value(..).unwrap())`) or
+  // `Ok(serde_json::json!({"success": true}))`, which flow unmodified into the
+  // JSON-RPC `result` field (`handle_request` places `dispatch_tool_call`'s
+  // return straight into `result`), producing a non-conformant wire response.
+  //
+  // Two arms: a behavioural check on the read-only list tools (dispatched
+  // through the same path that becomes the JSON-RPC `result`), and a
+  // source-level check that no extension handler keeps a bare-return shape.
+  #[tokio::test]
+  async fn extension_tools_return_mcp_call_tool_result_envelope() {
+    let server = McpServer::new();
+
+    // Behavioural: read-only list tools. `dispatch_tool_call`'s return is
+    // placed verbatim into the JSON-RPC `result` by `handle_request`, so the
+    // shape here is the shape on the wire. The paid-entitlement gate is open
+    // in this fork, and the `list_*` handlers only read local disk, so no
+    // network or disk write occurs — the result is a (possibly empty) list
+    // wrapped in the envelope.
+    for name in ["list_extensions", "list_extension_groups"] {
+      let result = server
+        .dispatch_tool_call(name, &serde_json::json!({}))
+        .await
+        .unwrap_or_else(|e| panic!("`{name}` dispatch failed: {e:?}"));
+      assert!(
+        result.is_object(),
+        "`{name}` result must be a CallToolResult object, got {result}"
+      );
+      let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .unwrap_or_else(|| panic!("`{name}` missing required `content` array: {result}"));
+      assert!(
+        !content.is_empty(),
+        "`{name}` `content` array must be non-empty"
+      );
+      assert_eq!(
+        content[0]["type"], "text",
+        "`{name}` content block must be a text block"
+      );
+      assert!(
+        content[0]["text"].is_string(),
+        "`{name}` content block must carry a text string"
+      );
+    }
+
+    // Source-level: handlers that mutate state (create/update/add/remove/
+    // delete/assign) are unsafe to dispatch in a unit test — they write to the
+    // real extension store. Instead, scan the contiguous handler block and
+    // assert none keeps a bare-return shape that would bypass the `content`
+    // envelope (bare array for list tools, bare object for mutators, or bare
+    // `{"success": true}` for deletes) — any of which becomes a
+    // non-conformant JSON-RPC `result`.
+    let source = include_str!("mcp_server.rs");
+    let block_start = source
+      .find("async fn handle_list_extensions")
+      .expect("extension handler block start");
+    let block_end = source[block_start..]
+      .find("async fn handle_get_team_locks")
+      .map(|i| block_start + i)
+      .expect("extension handler block end");
+    let block = &source[block_start..block_end];
+    assert!(
+      !block.contains("Ok(serde_json::to_value("),
+      "extension handlers must wrap results in the `content` envelope, not return bare `to_value`"
+    );
+    assert!(
+      !block.contains("json!({\"success\""),
+      "extension handlers must wrap success in the `content` envelope, not return bare `{{\"success\": ...}}`"
+    );
+    // Each of the eleven handlers must contribute one `content` envelope.
+    assert_eq!(
+      block.matches("\"content\"").count(),
+      11,
+      "expected 11 extension handlers each wrapping a `content` envelope"
+    );
   }
 }
