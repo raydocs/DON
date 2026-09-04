@@ -493,6 +493,33 @@ mod tests {
     assert_eq!(zh_hant_us.region, Some("US".to_string()));
   }
 
+  /// `from_region` samples the spoken language by weighted random draw over
+  /// the CLDR distribution, so repeated calls for the same region return more
+  /// than one language subtag. This is the randomness source the
+  /// `apply_geolocation_fields` language guard in `wayfern_manager` preserves
+  /// against: any per-launch re-application of `from_region` would re-roll
+  /// `navigator.language`/`navigator.languages` for a static profile.
+  #[test]
+  fn from_region_is_nondeterministic_across_calls() {
+    use std::collections::HashSet;
+    let selector = LocaleSelector::new().unwrap();
+    let mut seen: HashSet<String> = HashSet::new();
+    for _ in 0..500 {
+      let locale = selector.from_region("US").unwrap();
+      seen.insert(locale.language);
+    }
+    assert!(
+      seen.len() >= 2,
+      "from_region returned a single language across 500 draws: {:?}",
+      seen
+    );
+    assert!(
+      seen.contains("en"),
+      "en must be selectable for US; got {:?}",
+      seen
+    );
+  }
+
   #[tokio::test]
   async fn test_get_geolocation_async_palo_alto() {
     let geo = get_geolocation_async("204.252.119.24", None).await.unwrap();

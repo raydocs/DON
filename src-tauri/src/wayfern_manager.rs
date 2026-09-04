@@ -98,6 +98,7 @@ const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disabl
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
 fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
+  #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
   let mut args = vec![
     format!("--remote-debugging-port={port}"),
     "--remote-debugging-address=127.0.0.1".to_string(),
@@ -1098,23 +1099,7 @@ impl WayfernManager {
     match geo_result {
       Ok(geo) => {
         if let Some(obj) = fingerprint.as_object_mut() {
-          obj.insert("timezone".to_string(), json!(geo.timezone));
-          // Calculate timezone offset from IANA timezone name
-          if let Ok(tz) = geo.timezone.parse::<chrono_tz::Tz>() {
-            use chrono::Offset;
-            let now = chrono::Utc::now().with_timezone(&tz);
-            let offset_seconds = now.offset().fix().local_minus_utc();
-            let offset_minutes = -(offset_seconds / 60);
-            obj.insert("timezoneOffset".to_string(), json!(offset_minutes));
-          }
-          obj.insert("latitude".to_string(), json!(geo.latitude));
-          obj.insert("longitude".to_string(), json!(geo.longitude));
-          let locale_str = geo.locale.as_string();
-          obj.insert("language".to_string(), json!(&locale_str));
-          obj.insert(
-            "languages".to_string(),
-            json!([&locale_str, &geo.locale.language]),
-          );
+          Self::apply_geolocation_fields(obj, &geo);
         }
         log::info!(
           "Applied geolocation to Wayfern fingerprint: {} ({})",
@@ -1135,6 +1120,45 @@ impl WayfernManager {
         }
         false
       }
+    }
+  }
+
+  /// Merge a resolved geolocation into a Wayfern fingerprint object.
+  ///
+  /// Timezone, timezoneOffset, latitude and longitude are always refreshed to
+  /// the current exit — they are deterministic per IP, so re-applying them on
+  /// every proxied launch keeps stale location data consistent. Language and
+  /// languages are only set when the fingerprint has none:
+  /// `LocaleSelector::from_region` draws the spoken language by weighted random
+  /// sample, so re-running it on every launch of a static (non-randomize)
+  /// profile would re-roll `navigator.language`/`navigator.languages` and drift
+  /// the stored — or user-edited — identity across visits. Guarding these two
+  /// fields keeps a static profile stable while still populating them at
+  /// profile creation, when the fingerprint has no value yet.
+  fn apply_geolocation_fields(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    geo: &crate::geolocation::Geolocation,
+  ) {
+    obj.insert("timezone".to_string(), json!(geo.timezone));
+    // Calculate timezone offset from IANA timezone name
+    if let Ok(tz) = geo.timezone.parse::<chrono_tz::Tz>() {
+      use chrono::Offset;
+      let now = chrono::Utc::now().with_timezone(&tz);
+      let offset_seconds = now.offset().fix().local_minus_utc();
+      let offset_minutes = -(offset_seconds / 60);
+      obj.insert("timezoneOffset".to_string(), json!(offset_minutes));
+    }
+    obj.insert("latitude".to_string(), json!(geo.latitude));
+    obj.insert("longitude".to_string(), json!(geo.longitude));
+    let locale_str = geo.locale.as_string();
+    if !obj.contains_key("language") {
+      obj.insert("language".to_string(), json!(&locale_str));
+    }
+    if !obj.contains_key("languages") {
+      obj.insert(
+        "languages".to_string(),
+        json!([&locale_str, &geo.locale.language]),
+      );
     }
   }
 
@@ -2397,6 +2421,131 @@ mod tests {
     }));
 
     assert_eq!(fingerprint["deviceMemory"], serde_json::json!(8));
+  }
+
+  fn sample_geolocation(
+    language: &str,
+    region: Option<&str>,
+    timezone: &str,
+  ) -> crate::geolocation::Geolocation {
+    crate::geolocation::Geolocation {
+      locale: crate::geolocation::Locale {
+        language: language.to_string(),
+        region: region.map(|r| r.to_string()),
+      },
+      longitude: -122.0,
+      latitude: 37.0,
+      timezone: timezone.to_string(),
+    }
+  }
+
+  #[test]
+  fn apply_geolocation_fields_populates_language_when_absent() {
+    let mut fingerprint = serde_json::json!({});
+    let obj = fingerprint.as_object_mut().unwrap();
+    WayfernManager::apply_geolocation_fields(
+      obj,
+      &sample_geolocation("es", Some("US"), "America/Los_Angeles"),
+    );
+
+    assert_eq!(fingerprint["language"], serde_json::json!("es-US"));
+    assert_eq!(fingerprint["languages"], serde_json::json!(["es-US", "es"]));
+  }
+
+  #[test]
+  fn apply_geolocation_fields_preserves_a_stored_language_and_languages() {
+    let mut fingerprint = serde_json::json!({
+      "language": "en-US",
+      "languages": ["en-US", "en"]
+    });
+    let obj = fingerprint.as_object_mut().unwrap();
+    WayfernManager::apply_geolocation_fields(
+      obj,
+      &sample_geolocation("es", Some("US"), "America/Los_Angeles"),
+    );
+
+    assert_eq!(fingerprint["language"], serde_json::json!("en-US"));
+    assert_eq!(fingerprint["languages"], serde_json::json!(["en-US", "en"]));
+  }
+
+  #[test]
+  fn apply_geolocation_fields_preserves_user_customized_language_arrays() {
+    let mut fingerprint = serde_json::json!({
+      "language": "de-DE",
+      "languages": ["de-DE", "de", "en"]
+    });
+    let obj = fingerprint.as_object_mut().unwrap();
+    WayfernManager::apply_geolocation_fields(
+      obj,
+      &sample_geolocation("es", Some("US"), "America/Los_Angeles"),
+    );
+
+    assert_eq!(fingerprint["language"], serde_json::json!("de-DE"));
+    assert_eq!(
+      fingerprint["languages"],
+      serde_json::json!(["de-DE", "de", "en"])
+    );
+  }
+
+  #[test]
+  fn apply_geolocation_fields_guards_language_and_languages_independently() {
+    let mut fingerprint = serde_json::json!({ "language": "en-US" });
+    let obj = fingerprint.as_object_mut().unwrap();
+    WayfernManager::apply_geolocation_fields(
+      obj,
+      &sample_geolocation("es", Some("US"), "America/Los_Angeles"),
+    );
+
+    assert_eq!(fingerprint["language"], serde_json::json!("en-US"));
+    assert_eq!(fingerprint["languages"], serde_json::json!(["es-US", "es"]));
+  }
+
+  #[test]
+  fn apply_geolocation_fields_keeps_a_static_profile_language_stable_across_launches() {
+    let geo_first = sample_geolocation("en", Some("US"), "America/Los_Angeles");
+    let geo_second = sample_geolocation("es", Some("US"), "America/Los_Angeles");
+
+    let mut fingerprint = serde_json::json!({});
+    WayfernManager::apply_geolocation_fields(fingerprint.as_object_mut().unwrap(), &geo_first);
+    // Simulate persisting the fingerprint Wayfern echoes back, then relaunching.
+    let persisted = fingerprint.clone();
+    WayfernManager::apply_geolocation_fields(fingerprint.as_object_mut().unwrap(), &geo_second);
+
+    assert_eq!(fingerprint["language"], persisted["language"]);
+    assert_eq!(fingerprint["languages"], persisted["languages"]);
+  }
+
+  #[test]
+  fn apply_geolocation_fields_refreshes_deterministic_fields_every_launch() {
+    let mut fingerprint = serde_json::json!({
+      "language": "en-US",
+      "languages": ["en-US", "en"],
+      "timezone": "Europe/Berlin",
+      "timezoneOffset": -60,
+      "latitude": 1.0,
+      "longitude": 2.0
+    });
+    let obj = fingerprint.as_object_mut().unwrap();
+    WayfernManager::apply_geolocation_fields(
+      obj,
+      &sample_geolocation("es", Some("US"), "America/Los_Angeles"),
+    );
+
+    assert_eq!(
+      fingerprint["timezone"],
+      serde_json::json!("America/Los_Angeles")
+    );
+    assert_eq!(fingerprint["latitude"], serde_json::json!(37.0));
+    assert_eq!(fingerprint["longitude"], serde_json::json!(-122.0));
+    assert_eq!(fingerprint["language"], serde_json::json!("en-US"));
+    assert_eq!(fingerprint["languages"], serde_json::json!(["en-US", "en"]));
+    let offset = fingerprint["timezoneOffset"]
+      .as_i64()
+      .expect("timezoneOffset set");
+    assert!(
+      offset == 420 || offset == 480,
+      "America/Los_Angeles offset is PDT(420) or PST(480), got {offset}"
+    );
   }
 
   #[test]
