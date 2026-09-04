@@ -15,7 +15,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "hono": "^4.7.4"
+    "hono": "^4.7.4",
+    "jose": "^6.2.10"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250214.0",

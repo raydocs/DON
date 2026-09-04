@@ -3,8 +3,19 @@ export interface Env {
   DB: D1Database;
   SYNC_TOKEN?: string;
   SIGNING_SECRET?: string;
-  JWT_PUBLIC_KEY?: string;
+  // Cloudflare Zero Trust Access (optional passwordless admin login).
+  // When set, the `cf-access-jwt-assertion` / `CF_Authorization` JWT is
+  // cryptographically verified against the team JWKS with iss/aud checks.
+  CF_ACCESS_TEAM_DOMAIN?: string;
+  CF_ACCESS_AUD?: string;
+  // Comma-separated allow-list of admin emails admitted via verified
+  // Cloudflare Access JWTs. No hard-coded default: leave unset to disable
+  // Access-based admin login (master-token / D1-admin paths still work).
   ADMIN_EMAILS?: string;
+  // DEVELOPMENT ONLY. When exactly "true", a client-supplied
+  // `x-admin-email` header is honored as a dev/testing bypass. NEVER enable
+  // in production (must not appear in wrangler.toml [vars]).
+  ADMIN_DEV_BYPASS?: string;
 }
 
 export interface UserContext {

@@ -20,5 +20,18 @@ database_id = "91984417-cc14-4392-a96f-595143698b1c"
 SYNC_TOKEN = "don-secret-sync-token"
 # Optional signing secret for HMAC URL signing (falls back to SYNC_TOKEN if omitted)
 SIGNING_SECRET = "don-signing-secret"
-# Authorized Admin emails when accessed via Cloudflare Access Zero Trust
+# Authorized Admin emails when accessed via Cloudflare Access Zero Trust.
+# IMPORTANT: rotate this to your own emails and prefer `wrangler secret put ADMIN_EMAILS`
+# (leaving the committed default is a known admin-email footgun). No code-level
+# default exists, so leaving this unset disables Access-based admin login.
 ADMIN_EMAILS = "ruiruiwan8@gmail.com"
+# --- Cloudflare Zero Trust Access (passwordless admin login) ---
+# To enable Access-based admin login, set BOTH via secrets and put a Cloudflare
+# Access application policy in front of the worker's `/api/admin/*` routes
+# (configured out-of-band in the Zero Trust dashboard):
+#   CF_ACCESS_TEAM_DOMAIN = "https://<your-team>.cloudflareaccess.com"
+#   CF_ACCESS_AUD         = "<Application Audience ID (UUID) from the Access app>"
+# When unset, the Access/JWT admin path is disabled (fail-closed); the
+# master-token (SYNC_TOKEN) and D1-admin token paths are unaffected.
+# --- DEVELOPMENT ONLY (never set here in production) ---
+#   ADMIN_DEV_BYPASS = "true"   # honors the `x-admin-email` header as a dev bypass

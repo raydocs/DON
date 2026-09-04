@@ -214,6 +214,9 @@ importers:
       hono:
         specifier: ^4.7.4
         version: 4.13.5
+      jose:
+        specifier: ^6.2.10
+        version: 6.2.10
     devDependencies:
       '@cloudflare/workers-types':
         specifier: ^4.20250214.0
@@ -4019,6 +4022,9 @@ packages:
   jiti@2.7.0:
     resolution: {integrity: sha512-AC/7JofJvZGrrneWNaEnJeOLUx+JlGt7tNa0wZiRPT4MY1wmfKjt2+6O2p2uz2+skll8OZZmJMNqeke7kKbNgQ==}
     hasBin: true
+
+  jose@6.2.10:
+    resolution: {integrity: sha512-iiW7J9qRFlGxvCOIBDBDxFePQSn7ZMAnrYGhrrOo6siO/MIqwfyilLR27pkfDgUk+raLuzADS8A3S/KLBisc0g==}
 
   js-cookie@3.0.8:
     resolution: {integrity: sha512-yeJd4aNAdYZQjaon2bpD/Gb0B/omw7HQOsynXXcOiWVCacbBcPlgn8S/d1X6blFSaHao7ozqtW7NZW19xpCtIw==}
@@ -9473,6 +9479,8 @@ snapshots:
       - ts-node
 
   jiti@2.7.0: {}
+
+  jose@6.2.10: {}
 
   js-cookie@3.0.8: {}
 
