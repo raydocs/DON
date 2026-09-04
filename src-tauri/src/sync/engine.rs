@@ -2017,6 +2017,21 @@ impl SyncEngine {
     );
     vpn.sync_enabled = true;
 
+    // Reject multi-peer WireGuard configs before persisting — the app's data
+    // model holds exactly one peer, and `parse_wireguard_config` would silently
+    // flatten multiple `[Peer]` sections into one spliced peer. Guarding here
+    // keeps sync download consistent with the local `import_config` /
+    // `create_config_manual` paths, which also reject at the storage boundary.
+    match vpn.vpn_type {
+      crate::vpn::VpnType::WireGuard => {
+        if crate::vpn::count_peer_sections(&vpn.config_data) > 1 {
+          return Err(SyncError::InvalidData(
+            "WireGuard configs with multiple [Peer] sections are not supported".to_string(),
+          ));
+        }
+      }
+    }
+
     // Save via VPN storage (handles encryption)
     {
       let storage = crate::vpn::VPN_STORAGE.lock().unwrap();

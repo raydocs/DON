@@ -342,6 +342,11 @@ impl VpnStorage {
   ) -> Result<VpnConfig, VpnError> {
     match vpn_type {
       VpnType::WireGuard => {
+        if super::count_peer_sections(config_data) > 1 {
+          return Err(VpnError::InvalidWireGuard(
+            "WireGuard configs with multiple [Peer] sections are not supported".to_string(),
+          ));
+        }
         super::parse_wireguard_config(config_data)?;
       }
     }
@@ -404,6 +409,11 @@ impl VpnStorage {
 
     match vpn_type {
       VpnType::WireGuard => {
+        if super::count_peer_sections(content) > 1 {
+          return Err(VpnError::InvalidWireGuard(
+            "WireGuard configs with multiple [Peer] sections are not supported".to_string(),
+          ));
+        }
         super::parse_wireguard_config(content)?;
       }
     }
@@ -437,6 +447,39 @@ impl VpnStorage {
 mod tests {
   use super::*;
   use tempfile::TempDir;
+
+  // A valid single-peer WireGuard config (keys decode to 32 bytes, so it passes
+  // `parse_wireguard_config`'s `validate_wireguard_key`).
+  const SINGLE_PEER_WG: &str = "\
+[Interface]
+PrivateKey = YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+Address = 10.0.0.2/24
+
+[Peer]
+PublicKey = YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+";
+
+  // Same interface with two `[Peer]` sections — out-of-domain for this app's
+  // single-peer model. The import/manual-create guards count peer sections
+  // before `parse_wireguard_config` runs, so this is rejected up front rather
+  // than being flattened into a spliced peer.
+  const MULTI_PEER_WG: &str = "\
+[Interface]
+PrivateKey = YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=
+Address = 10.0.0.2/24
+
+[Peer]
+PublicKey = YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=
+Endpoint = vpn.example.com:51820
+AllowedIPs = 0.0.0.0/0
+
+[Peer]
+PublicKey = Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=
+Endpoint = home.example.com:51820
+AllowedIPs = 10.0.0.0/24
+";
 
   fn create_test_storage() -> (VpnStorage, TempDir) {
     let temp_dir = TempDir::new().unwrap();
@@ -547,5 +590,49 @@ mod tests {
     let (storage, _temp) = create_test_storage();
     let result = storage.load_config("nonexistent");
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_import_config_rejects_multi_peer() {
+    let (storage, _temp) = create_test_storage();
+    let result = storage.import_config(MULTI_PEER_WG, "multi.conf", None);
+    assert!(result.is_err(), "multi-peer config should be rejected");
+    assert!(result
+      .unwrap_err()
+      .to_string()
+      .contains("multiple [Peer] sections"));
+  }
+
+  #[test]
+  fn test_import_config_accepts_single_peer() {
+    let (storage, _temp) = create_test_storage();
+    let result = storage.import_config(SINGLE_PEER_WG, "single.conf", None);
+    assert!(
+      result.is_ok(),
+      "single-peer config should import: {:?}",
+      result.err()
+    );
+  }
+
+  #[test]
+  fn test_create_config_manual_rejects_multi_peer() {
+    let (storage, _temp) = create_test_storage();
+    let result = storage.create_config_manual("manual", VpnType::WireGuard, MULTI_PEER_WG);
+    assert!(result.is_err(), "multi-peer config should be rejected");
+    assert!(result
+      .unwrap_err()
+      .to_string()
+      .contains("multiple [Peer] sections"));
+  }
+
+  #[test]
+  fn test_create_config_manual_accepts_single_peer() {
+    let (storage, _temp) = create_test_storage();
+    let result = storage.create_config_manual("manual", VpnType::WireGuard, SINGLE_PEER_WG);
+    assert!(
+      result.is_ok(),
+      "single-peer config should be created: {:?}",
+      result.err()
+    );
   }
 }
