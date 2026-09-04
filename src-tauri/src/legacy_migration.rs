@@ -435,6 +435,7 @@ fn migrate_from_paths(
       profile.created_by_id = None;
       profile.created_by_email = None;
       profile.vpn_id = None;
+      profile.host_os = Some(crate::profile::types::get_host_os());
       profile.proxy_id = profile.proxy_id.and_then(|id| proxy_map.get(&id).cloned());
       profile.group_id = profile.group_id.and_then(|id| group_map.get(&id).cloned());
       profile.extension_group_id = profile
@@ -612,6 +613,126 @@ mod tests {
       .file_name()
       .to_string_lossy()
       .starts_with(".legacy-migration-staging")));
+  }
+
+  // Regression for the cross-OS lockout bug: legacy migration must stamp
+  // `host_os = Some(get_host_os())` so a pre-`host_os` source profile with a
+  // cross-host `wayfern_config.os` does not land on disk with
+  // `host_os == None` (which makes `resolved_os()` fall back to the foreign
+  // fingerprint OS and `is_cross_os()` read `true` on the first load).
+  #[test]
+  fn migration_stamps_host_os_so_cross_os_fingerprint_stays_launchable() {
+    let host = crate::profile::types::get_host_os();
+    let cases: &[(&str, &str)] = &[
+      (
+        "desktop_windows_from_other",
+        if host == "windows" {
+          "macos"
+        } else {
+          "windows"
+        },
+      ),
+      ("mobile_android_from_desktop", "android"),
+    ];
+    for (label, bogus_os) in cases {
+      let temp = TempDir::new().unwrap();
+      let source = temp.path().join("legacy");
+      let target = temp.path().join("don");
+      let profile_id = uuid::Uuid::new_v4().to_string();
+      write_json(
+        &source.join(format!("profiles/{profile_id}/metadata.json")),
+        json!({
+          "id": profile_id,
+          "name": "Legacy",
+          "browser": "chrome",
+          "version": "1",
+          "process_id": 42,
+          "last_launch": 7,
+          "last_sync": 8,
+          "sync_mode": "Regular",
+          "wayfern_config": {"os": bogus_os},
+        }),
+      );
+      fs::create_dir_all(source.join(format!("profiles/{profile_id}/profile"))).unwrap();
+      fs::write(
+        source.join(format!("profiles/{profile_id}/profile/Cookies")),
+        b"browser",
+      )
+      .unwrap();
+      let source_snapshot =
+        fs::read(source.join(format!("profiles/{profile_id}/metadata.json"))).unwrap();
+
+      migrate_from_paths(
+        &source,
+        &target,
+        &MigrationSelection {
+          profiles: true,
+          proxies: true,
+          groups: true,
+          extensions: true,
+        },
+      )
+      .unwrap();
+
+      // Migration is copy-only: the source must be untouched.
+      assert_eq!(
+        fs::read(source.join(format!("profiles/{profile_id}/metadata.json"))).unwrap(),
+        source_snapshot,
+        "{label}: source profile mutated",
+      );
+
+      let on_disk: serde_json::Value =
+        read_json(&target.join(format!("profiles/{profile_id}/metadata.json"))).unwrap();
+      // The fix: host_os is stamped with the current host OS on disk.
+      assert_eq!(
+        on_disk["host_os"].as_str(),
+        Some(host.as_str()),
+        "{label}: host_os should be {:?}, got {:?}",
+        host,
+        on_disk.get("host_os"),
+      );
+      // Existing runtime-field sanitization is preserved.
+      for field in [
+        "process_id",
+        "last_launch",
+        "last_sync",
+        "created_by_id",
+        "created_by_email",
+        "vpn_id",
+      ] {
+        assert!(on_disk[field].is_null(), "{label}: {field} should be null");
+      }
+      assert_eq!(on_disk["sync_mode"], "Disabled", "{label}: sync_mode");
+      // The cross-host fingerprint OS is left as-is; host_os must win.
+      assert_eq!(
+        on_disk["wayfern_config"]["os"].as_str(),
+        Some(*bogus_os),
+        "{label}: wayfern_config.os should be preserved",
+      );
+
+      // End-to-end: list_profiles -> repair_host_os -> is_cross_os.
+      let _guard = crate::app_dirs::set_test_data_dir(target.clone());
+      let profiles = crate::profile::manager::ProfileManager::instance()
+        .list_profiles()
+        .unwrap();
+      let p = profiles
+        .iter()
+        .find(|p| p.id.to_string() == profile_id)
+        .unwrap();
+      assert_eq!(
+        p.host_os.as_deref(),
+        Some(host.as_str()),
+        "{label}: host_os after list_profiles (host={}, bogus={})",
+        host,
+        bogus_os,
+      );
+      assert!(
+        !p.is_cross_os(),
+        "{label}: is_cross_os should be false (host={}, bogus={})",
+        host,
+        bogus_os,
+      );
+    }
   }
 
   #[test]
