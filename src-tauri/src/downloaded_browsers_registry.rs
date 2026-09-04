@@ -1437,6 +1437,14 @@ mod tests {
     for v in [old_version, new_version] {
       let version_dir = binaries_dir.join("wayfern").join(v);
       std::fs::create_dir_all(&version_dir).unwrap();
+      #[cfg(target_os = "windows")]
+      {
+        std::fs::File::create(version_dir.join("wayfern.exe")).unwrap();
+        std::fs::File::create(version_dir.join("stub.dll")).unwrap();
+      }
+      #[cfg(target_os = "macos")]
+      std::fs::create_dir_all(version_dir.join("wayfern.app")).unwrap();
+      #[cfg(not(any(target_os = "windows", target_os = "macos")))]
       std::fs::File::create(version_dir.join("wayfern")).unwrap();
     }
 

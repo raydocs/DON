@@ -123,9 +123,9 @@ fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
     "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,Prefetch,PrefetchProxy,SpeculationRulesPrefetchFuture,NoStatePrefetch".to_string(),
     "--use-mock-keychain".to_string(),
     "--password-store=basic".to_string(),
+    #[cfg(target_os = "macos")]
+    "--use-angle=default".to_string(),
   ];
-  #[cfg(target_os = "macos")]
-  args.push("--use-angle=default".to_string());
   args
 }
 
