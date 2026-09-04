@@ -30,6 +30,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { translateBackendError } from "@/lib/backend-errors";
 import { getBrowserIcon } from "@/lib/browser-utils";
 import type {
   BrowserProfile,
@@ -274,7 +275,14 @@ export function CookieCopyDialog({
       for (const result of results) {
         totalCopied += result.cookies_copied;
         totalReplaced += result.cookies_replaced;
-        errors.push(...result.errors);
+        // A target may be machine-refused by the same gate the paste path uses
+        // (running / password-protected / remote-handoff), returning a
+        // `{"code":…}` string. Translate each through the shared backend-error
+        // map so the toast reads the same localized reasons as paste imports;
+        // plain-text errors (e.g. "Profile not found") fall back unchanged.
+        errors.push(
+          ...result.errors.map((error) => translateBackendError(t, error)),
+        );
       }
 
       if (errors.length > 0) {

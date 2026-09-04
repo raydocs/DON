@@ -983,6 +983,39 @@ test("cookie import/copy/export, profile encryption, and traffic-stat read/clear
       /fixture\.local/,
     );
 
+    // A password-protected target is refused with the same code the paste path
+    // returns, and the refusal happens before any filesystem write: the
+    // target's on-disk tree is ciphertext while password-protected, so a
+    // plaintext Cookies write would corrupt it (the next decrypt-on-launch /
+    // decrypt-on-remove-password fails AES-GCM auth on the stray file). The
+    // refusal must not be a silent "copied 0"; it carries the machine-readable
+    // code the frontend translates.
+    const lockedTarget = await createProfile(app, "Cookie Locked Target");
+    await app.invoke("set_profile_password", {
+      profileId: lockedTarget.id,
+      password: "correct horse battery staple",
+    });
+    const refused = await app.invoke("copy_profile_cookies", {
+      request: {
+        source_profile_id: source.id,
+        target_profile_ids: [lockedTarget.id],
+        selected_cookies: [{ domain: "fixture.local", name: "session" }],
+      },
+    });
+    assert.equal(refused.length, 1);
+    assert.equal(refused[0].target_profile_id, lockedTarget.id);
+    assert.equal(refused[0].cookies_copied, 0);
+    assert.equal(refused[0].cookies_replaced, 0);
+    assert.equal(refused[0].errors.length, 1);
+    assert.match(refused[0].errors[0], /COOKIE_IMPORT_PROFILE_PROTECTED/);
+    // No corruption: removing the password decrypts every file in the tree,
+    // which would fail (INCORRECT_PASSWORD / internal error) had the refused
+    // copy actually written a plaintext Cookies into the ciphertext tree.
+    await app.invoke("remove_profile_password", {
+      profileId: lockedTarget.id,
+      password: "correct horse battery staple",
+    });
+
     const paste = [
       "# Netscape HTTP Cookie File",
       "#HttpOnly_.fixture.local\tTRUE\t/\tFALSE\t2000000000\tpasted\tpasted-value",
@@ -1102,7 +1135,7 @@ test("cookie import/copy/export, profile encryption, and traffic-stat read/clear
     await app.invoke("clear_all_traffic_stats");
 
     await app.invoke("delete_selected_profiles", {
-      profileIds: [source.id, target.id],
+      profileIds: [source.id, target.id, lockedTarget.id],
     });
   });
 });

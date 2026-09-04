@@ -876,17 +876,18 @@ impl CookieManager {
         }
       };
 
-      let is_running = profile_manager
-        .check_browser_status(app_handle.clone(), target)
-        .await
-        .unwrap_or(false);
-
-      if is_running {
+      // The same gate the paste write path uses: a target that is locally
+      // running, password-protected (its on-disk tree is ciphertext, so a
+      // plaintext Cookies write corrupts it), or held by a remote handoff
+      // (a local write would upload a stale copy and delete the session's
+      // files on the next sync) must be refused with the same codes as
+      // `import_paste` / `analyze_paste`. See `paste_blocker`.
+      if let Some(reason) = Self::paste_blocker(app_handle, target).await {
         results.push(CookieCopyResult {
           target_profile_id: target_id.clone(),
           cookies_copied: 0,
           cookies_replaced: 0,
-          errors: vec![format!("Browser is running for profile: {}", target.name)],
+          errors: vec![reason],
         });
         continue;
       }
@@ -1018,6 +1019,11 @@ impl CookieManager {
 
   /// Why writing cookies into this profile would be refused right now, as the
   /// `{"code":…}` string the frontend translates. `None` means go ahead.
+  ///
+  /// The local-running check needs the app handle; the password-protected and
+  /// remote-handoff checks do not, so they live in `paste_blocker_for_profile`,
+  /// where both write paths (paste and copy) share them and a unit test can
+  /// reach them without an `AppHandle`.
   async fn paste_blocker(app_handle: &AppHandle, profile: &BrowserProfile) -> Option<String> {
     let is_running = ProfileManager::instance()
       .check_browser_status(app_handle.clone(), profile)
@@ -1026,15 +1032,27 @@ impl CookieManager {
     if is_running {
       return Some(crate::backend_error("COOKIE_IMPORT_BROWSER_RUNNING"));
     }
-    // The profile directory on disk is ciphertext while locked; a plaintext
-    // SQLite write into it is not a cookie, it is corruption.
+    Self::paste_blocker_for_profile(profile)
+  }
+
+  /// The refusal reasons that come from the profile's persistent state alone —
+  /// no app handle needed, so this is the unit-testable seam. `None` means go
+  /// ahead. Checked after the local-running guard in `paste_blocker`, so the
+  /// order of codes the user sees is unchanged.
+  ///
+  /// - **Password-protected**: the profile directory on disk is ciphertext
+  ///   while locked, so a plaintext SQLite `Cookies` write into it is not a
+  ///   cookie, it is corruption — the next decrypt-on-launch /
+  ///   decrypt-on-remove-password iterates that file and fails AES-GCM auth.
+  /// - **Remote handoff**: a session on the fleet owns this profile until its
+  ///   work has been pulled back. Writing locally makes every local mtime
+  ///   newer, so the next sync uploads the stale pre-session copy and deletes
+  ///   the session's cookies via `files_to_delete_remote`. See
+  ///   `remote_handoff`.
+  fn paste_blocker_for_profile(profile: &BrowserProfile) -> Option<String> {
     if profile.password_protected {
       return Some(crate::backend_error("COOKIE_IMPORT_PROFILE_PROTECTED"));
     }
-    // A remote session owns this profile until its work has been pulled back.
-    // Writing locally makes every local mtime newer, so the next sync uploads
-    // the pre-session copy and deletes the session's cookies. See
-    // `remote_handoff`.
     if crate::remote_handoff::state_for(&profile.id.to_string()).is_some() {
       return Some(crate::backend_error("COOKIE_IMPORT_REMOTE_SESSION"));
     }
@@ -1925,5 +1943,153 @@ mod tests {
     assert!(!version.is_empty());
 
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  // ---------- paste_blocker_for_profile ----------
+  //
+  // `copy_cookies` and the paste path now share one gate (`paste_blocker`),
+  // whose AppHandle-free half is `paste_blocker_for_profile`. These tests pin
+  // that half so the two data-loss preconditions the bug report traces — a
+  // password-protected target (plaintext write corrupts the ciphertext tree)
+  // and a remote-handoff target (a local write makes the next `Auto` sync
+  // upload the stale copy and delete the session's files) — are both refused
+  // with the exact codes the paste path returns, and a clean target is not.
+
+  /// Isolate the process-global `remote_handoff` store: take its test lock so
+  /// no other test mutates the store concurrently, reset it empty, and point
+  /// the on-disk settings dir at a scratch directory so a gated profile never
+  /// leaks into — or loads from — the developer's real app data. All three
+  /// returned guards must outlive the test body.
+  fn isolated_handoff_store() -> (
+    tempfile::TempDir,
+    crate::app_dirs::TestDirGuard,
+    std::sync::MutexGuard<'static, ()>,
+  ) {
+    let lock = crate::remote_handoff::lock_for_test();
+    let dir = tempfile::TempDir::new().expect("scratch directory");
+    let guard = crate::app_dirs::set_test_data_dir(dir.path().to_path_buf());
+    (dir, guard, lock)
+  }
+
+  fn plain_profile(name: &str) -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: name.to_string(),
+      browser: "wayfern".to_string(),
+      ..BrowserProfile::default()
+    }
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_allows_a_plain_idle_profile() {
+    let _iso = isolated_handoff_store();
+    let profile = plain_profile("plain");
+    assert_eq!(
+      CookieManager::paste_blocker_for_profile(&profile),
+      None,
+      "an unprotected profile with no remote handoff must be writable"
+    );
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_refuses_a_password_protected_profile() {
+    let _iso = isolated_handoff_store();
+    let mut profile = plain_profile("locked");
+    profile.password_protected = true;
+    let reason = CookieManager::paste_blocker_for_profile(&profile)
+      .expect("a password-protected profile must be refused");
+    assert!(
+      reason.contains("COOKIE_IMPORT_PROFILE_PROTECTED"),
+      "expected COOKIE_IMPORT_PROFILE_PROTECTED, got {reason}"
+    );
+    // The remote-session code must not be returned for a merely locked target.
+    assert!(
+      !reason.contains("COOKIE_IMPORT_REMOTE_SESSION"),
+      "a locked-but-local profile must not report a remote session: {reason}"
+    );
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_refuses_a_running_remote_session() {
+    let _iso = isolated_handoff_store();
+    let profile = plain_profile("remote-running");
+    let pid = profile.id.to_string();
+    crate::remote_handoff::note_running(&pid, "sess-1");
+    assert_eq!(
+      crate::remote_handoff::state_for(&pid),
+      Some(crate::remote_handoff::HandoffState::Running)
+    );
+    let reason = CookieManager::paste_blocker_for_profile(&profile)
+      .expect("a profile in a running remote handoff must be refused");
+    assert!(
+      reason.contains("COOKIE_IMPORT_REMOTE_SESSION"),
+      "expected COOKIE_IMPORT_REMOTE_SESSION, got {reason}"
+    );
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_refuses_a_pending_remote_sync() {
+    let _iso = isolated_handoff_store();
+    let profile = plain_profile("remote-pending");
+    let pid = profile.id.to_string();
+    crate::remote_handoff::note_running(&pid, "sess-1");
+    // The transition the stream delivers when a session closes: this is the
+    // window where the local browser is NOT running (so `is_running` would
+    // not catch it) yet the remote work has not been pulled.
+    assert!(crate::remote_handoff::note_ended(&pid, "sess-1"));
+    assert_eq!(
+      crate::remote_handoff::state_for(&pid),
+      Some(crate::remote_handoff::HandoffState::PendingSync)
+    );
+    let reason = CookieManager::paste_blocker_for_profile(&profile)
+      .expect("a profile with pending remote work must be refused");
+    assert!(
+      reason.contains("COOKIE_IMPORT_REMOTE_SESSION"),
+      "expected COOKIE_IMPORT_REMOTE_SESSION, got {reason}"
+    );
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_password_protected_wins_over_remote_handoff() {
+    // Among the persistent-state checks, password-protected is decided first,
+    // matching the order `paste_blocker` has always returned for the paste
+    // path. A profile that is both locked and remote-held reports the lock.
+    let _iso = isolated_handoff_store();
+    let mut profile = plain_profile("locked-and-remote");
+    profile.password_protected = true;
+    crate::remote_handoff::note_running(&profile.id.to_string(), "sess-1");
+    let reason = CookieManager::paste_blocker_for_profile(&profile)
+      .expect("a locked profile must be refused even if a handoff is active");
+    assert!(
+      reason.contains("COOKIE_IMPORT_PROFILE_PROTECTED"),
+      "password-protected must take precedence, got {reason}"
+    );
+    assert!(
+      !reason.contains("COOKIE_IMPORT_REMOTE_SESSION"),
+      "the remote-session code must not shadow the protected code"
+    );
+  }
+
+  #[test]
+  fn paste_blocker_for_profile_blocks_and_unblocks_with_handoff_state() {
+    // The gate tracks live state, not a static flag: the same profile is
+    // refused while a handoff is active and allowed again once it is pulled.
+    let _iso = isolated_handoff_store();
+    let profile = plain_profile("remote-then-cleared");
+    let pid = profile.id.to_string();
+    assert_eq!(CookieManager::paste_blocker_for_profile(&profile), None);
+    crate::remote_handoff::note_running(&pid, "sess-1");
+    assert!(CookieManager::paste_blocker_for_profile(&profile).is_some());
+    crate::remote_handoff::clear(&pid);
+    assert_eq!(
+      crate::remote_handoff::state_for(&pid),
+      None,
+      "clearing the handoff must drop the gate entry"
+    );
+    assert_eq!(
+      CookieManager::paste_blocker_for_profile(&profile),
+      None,
+      "after the handoff is pulled the profile must be writable again"
+    );
   }
 }
