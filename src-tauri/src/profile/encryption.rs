@@ -324,11 +324,17 @@ pub fn rekey_profile_dir(
   new_key: &[u8; 32],
   encrypted_dir: &Path,
 ) -> PasswordResult<()> {
+  let staging = encrypted_dir.with_extension("rekeying");
+  if staging.exists() {
+    let _ = std::fs::remove_dir_all(&staging);
+  }
+  std::fs::create_dir_all(&staging)?;
+
+  // Step 1: decrypt from encrypted_dir with old_key, re-encrypt with new_key into staging
   let entries: Vec<_> = std::fs::read_dir(encrypted_dir)?
     .filter_map(|r| r.ok())
     .collect();
 
-  let mut decrypted: Vec<(String, Vec<u8>)> = Vec::new();
   for entry in &entries {
     let path = entry.path();
     if !path.is_file() {
@@ -343,24 +349,24 @@ pub fn rekey_profile_dir(
     }
     let bytes = std::fs::read(&path)?;
     let (relpath, content) = decrypt_profile_file(old_key, &bytes)?;
-    decrypted.push((relpath, content));
-  }
-
-  // Decryption succeeded for every file; safe to rewrite the directory.
-  for entry in entries {
-    let path = entry.path();
-    if path.is_file() {
-      let _ = std::fs::remove_file(&path);
-    }
-  }
-
-  for (relpath, content) in decrypted {
     let encrypted = encrypt_profile_file(new_key, &relpath, &content)?;
-    let on_disk = encrypted_dir.join(hmac_filename(new_key, &relpath));
+    let on_disk = staging.join(hmac_filename(new_key, &relpath));
     atomic_write(&on_disk, &encrypted)?;
   }
 
-  write_verifier(new_key, encrypted_dir)?;
+  write_verifier(new_key, &staging)?;
+
+  // Step 2: move original aside, swap staging in, roll back on failure
+  let backup = encrypted_dir.with_extension("encrypted-backup");
+  if backup.exists() {
+    let _ = std::fs::remove_dir_all(&backup);
+  }
+  std::fs::rename(encrypted_dir, &backup)?;
+  if let Err(e) = std::fs::rename(&staging, encrypted_dir) {
+    let _ = std::fs::rename(&backup, encrypted_dir);
+    return Err(PasswordError::Io(e.to_string()));
+  }
+  let _ = std::fs::remove_dir_all(&backup);
   Ok(())
 }
 

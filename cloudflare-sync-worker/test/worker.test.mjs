@@ -58,4 +58,58 @@ describe("Cloudflare Sync Worker Protocol & Contracts", () => {
     assert.strictEqual(listRes.isTruncated, false);
     assert.strictEqual(listRes.objects[0].size, 65536);
   });
+
+  it("fails closed on missing or public placeholder signing secret", async () => {
+    const { generateTransferSignature } = await import("../src/auth.ts");
+
+    // Missing secret throws
+    await assert.rejects(
+      () => generateTransferSignature("key", "GET", Date.now() + 1000, {}),
+      /SIGNING_SECRET \(or SYNC_TOKEN\) must be configured/,
+    );
+
+    // Known placeholder secret throws
+    await assert.rejects(
+      () =>
+        generateTransferSignature("key", "GET", Date.now() + 1000, {
+          SIGNING_SECRET: "don-signing-secret",
+        }),
+      /known-public placeholder/,
+    );
+    await assert.rejects(
+      () =>
+        generateTransferSignature("key", "GET", Date.now() + 1000, {
+          SYNC_TOKEN: "don-secret-sync-token",
+        }),
+      /known-public placeholder/,
+    );
+  });
+
+  it("generates and verifies transfer signature with valid custom secret", async () => {
+    const { generateTransferSignature, verifyTransferSignature } = await import(
+      "../src/auth.ts"
+    );
+    const env = { SIGNING_SECRET: "my-custom-strong-secret-12345" };
+    const expiresAt = Date.now() + 60000;
+    const sig = await generateTransferSignature("test-key", "GET", expiresAt, env);
+    assert.ok(sig && sig.length === 64);
+
+    const valid = await verifyTransferSignature(
+      sig,
+      "test-key",
+      "GET",
+      expiresAt,
+      env,
+    );
+    assert.strictEqual(valid, true);
+
+    const invalid = await verifyTransferSignature(
+      sig,
+      "other-key",
+      "GET",
+      expiresAt,
+      env,
+    );
+    assert.strictEqual(invalid, false);
+  });
 });

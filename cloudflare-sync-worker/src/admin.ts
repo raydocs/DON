@@ -439,5 +439,9 @@ adminRouter.get("/api/admin/events", async (c) => {
 
 // 5. GET /admin (Modern Web Admin SPA Dashboard)
 adminRouter.get("/admin", (c) => {
+  c.header(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.tailwindcss.com https://cdnjs.cloudflare.com; style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com; font-src https://cdnjs.cloudflare.com; connect-src 'self';",
+  );
   return c.html(adminHtmlContent);
 });

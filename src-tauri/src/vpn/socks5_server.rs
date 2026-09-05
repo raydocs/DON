@@ -1090,6 +1090,12 @@ impl WireGuardSocks5Server {
             }
           }
 
+          // Peer half-closed (FIN received, rx buffer drained). Forward EOF to browser and close our smoltcp side.
+          if !socket.can_recv() && !socket.may_recv() && socket.is_open() {
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut conn.tcp_stream).await;
+            socket.close();
+          }
+
           // Check if smoltcp socket closed
           if !socket.is_open() && !socket.is_active() {
             completed.push(idx);

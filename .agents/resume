@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ensure Cargo environment is sourced if available
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
+# Ensure symlinks in /usr/local/bin are present
+if [ -d "$HOME/.cargo/bin" ] && [ ! -L /usr/local/bin/cargo ]; then
+  sudo ln -sf "$HOME/.cargo/bin"/* /usr/local/bin/
+fi
+
+# Quick verification of core toolchain
+for cmd in node pnpm cargo rustc typos; do
+  if ! command -v "$cmd" >/dev/null 2>&1; then
+    echo "Warning: $cmd is not found in PATH" >&2
+  fi
+done
