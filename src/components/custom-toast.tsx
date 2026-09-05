@@ -42,21 +42,6 @@ interface DownloadToastProps extends BaseToastProps {
   };
 }
 
-interface VersionUpdateToastProps extends BaseToastProps {
-  type: "version-update";
-  progress?: {
-    current: number;
-    total: number;
-    found: number;
-    current_browser?: string;
-  };
-}
-
-interface FetchingToastProps extends BaseToastProps {
-  type: "fetching";
-  browserName?: string;
-}
-
 interface SyncProgressToastProps extends BaseToastProps {
   type: "sync-progress";
   progress?: {
@@ -76,8 +61,6 @@ type ToastProps =
   | SuccessToastProps
   | ErrorToastProps
   | DownloadToastProps
-  | VersionUpdateToastProps
-  | FetchingToastProps
   | SyncProgressToastProps;
 
 function formatBytesCompact(bytes: number): string {
@@ -139,14 +122,6 @@ function getToastIcon(type: ToastProps["type"], stage?: string) {
       }
       return <LuDownload className="size-4 shrink-0 text-foreground" />;
 
-    case "version-update":
-      return (
-        <LuRefreshCw className="size-4 shrink-0 animate-spin text-foreground" />
-      );
-    case "fetching":
-      return (
-        <LuRefreshCw className="size-4 shrink-0 animate-spin text-foreground" />
-      );
     case "sync-progress":
       return (
         <LuRefreshCw className="size-4 shrink-0 animate-spin text-foreground" />
@@ -275,29 +250,6 @@ export function UnifiedToast(props: ToastProps) {
                     <div className="h-1.5 w-1/3 animate-progress-indeterminate rounded-full bg-foreground" />
                   </div>
                 )}
-              </div>
-            )}
-
-          {/* Version update progress */}
-          {type === "version-update" &&
-            progress &&
-            "current_browser" in progress && (
-              <div className="mt-2 space-y-1">
-                <p className="text-xs text-muted-foreground">
-                  {progress.current_browser &&
-                    t("versionUpdater.toast.lookingForUpdates", {
-                      browser: progress.current_browser,
-                    })}
-                </p>
-                <div className="flex items-center gap-x-2">
-                  <ProgressBar
-                    percentage={(progress.current / progress.total) * 100}
-                    className="min-w-0 flex-1"
-                  />
-                  <span className="w-8 shrink-0 text-right text-xs whitespace-nowrap text-muted-foreground">
-                    {progress.current}/{progress.total}
-                  </span>
-                </div>
               </div>
             )}
 
