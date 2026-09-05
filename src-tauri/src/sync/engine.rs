@@ -1646,15 +1646,9 @@ impl SyncEngine {
       .upload_config_json(&remote_key, &json, updated_proxy.updated_at.unwrap_or(0))
       .await?;
 
-    // Update local proxy with new last_sync (always write plaintext locally)
-    let proxy_manager = &crate::proxy_manager::PROXY_MANAGER;
-    let proxy_file = proxy_manager.get_proxy_file_path(&proxy.id);
-    fs::write(&proxy_file, &json).map_err(|e| {
-      SyncError::IoError(format!(
-        "Failed to update proxy file {}: {e}",
-        proxy_file.display()
-      ))
-    })?;
+    crate::proxy_manager::PROXY_MANAGER
+      .mark_stored_proxy_synced(&proxy.id, updated_proxy.last_sync)
+      .map_err(SyncError::IoError)?;
 
     log::info!("Proxy {} uploaded", proxy.id);
     Ok(())
@@ -4281,6 +4275,99 @@ pub async fn rollover_encryption_for_all_entities(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn proxy_upload_writeback_preserves_deletion_and_newer_edits() {
+    use crate::proxy_manager::{StoredProxy, PROXY_MANAGER};
+    use axum::{routing::post, routing::put, Json, Router};
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let upload_url = format!("{url}/upload");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app =
+      Router::new()
+        .route(
+          "/v1/objects/presign-upload",
+          post(move || async move {
+            Json(serde_json::json!({"url": upload_url, "expiresAt": "unused"}))
+          }),
+        )
+        .route(
+          "/upload",
+          put({
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+              let started = started.clone();
+              let release = release.clone();
+              async move {
+                started.notify_one();
+                release.notified().await;
+                axum::http::StatusCode::OK
+              }
+            }
+          }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let engine = SyncEngine::new(url, "isolated-test-token".to_string());
+    for delete in [true, false] {
+      let mut proxy = StoredProxy::new(
+        "Before upload".to_string(),
+        crate::browser::ProxySettings {
+          proxy_type: "http".to_string(),
+          host: "proxy.invalid".to_string(),
+          port: 8080,
+          username: None,
+          password: None,
+          vless_uri: None,
+        },
+      );
+      proxy.sync_enabled = true;
+      proxy.updated_at = Some(1);
+      let file = PROXY_MANAGER.get_proxy_file_path(&proxy.id);
+      fs::create_dir_all(file.parent().unwrap()).unwrap();
+      fs::write(&file, serde_json::to_vec(&proxy).unwrap()).unwrap();
+      PROXY_MANAGER.upsert_stored_proxy(proxy.clone());
+      let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(engine.upload_proxy(&proxy), async {
+          started.notified().await;
+          if delete {
+            // The scheduler processes a tombstone while the upload awaits HTTP.
+            PROXY_MANAGER.remove_from_memory(&proxy.id);
+            fs::remove_file(&file).unwrap();
+          } else {
+            let mut edited = proxy.clone();
+            edited.name = "Newer local edit".to_string();
+            edited.updated_at = Some(2);
+            edited.sync_enabled = false;
+            fs::write(&file, serde_json::to_vec(&edited).unwrap()).unwrap();
+            PROXY_MANAGER.upsert_stored_proxy(edited);
+          }
+          release.notify_one();
+        })
+      })
+      .await
+      .expect("upload and concurrent local mutation should complete");
+      result.unwrap();
+      PROXY_MANAGER.remove_from_memory(&proxy.id);
+      if delete {
+        assert!(
+          !file.exists(),
+          "completed upload resurrected a tombstoned proxy JSON"
+        );
+      } else {
+        let saved: StoredProxy = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved.name, "Newer local edit");
+        assert_eq!(saved.updated_at, Some(2));
+        assert!(!saved.sync_enabled);
+        assert!(saved.last_sync.is_some());
+      }
+    }
+    server.abort();
+  }
 
   #[test]
   fn test_critical_failure_message_carries_the_cause() {
