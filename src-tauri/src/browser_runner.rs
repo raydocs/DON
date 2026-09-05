@@ -428,6 +428,7 @@ impl BrowserRunner {
         vpn_id: String,
         created: bool,
         profile_name: String,
+        _launch_lock: tokio::sync::MutexGuard<'static, ()>,
       }
       impl Drop for VpnLaunchGuard {
         fn drop(&mut self) {
@@ -469,6 +470,7 @@ impl BrowserRunner {
                 vpn_id: vpn_id.clone(),
                 created: started.created,
                 profile_name: profile.name.clone(),
+                _launch_lock: started.launch_lock,
               });
               if let Some(port) = started.config.local_port {
                 upstream_proxy = Some(ProxySettings {
@@ -864,6 +866,9 @@ impl BrowserRunner {
         .map_err(|error| -> Box<dyn std::error::Error + Send + Sync> {
           std::io::Error::other(error.to_string()).into()
         })?;
+      // The browser is now visible to failed-creator cleanup. Release VPN
+      // adoption serialization before emitting events or doing post-launch work.
+      drop(vpn_launch_guard.take());
       self
         .running_profile_watch
         .register(&updated_profile.id.to_string());
