@@ -1511,6 +1511,7 @@ pub async fn ensure_active_browsers_downloaded(
             speed_bytes_per_sec: 0.0,
             eta_seconds: None,
             stage: "error".to_string(),
+            error_type: Some("download_timeout".to_string()),
           };
           let _ = crate::events::emit("download-progress", &progress);
         }
