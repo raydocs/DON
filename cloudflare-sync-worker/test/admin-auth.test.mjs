@@ -157,7 +157,15 @@ describe("admin auth: forgeable headers are not trusted", () => {
   });
 
   it("configuration cannot re-enable the forged-header bypass", async () => {
-    for (const v of ["true", "false", "yes", "1", undefined, "TRUE", " true "]) {
+    for (const v of [
+      "true",
+      "false",
+      "yes",
+      "1",
+      undefined,
+      "TRUE",
+      " true ",
+    ]) {
       const env = { ADMIN_EMAILS: ADMIN_EMAIL, ADMIN_DEV_BYPASS: v };
       const res = await call(
         "/api/admin/users",
