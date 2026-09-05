@@ -8,6 +8,7 @@ import { getDerivedThemeColors, THEMES } from "../../src/lib/themes.ts";
 import { withApp } from "../lib/app.mjs";
 import {
   extensionZipBase64,
+  wireGuardFixture,
   writeUnpackedExtension,
 } from "../lib/fixtures.mjs";
 
@@ -2021,6 +2022,134 @@ test("bulk delete skips a proxy used by a non-synced profile (no direct-launch f
       const remaining = await app.invoke("get_stored_proxies");
       if (remaining.some((p) => p.id === proxy.id)) {
         await app.invoke("delete_stored_proxy", { proxyId: proxy.id });
+      }
+    }
+  });
+});
+
+test("bulk delete skips a VPN used by a non-synced profile", async () => {
+  await withApp("ui-bulk-delete-in-use-vpn-guard", async (app) => {
+    const vpnName = "E2E In-Use VPN";
+    const vpn = await app.invoke("create_vpn_config_manual", {
+      name: vpnName,
+      vpnType: "WireGuard",
+      configData: wireGuardFixture(),
+    });
+    const profile = await app.invoke("create_browser_profile_new", {
+      name: "E2E Non-Synced VPN Profile",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    await app.invoke("update_profile_vpn", {
+      profileId: profile.id,
+      vpnId: vpn.id,
+    });
+    await app.invoke("set_profile_sync_mode", {
+      profileId: profile.id,
+      syncMode: "Disabled",
+    });
+
+    try {
+      assert.equal(
+        await app.invoke("is_vpn_in_use_by_synced_profile", { vpnId: vpn.id }),
+        false,
+        "synced-only in-use is false because the profile is not synced",
+      );
+
+      await app.clickSelector('[aria-label="Network"]');
+      await app.clickText(en.proxies.management.tabVpns, {
+        exact: false,
+        roles: ["tab"],
+      });
+      await app.waitForText(vpnName);
+
+      const rowControls = await app.execute(
+        `
+          const name = arguments[0];
+          const row = [...document.querySelectorAll("table tr")]
+            .find((tr) => (tr.textContent || "").includes(name));
+          if (!row) return { checkbox: null, deleteDisabled: null };
+          const buttons = [...row.querySelectorAll("button")];
+          const trash = buttons[buttons.length - 1];
+          return {
+            checkbox: row.querySelector('[role="checkbox"][aria-label="Select row"]'),
+            deleteDisabled: trash ? trash.disabled : null,
+          };
+        `,
+        [vpnName],
+      );
+      assert.equal(
+        rowControls.deleteDisabled,
+        true,
+        "the per-row delete button must be disabled for a VPN in use by any profile",
+      );
+      assert.ok(rowControls.checkbox, "selectable VPN row checkbox found");
+      await app.clickElement(rowControls.checkbox, "VPN row checkbox");
+      await app.waitFor(
+        () =>
+          app.execute(
+            `return Boolean(document.querySelector('[role="toolbar"]'));`,
+          ),
+        { description: "VPN bulk action toolbar to appear" },
+      );
+      const toolbarDelete = await app.execute(
+        `return document.querySelector('[role="toolbar"] button.bg-destructive');`,
+      );
+      assert.ok(toolbarDelete, "VPN bulk-delete action button found");
+      await app.clickElement(toolbarDelete, "VPN bulk-delete toolbar button");
+      await app.waitForText(en.proxies.bulkDelete.vpnsTitle);
+      await app.clickTextIn(
+        '[role="dialog"]',
+        en.proxies.bulkDelete.confirmButton.replace("{{count}}", "1"),
+        { roles: ["button"] },
+      );
+
+      const skippedToast = en.proxies.bulkDelete.vpnsSkippedSome.replace(
+        "{{count}}",
+        "1",
+      );
+      await app.waitFor(
+        async () =>
+          (await toastTexts(app)).some((text) => text.includes(skippedToast)),
+        { description: "VPN skipped-some warning toast" },
+      );
+      assert.ok(
+        (await app.invoke("list_vpn_configs")).some(
+          (item) => item.id === vpn.id,
+        ),
+        "the in-use VPN must not be deleted by bulk delete",
+      );
+      const persisted = (await app.invoke("list_browser_profiles")).find(
+        (item) => item.id === profile.id,
+      );
+      assert.equal(
+        persisted?.vpn_id,
+        vpn.id,
+        "the VPN reference must remain valid",
+      );
+      assert.equal(
+        (await toastTexts(app)).filter((text) =>
+          text.includes(en.vpns.management.deleteSuccess),
+        ).length,
+        0,
+        "no success toast should fire because nothing was deleted",
+      );
+    } finally {
+      await app.invoke("delete_profile", { profileId: profile.id });
+      if (
+        (await app.invoke("list_vpn_configs")).some(
+          (item) => item.id === vpn.id,
+        )
+      ) {
+        await app.invoke("delete_vpn_config", { vpnId: vpn.id });
       }
     }
   });
