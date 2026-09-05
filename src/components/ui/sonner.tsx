@@ -9,6 +9,7 @@ const Toaster = ({ ...props }: ToasterProps) => {
   return (
     <Sonner
       theme={theme as ToasterProps["theme"]}
+      position="bottom-left"
       className="group toaster"
       style={
         {
@@ -22,7 +23,6 @@ const Toaster = ({ ...props }: ToasterProps) => {
         style: {
           zIndex: 10001,
           pointerEvents: "auto",
-          backdropFilter: "saturate(1.2)",
         },
       }}
       {...props}

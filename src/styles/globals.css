@@ -278,42 +278,229 @@
   animation-duration: 200ms;
 }
 
-/* Translucent material for floating chrome (modals, popovers, menus).
-   Uses theme variables so it adapts to every theme; falls back to the solid
-   surface when the user prefers reduced transparency. Never stack two
-   material surfaces on top of each other. */
+/* Frame: opaque data surfaces, a single optical navigation layer. Theme
+   colors remain authoritative, including custom high-contrast palettes. */
+:root {
+  --frame-space: 12px;
+  --frame-radius: 16px;
+  --frame-control-radius: 8px;
+  --frame-response: 120ms;
+  --frame-edge: var(--border);
+  --frame-highlight: var(--border);
+  --frame-shadow: none;
+}
+
+@supports (color: color-mix(in srgb, currentColor 50%, transparent)) {
+  :root {
+    --frame-edge: color-mix(in srgb, var(--foreground) 16%, var(--background));
+    --frame-highlight: color-mix(in srgb, var(--foreground) 7%, transparent);
+    --frame-shadow: 0 8px 24px
+      color-mix(in srgb, var(--background) 60%, transparent);
+  }
+}
+
+.don-workspace {
+  background: var(--card);
+}
+
+.don-workspace-body {
+  gap: var(--frame-space);
+  padding: var(--frame-space);
+  padding-top: 4px;
+}
+
+.don-workspace-main {
+  border: 1px solid var(--frame-edge);
+  border-radius: var(--frame-radius);
+  background: var(--background);
+  box-shadow: var(--frame-shadow);
+}
+
+.don-nav {
+  width: 48px;
+  padding: 8px 4px;
+  z-index: 20;
+  isolation: isolate;
+  border: 1px solid var(--frame-edge);
+  border-radius: var(--frame-radius);
+  background: var(--card);
+  background-image: linear-gradient(
+    135deg,
+    var(--frame-highlight),
+    transparent 60%
+  );
+  box-shadow: inset 0 1px var(--frame-highlight);
+}
+
+.don-nav button {
+  min-width: 32px;
+  min-height: 36px;
+  border-radius: var(--frame-control-radius);
+}
+
+.don-nav button:focus-visible {
+  outline-offset: -2px;
+}
+
+.don-nav-item {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  transition:
+    background-color var(--frame-response),
+    color var(--frame-response);
+}
+
+.don-nav-label {
+  display: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.don-nav [aria-current="page"] {
+  box-shadow: inset 0 1px var(--frame-highlight);
+}
+
+.don-nav-indicator {
+  left: -1px;
+  top: 10px;
+  bottom: 10px;
+  background: var(--primary-text);
+}
+
+@media (min-width: 1100px) {
+  .don-nav {
+    width: 176px;
+    padding: 12px 8px;
+  }
+
+  .don-nav-item {
+    justify-content: flex-start;
+    padding-inline: 12px;
+  }
+
+  .don-nav-label {
+    display: inline;
+  }
+}
+
+@media (max-width: 700px) {
+  :root {
+    --frame-space: 4px;
+    --frame-radius: 10px;
+  }
+}
+
+.don-welcome {
+  border-color: var(--frame-edge);
+  border-radius: 20px;
+  box-shadow:
+    var(--frame-shadow),
+    inset 0 1px var(--frame-highlight);
+}
+
+.don-welcome-intro {
+  display: grid;
+  gap: 24px;
+}
+
+.don-welcome-identity {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 24px;
+  padding: 24px;
+  border-radius: var(--frame-radius);
+  background: var(--card);
+  border: 1px solid var(--frame-edge);
+  text-align: start;
+}
+
+.don-welcome-features {
+  align-self: center;
+  padding: 8px;
+}
+
+.don-welcome-actions {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+@media (min-width: 760px) {
+  .don-welcome-intro {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .don-welcome-actions {
+    grid-column: 1 / -1;
+  }
+}
+
+.don-empty {
+  margin: 24px auto;
+  max-width: 560px;
+  padding: 32px;
+  border: 1px solid var(--frame-edge);
+  border-radius: var(--frame-radius);
+  background: var(--card);
+  box-shadow: inset 0 1px var(--frame-highlight);
+  white-space: normal;
+}
+
+:where(button, a, input, textarea, select, [tabindex]):focus-visible {
+  outline: 2px solid var(--primary-text);
+  outline-offset: 3px;
+}
+
+/* Sensitive forms and data never share a translucent content plane. */
 .surface-material {
-  background-color: color-mix(in oklab, var(--background) 85%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  backdrop-filter: blur(20px) saturate(1.4);
+  background-color: var(--background);
 }
 
 .surface-material-popover {
-  background-color: color-mix(in oklab, var(--popover) 85%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  backdrop-filter: blur(20px) saturate(1.4);
+  background-color: var(--popover);
 }
 
 .surface-material-card {
-  background-color: color-mix(in oklab, var(--card) 85%, transparent);
-  -webkit-backdrop-filter: blur(20px) saturate(1.4);
-  backdrop-filter: blur(20px) saturate(1.4);
+  background-color: var(--card);
 }
 
-@media (prefers-reduced-transparency: reduce) {
-  .surface-material {
-    background-color: var(--background);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+@supports (backdrop-filter: blur(8px)) {
+  @media (prefers-reduced-motion: no-preference) and (
+      prefers-reduced-transparency: no-preference
+    ) and (prefers-contrast: no-preference) {
+    /* Keep the optical layer independent of interactive controls. */
+    .don-nav::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      z-index: -1;
+      pointer-events: none;
+      border-radius: inherit;
+      background-color: color-mix(in srgb, var(--card) 96%, transparent);
+      -webkit-backdrop-filter: blur(8px);
+      backdrop-filter: blur(8px);
+    }
   }
-  .surface-material-popover {
-    background-color: var(--popover);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+}
+
+@media (forced-colors: active) {
+  .don-nav,
+  .don-workspace-main,
+  .don-welcome-identity,
+  .don-empty {
+    border-color: CanvasText;
+    box-shadow: none;
   }
-  .surface-material-card {
-    background-color: var(--card);
-    -webkit-backdrop-filter: none;
-    backdrop-filter: none;
+
+  .don-nav [aria-current="page"] {
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
   }
 }
