@@ -2097,7 +2097,7 @@ export default function Home() {
         : t(`pageTitle.${currentPage}`);
 
   return (
-    <div className="flex h-dvh flex-col bg-background font-(family-name:--font-geist-sans)">
+    <div className="don-workspace flex h-dvh flex-col font-(family-name:--font-geist-sans)">
       <CloseConfirmDialog />
       <HomeHeader
         onCreateProfileDialogOpen={setCreateProfileDialogOpen}
@@ -2112,7 +2112,7 @@ export default function Home() {
         onGroupSelect={handleSelectGroup}
         pageTitle={subPageTitle}
       />
-      <div className="flex min-h-0 flex-1">
+      <div className="don-workspace-body flex min-h-0 flex-1">
         <RailNav
           currentPage={currentPage}
           onNavigate={handleRailNavigate}
@@ -2121,10 +2121,10 @@ export default function Home() {
           }}
           cookieBotRunning={Object.keys(cookieBotLiveSessions).length > 0}
         />
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        <main className="don-workspace-main flex min-w-0 flex-1 flex-col overflow-hidden">
           {currentPage === "profiles" && (
             <motion.div
-              initial={{ opacity: 0, y: 8 }}
+              initial={false}
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
               className="flex min-h-0 flex-1 flex-col px-3 pt-2.5"

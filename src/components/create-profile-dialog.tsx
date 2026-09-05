@@ -837,7 +837,7 @@ export function CreateProfileDialog({
                         </div>
 
                         {/* DON Claude isolation workflow */}
-                        <div className="space-y-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+                        <div className="space-y-3 rounded-lg border border-primary/30 bg-card p-4">
                           <div className="flex items-center gap-x-2">
                             <Checkbox
                               id="claude-mode"
@@ -1480,14 +1480,16 @@ export function CreateProfileDialog({
 
                         {/* DNS Blocklist */}
                         <div className="space-y-2">
-                          <Label>{t("dnsBlocklist.title")}</Label>
+                          <Label htmlFor="create-profile-dns-blocklist">
+                            {t("dnsBlocklist.title")}
+                          </Label>
                           <Select
                             value={dnsBlocklist || "none"}
                             onValueChange={(val) => {
                               setDnsBlocklist(val === "none" ? "" : val);
                             }}
                           >
-                            <SelectTrigger>
+                            <SelectTrigger id="create-profile-dns-blocklist">
                               <SelectValue
                                 placeholder={t("dnsBlocklist.none")}
                               />
@@ -1511,7 +1513,9 @@ export function CreateProfileDialog({
                         {/* Extension Group */}
                         {extensionGroups.length > 0 && (
                           <div className="space-y-2">
-                            <Label>{t("extensions.extensionGroup")}</Label>
+                            <Label htmlFor="create-profile-extension-group">
+                              {t("extensions.extensionGroup")}
+                            </Label>
                             <Select
                               value={selectedExtensionGroupId ?? "none"}
                               onValueChange={(val) => {
@@ -1520,7 +1524,7 @@ export function CreateProfileDialog({
                                 );
                               }}
                             >
-                              <SelectTrigger>
+                              <SelectTrigger id="create-profile-extension-group">
                                 <SelectValue
                                   placeholder={t("profileInfo.values.none")}
                                 />
