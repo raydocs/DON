@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { adminHtmlContent } from "./admin_html.js";
 import { safeEqual } from "./auth.js";
+import { verifyCfAccessJwt } from "./cf-access.js";
 import type {
   CloudProfileRecord,
   Env,
@@ -15,46 +16,39 @@ export const adminRouter = new Hono<{
   Variables: { user?: UserContext };
 }>();
 
-// Helper: check if request is authenticated via Cloudflare Access
-function getCfAccessUser(c: any): { email: string } | null {
-  // 1. Direct header injected by Cloudflare Access Edge
-  let email = c.req
-    .header("cf-access-authenticated-user-email")
-    ?.trim()
-    .toLowerCase();
-
-  // 2. JWT assertion header or CF_Authorization cookie from Cloudflare Access
-  if (!email) {
-    const jwt =
-      c.req.header("cf-access-jwt-assertion") ||
-      c.req.header("cookie")?.match(/CF_Authorization=([^;]+)/)?.[1];
-    if (jwt) {
-      try {
-        const parts = jwt.split(".");
-        if (parts.length === 3) {
-          const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-          const payload = JSON.parse(atob(base64));
-          if (payload.email) {
-            email = String(payload.email).trim().toLowerCase();
-          }
-        }
-      } catch {}
-    }
-  }
-
-  // 3. Optional testing header
-  if (!email) {
-    email = c.req.header("x-admin-email")?.trim().toLowerCase();
+// Resolve an admin identity from Cloudflare Zero Trust Access, if present.
+//
+// Identity is derived ONLY from a cryptographically verified Cloudflare
+// Access JWT (signature against the team JWKS + iss/aud checks). Unverified
+// client-controlled headers are never trusted as an identity claim, because
+// they are forgeable whenever a request reaches the Worker without a
+// correctly-scoped Access policy in front of `/api/admin/*`. The raw
+// `cf-access-authenticated-user-email` header is intentionally NOT trusted
+// here — the verified JWT already carries the email and is the verifiable
+// source.
+async function getCfAccessUser(c: any): Promise<{ email: string } | null> {
+  // 1. Verified Cloudflare Access JWT from the assertion header or the
+  //    CF_Authorization cookie. Both sources go through the same signature /
+  //    iss / aud verification.
+  let email: string | null = null;
+  const jwt =
+    c.req.header("cf-access-jwt-assertion") ||
+    c.req.header("cookie")?.match(/CF_Authorization=([^;]+)/)?.[1];
+  if (jwt) {
+    email = await verifyCfAccessJwt(jwt, c.env as Env);
   }
 
   if (!email) return null;
 
-  const allowedEmails = (c.env.ADMIN_EMAILS || "ruiruiwan8@gmail.com")
+  // Defense-in-depth: even a verified Access JWT is only admitted when the
+  // email is in the configured allow-list. No hard-coded default — if
+  // ADMIN_EMAILS is unset the allow-list is empty (Access login disabled).
+  const allowedEmails = (c.env.ADMIN_EMAILS || "")
     .split(",")
     .map((e: string) => e.trim().toLowerCase())
     .filter(Boolean);
 
-  if (allowedEmails.includes(email) || allowedEmails.includes("*")) {
+  if (allowedEmails.includes("*") || allowedEmails.includes(email)) {
     return { email };
   }
   return null;
@@ -62,7 +56,7 @@ function getCfAccessUser(c: any): { email: string } | null {
 
 // 1. GET /api/admin/auth-status (allows frontend to detect Cloudflare Access without prompt)
 adminRouter.get("/api/admin/auth-status", async (c) => {
-  const cfUser = getCfAccessUser(c);
+  const cfUser = await getCfAccessUser(c);
   if (cfUser) {
     return c.json({
       authenticated: true,
@@ -91,8 +85,8 @@ adminRouter.get("/api/admin/auth-status", async (c) => {
 
 // Admin Authentication Middleware
 adminRouter.use("/api/admin/*", async (c, next) => {
-  // 1. Check Cloudflare Access Zero Trust header
-  const cfUser = getCfAccessUser(c);
+  // 1. Check Cloudflare Access Zero Trust identity (cryptographically verified)
+  const cfUser = await getCfAccessUser(c);
   if (cfUser) {
     c.set("user", {
       userId: `cf_${cfUser.email}`,
