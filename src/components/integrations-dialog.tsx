@@ -114,7 +114,6 @@ export function IntegrationsDialog({
   });
   const [apiServerPort, setApiServerPort] = useState<number | null>(null);
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
-  const [, setMcpRunning] = useState(false);
   const [showApiToken, setShowApiToken] = useState(false);
   const [showMcpUrl, setShowMcpUrl] = useState(false);
   const [isApiStarting, setIsApiStarting] = useState(false);
@@ -144,15 +143,6 @@ export function IntegrationsDialog({
     }
   }, []);
 
-  const loadMcpServerStatus = useCallback(async () => {
-    try {
-      const isRunning = await invoke<boolean>("get_mcp_server_status");
-      setMcpRunning(isRunning);
-    } catch (e) {
-      console.error("Failed to get MCP server status:", e);
-    }
-  }, []);
-
   const loadApiServerStatus = useCallback(async () => {
     try {
       const port = await invoke<number | null>("get_api_server_status");
@@ -176,17 +166,9 @@ export function IntegrationsDialog({
       void loadSettings();
       void loadApiServerStatus();
       void loadMcpConfig();
-      void loadMcpServerStatus();
       void loadAgents();
     }
-  }, [
-    isOpen,
-    loadSettings,
-    loadApiServerStatus,
-    loadMcpConfig,
-    loadMcpServerStatus,
-    loadAgents,
-  ]);
+  }, [isOpen, loadSettings, loadApiServerStatus, loadMcpConfig, loadAgents]);
 
   const handleApiToggle = async (enabled: boolean) => {
     setIsApiStarting(true);
