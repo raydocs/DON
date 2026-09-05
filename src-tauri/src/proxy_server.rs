@@ -850,8 +850,57 @@ async fn handle_http_via_socks4(
 
   let mut hyper_response = Response::new(Full::new(Bytes::from(body)));
   *hyper_response.status_mut() = StatusCode::from_u16(status_code).unwrap();
+  copy_upstream_response_headers(&response_buffer[..header_end], hyper_response.headers_mut());
 
   Ok(hyper_response)
+}
+
+fn copy_upstream_response_headers(raw: &[u8], headers: &mut hyper::HeaderMap) {
+  let mut upstream = hyper::HeaderMap::new();
+  for line in raw.split(|b| *b == b'\n').skip(1) {
+    let line = line.strip_suffix(b"\r").unwrap_or(line);
+    if line.is_empty() {
+      break;
+    }
+    let Some(colon) = line.iter().position(|b| *b == b':') else {
+      continue;
+    };
+    if let (Ok(name), Ok(value)) = (
+      hyper::header::HeaderName::from_bytes(&line[..colon]),
+      hyper::header::HeaderValue::from_bytes(line[colon + 1..].trim_ascii()),
+    ) {
+      upstream.append(name, value);
+    }
+  }
+
+  // Connection can nominate additional hop-by-hop fields. Keep repeated end-to-end
+  // fields (notably Set-Cookie) and raw header bytes; Hyper owns response framing.
+  let connection_headers: HashSet<_> = upstream
+    .get_all(hyper::header::CONNECTION)
+    .iter()
+    .filter_map(|value| value.to_str().ok())
+    .flat_map(|value| value.split(','))
+    .filter_map(|name| hyper::header::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+    .collect();
+  for (name, value) in &upstream {
+    if !connection_headers.contains(name)
+      && !matches!(
+        name.as_str(),
+        "connection"
+          | "keep-alive"
+          | "proxy-connection"
+          | "proxy-authenticate"
+          | "proxy-authorization"
+          | "te"
+          | "trailer"
+          | "transfer-encoding"
+          | "upgrade"
+          | "content-length"
+      )
+    {
+      headers.append(name, value.clone());
+    }
+  }
 }
 
 /// Handle plain HTTP requests through a Shadowsocks upstream.
@@ -952,7 +1001,10 @@ async fn handle_http_via_shadowsocks(
 
   // Parse the raw HTTP response
   let response_str = String::from_utf8_lossy(&response_buf);
-  let header_end = response_str.find("\r\n\r\n").unwrap_or(response_str.len());
+  let header_end = response_buf
+    .windows(4)
+    .position(|w| w == b"\r\n\r\n")
+    .unwrap_or(response_buf.len());
   let status_line = response_str
     .lines()
     .next()
@@ -971,6 +1023,7 @@ async fn handle_http_via_shadowsocks(
   let mut hyper_response = Response::new(Full::new(Bytes::from(body.to_vec())));
   *hyper_response.status_mut() =
     StatusCode::from_u16(status_code).unwrap_or(StatusCode::BAD_GATEWAY);
+  copy_upstream_response_headers(&response_buf[..header_end], hyper_response.headers_mut());
 
   Ok(hyper_response)
 }
@@ -2202,6 +2255,102 @@ pub(crate) async fn tunnel_streams(
 mod tests {
   use super::*;
   use std::io::Write;
+
+  #[tokio::test]
+  async fn socks4_http_forwards_gzip_and_repeated_cookies() {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(b"upstream response body").unwrap();
+    let compressed = encoder.finish().unwrap();
+    let expected_body = compressed.clone();
+    let upstream = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream_url = format!("socks4://{}", upstream.local_addr().unwrap());
+    let upstream_task = tokio::spawn(async move {
+      let (mut stream, _) = upstream.accept().await.unwrap();
+      let mut handshake = [0; 9];
+      stream.read_exact(&mut handshake).await.unwrap();
+      assert_eq!(&handshake[..2], &[4, 1]);
+      assert_eq!(&handshake[4..], &[0, 0, 0, 1, 0]);
+      while stream.read_u8().await.unwrap() != 0 {}
+      stream
+        .write_all(&[0, 0x5a, 0, 0, 0, 0, 0, 0])
+        .await
+        .unwrap();
+      let mut request = Vec::new();
+      while !request.ends_with(b"\r\n\r\n") {
+        request.push(stream.read_u8().await.unwrap());
+      }
+      let headers = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nSet-Cookie: first=1\r\nSet-Cookie: second=2\r\nConnection: close, X-Hop\r\nX-Hop: remove\r\n\r\n",
+        compressed.len()
+      );
+      stream.write_all(headers.as_bytes()).await.unwrap();
+      stream.write_all(&compressed).await.unwrap();
+    });
+    let proxy = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let proxy_task = tokio::spawn(async move {
+      let (stream, _) = proxy.accept().await.unwrap();
+      http1::Builder::new()
+        .serve_connection(
+          TokioIo::new(stream),
+          service_fn(move |req| {
+            let upstream_url = upstream_url.clone();
+            async move { handle_http_via_socks4(req, &upstream_url).await }
+          }),
+        )
+        .await
+        .unwrap();
+    });
+    let client = reqwest::Client::builder()
+      .proxy(reqwest::Proxy::http(proxy_url).unwrap())
+      .no_gzip()
+      .timeout(std::time::Duration::from_secs(5))
+      .build()
+      .unwrap();
+    let response = client
+      .get("http://fixture.invalid/headers")
+      .header("Connection", "close")
+      .send()
+      .await
+      .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/plain");
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    assert_eq!(response.headers().get_all("set-cookie").iter().count(), 2);
+    assert!(!response.headers().contains_key("x-hop"));
+    assert_eq!(response.bytes().await.unwrap(), expected_body);
+    upstream_task.await.unwrap();
+    proxy_task.await.unwrap();
+  }
+
+  #[test]
+  fn manual_http_response_preserves_end_to_end_headers() {
+    let mut headers = hyper::HeaderMap::new();
+    copy_upstream_response_headers(
+      b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Encoding: gzip\r\nContent-Disposition: attachment; filename=test.txt\r\nCache-Control: max-age=60\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nX-Raw: \xff\r\nContent-Length: 10\r\nConnection: close, X-Hop\r\nConnection: X-Other\r\nX-Hop: secret\r\nX-Other: secret\r\nTransfer-Encoding: chunked\r\nKeep-Alive: timeout=5\r\n\r\n",
+      &mut headers,
+    );
+    assert_eq!(headers["content-type"], "text/plain");
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert_eq!(
+      headers["content-disposition"],
+      "attachment; filename=test.txt"
+    );
+    assert_eq!(headers["cache-control"], "max-age=60");
+    assert_eq!(headers["x-raw"].as_bytes(), b"\xff");
+    let cookies: Vec<_> = headers.get_all("set-cookie").iter().collect();
+    assert_eq!(cookies, ["a=1", "b=2"]);
+    for name in [
+      "connection",
+      "content-length",
+      "transfer-encoding",
+      "keep-alive",
+      "x-hop",
+      "x-other",
+    ] {
+      assert!(!headers.contains_key(name), "unexpected {name}");
+    }
+  }
 
   /// Build an upstream URL with `urlencoding::encode`-d user/pass,
   /// mirroring what `proxy_manager::build_proxy_url` actually emits
