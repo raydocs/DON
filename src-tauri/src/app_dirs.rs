@@ -416,7 +416,7 @@ mod tests {
 
   #[test]
   fn window_state_follows_a_relocated_data_dir() {
-    let tmp = PathBuf::from("/tmp/donut-relocated");
+    let tmp = std::env::temp_dir().join("donut-relocated");
     let _guard = set_test_data_dir(tmp.clone());
     // data_dir is overridden, so the file tracks it rather than app_config_dir.
     assert_eq!(
