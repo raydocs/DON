@@ -1,10 +1,126 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
+import ts from "typescript";
 
 import { planDownloadErrorToast } from "./download-error-toast.ts";
 
 const BROWSER = "Wayfern";
 const VERSION = "151.0.7922.71";
+
+async function downloadHarness() {
+  const listeners = new Map();
+  const toasts = new Map();
+  let rejectDownload;
+  const pending = new Promise((_, reject) => {
+    rejectDownload = reject;
+  });
+  const modules = {
+    "@tauri-apps/api/core": {
+      invoke: async (command) => {
+        if (command === "is_browser_supported_on_platform") return true;
+        if (command === "download_browser") return pending;
+        return [];
+      },
+    },
+    "@tauri-apps/api/event": {
+      listen: async (name, callback) => {
+        listeners.set(name, callback);
+        return () => listeners.delete(name);
+      },
+    },
+    react: {
+      useCallback: (callback) => callback,
+      useEffect: (callback) => callback(),
+      useState: (initial) => [initial, () => {}],
+    },
+    "@/i18n": { t: (key) => key },
+    "@/lib/browser-utils": { getBrowserDisplayName: () => BROWSER },
+    "@/lib/download-error-toast": { planDownloadErrorToast },
+    "@/lib/onboarding-signal": { isOnboardingActive: () => false },
+    "@/lib/toast-utils": {
+      dismissToast: (id) => toasts.delete(id),
+      showErrorToast: (title, options) => {
+        toasts.set(options?.id ?? Symbol(), { title, ...options });
+      },
+    },
+  };
+  const source = readFileSync(
+    new URL("../hooks/use-browser-download.ts", import.meta.url),
+    "utf8",
+  );
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS },
+  });
+  const context = {
+    exports: {},
+    require: (name) => {
+      assert.ok(modules[name], `unexpected import: ${name}`);
+      return modules[name];
+    },
+    console: { error: () => {} },
+  };
+  vm.runInNewContext(outputText, context);
+  // biome-ignore lint/correctness/useHookAtTopLevel: React hooks are stubbed in this isolated event harness.
+  const hook = context.exports.useBrowserDownload();
+  await Promise.resolve();
+  return {
+    hook,
+    toasts,
+    rejectDownload,
+    emitError: (version = VERSION) =>
+      listeners.get("download-progress")({
+        payload: {
+          browser: "wayfern",
+          version,
+          stage: "error",
+          error_type: "download_failed",
+        },
+      }),
+  };
+}
+
+for (const eventFirst of [true, false]) {
+  test(`one error toast when progress ${eventFirst ? "precedes" : "follows"} invoke rejection`, async () => {
+    const harness = await downloadHarness();
+    const result = assert.rejects(
+      harness.hook.downloadBrowser("wayfern", VERSION),
+      /network unavailable/,
+    );
+    if (eventFirst) await harness.emitError();
+    harness.rejectDownload(new Error("network unavailable"));
+    await result;
+    if (!eventFirst) await harness.emitError();
+    assert.equal(harness.toasts.size, 1);
+    assert.equal(
+      [...harness.toasts.values()][0].title,
+      "browserDownload.toast.downloadFailed",
+    );
+  });
+}
+
+test("background failures remain visible and different versions remain distinct", async () => {
+  const harness = await downloadHarness();
+  await harness.emitError();
+  await harness.emitError("another-version");
+  assert.equal(harness.toasts.size, 2);
+});
+
+test("invoke failure without a progress event still shows the concrete error", async () => {
+  const harness = await downloadHarness();
+  const result = assert.rejects(
+    harness.hook.downloadBrowser("wayfern", VERSION),
+    /network unavailable/,
+  );
+  harness.rejectDownload("network unavailable");
+  await result;
+  assert.equal(harness.toasts.size, 1);
+  assert.equal(
+    [...harness.toasts.values()][0].description,
+    "network unavailable",
+  );
+});
 
 test("extraction_failed keeps the extraction-specific label and description", () => {
   const plan = planDownloadErrorToast("extraction_failed", BROWSER, VERSION);

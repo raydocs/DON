@@ -262,6 +262,7 @@ export function useBrowserDownload() {
               version,
             }),
             {
+              id: `download-error-${browserStr}-${version}`,
               description: errorMessage,
               duration: 8000,
             },
@@ -412,7 +413,11 @@ export function useBrowserDownload() {
                 );
                 const title = i18n.t(plan.titleKey, plan.titleParams);
                 const description = i18n.t(plan.descriptionKey);
-                showErrorToast(title, { description });
+                // The invoke rejection and this event describe the same failure.
+                showErrorToast(title, {
+                  id: `download-error-${progress.browser}-${progress.version}`,
+                  description,
+                });
               }
             } else if (progress.stage === "completed") {
               setDownloadingBrowsers((prev) => {
