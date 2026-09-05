@@ -49,7 +49,26 @@ npx wrangler secret put SYNC_TOKEN
 ```
 *(输入你自定义的强密码，如 `my-super-secret-sync-token-2026`)*
 
-### 5. 一键部署到 Cloudflare Workers
+> **安全提醒**：建议同步轮换默认的 `ADMIN_EMAILS`，避免使用仓库内公开默认值：
+> ```bash
+> npx wrangler secret put ADMIN_EMAILS   # 逗号分隔的管理员邮箱，例如 alice@example.com,bob@example.com
+> ```
+
+### 5. （可选）启用 Cloudflare Zero Trust Access 免密管理员登录
+若希望通过 Cloudflare Access 实现浏览器免密登录管理控制台，需要：
+
+1. 在 Cloudflare Zero Trust 控制台为该 Worker（尤其是 `/api/admin/*` 路由）创建一个 Application 与访问策略，使所有到达管理 API 的请求都经过 Access 鉴权。
+2. 在应用配置中记录 **Team Domain**（形如 `https://<your-team>.cloudflareaccess.com`）与 **Application Audience ID**（一个 UUID）。
+3. 通过 secret 配置 JWT 校验所需的环境变量（二者缺一不可，任一为空则 Access 登录路径自动关闭、回退到 `SYNC_TOKEN` / D1 管理员 Token）：
+   ```bash
+   npx wrangler secret put CF_ACCESS_TEAM_DOMAIN   # 例如 https://myteam.cloudflareaccess.com
+   npx wrangler secret put CF_ACCESS_AUD           # Application Audience ID (UUID)
+   ```
+4. 配置好 `ADMIN_EMAILS`（步骤 4）以指定哪些 Access 邮箱可获准管理员身份。
+
+启用后，Worker 仅信任经过 **签名 + `iss` + `aud` 校验** 的 `Cf-Access-Jwt-Assertion` / `CF_Authorization` JWT；任何客户端自行伪造的 `cf-access-*`、`cf-access-jwt-assertion`（含 `alg: none` 未签名令牌）或 `x-admin-email` 头都不会被授予管理员身份。
+
+### 6. 一键部署到 Cloudflare Workers
 ```bash
 npx wrangler deploy
 ```
