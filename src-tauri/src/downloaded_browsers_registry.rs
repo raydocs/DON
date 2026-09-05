@@ -1501,7 +1501,11 @@ mod tests {
     let update_calls = RefCell::new(Vec::<uuid::Uuid>::new());
     let mut update = |profile: &BrowserProfile, _version: &str| {
       update_calls.borrow_mut().push(profile.id);
-      Ok::<(), String>(())
+      if profile.name == "stale1" {
+        Err("injected profile update failure".to_string())
+      } else {
+        Ok(())
+      }
     };
 
     let consolidated = registry
@@ -1543,7 +1547,8 @@ mod tests {
       "running-stale profile must not appear in consolidated updates; got {running_msg_count} in {consolidated:?}",
     );
 
-    // (2) Exactly one "Updated" message per stale profile, no duplicates.
+    // (2) Successful profiles produce one message each, while a failed update
+    // remains log-only and does not prevent later updates or cleanup.
     for i in 0..stale.len() {
       let msg = format!("Updated profile 'stale{i}' from {old_version} to {new_version}");
       let count = consolidated
@@ -1551,8 +1556,9 @@ mod tests {
         .filter(|m| m.as_str() == msg.as_str())
         .count();
       assert_eq!(
-        count, 1,
-        "expected exactly one {msg:?}; got {count} in {consolidated:?}",
+        count,
+        usize::from(i != 1),
+        "expected the failed update to be omitted and each success recorded once; got {count} for {msg:?} in {consolidated:?}",
       );
     }
 
@@ -1568,9 +1574,9 @@ mod tests {
     );
     assert_eq!(
       consolidated.len(),
-      stale.len() + 1,
-      "expected {} Updated + 1 Removed entries; got {consolidated:?}",
       stale.len(),
+      "expected {} successful updates + 1 removal; got {consolidated:?}",
+      stale.len() - 1,
     );
 
     // (4) The old version is deregistered and its binary deleted; the latest
