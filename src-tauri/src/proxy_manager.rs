@@ -2365,13 +2365,12 @@ impl ProxyManager {
 
     // Clean up orphaned VPN worker configs where the worker process is dead
     {
-      use crate::proxy_storage::is_process_running;
       use crate::vpn_worker_storage::{delete_vpn_worker_config, list_vpn_worker_configs};
 
       let vpn_workers = list_vpn_worker_configs();
       for worker in vpn_workers {
         if let Some(pid) = worker.pid {
-          if !is_process_running(pid) {
+          if !worker.is_running() {
             log::info!(
               "Cleaning up orphaned VPN worker config: {} (process PID {} is dead)",
               worker.id,

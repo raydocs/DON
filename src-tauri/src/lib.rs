@@ -1235,10 +1235,8 @@ async fn disconnect_vpn(vpn_id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn get_vpn_status(vpn_id: String) -> Result<vpn::VpnStatus, String> {
-  use crate::proxy_storage::is_process_running;
-
   if let Some(worker) = vpn_worker_storage::find_vpn_worker_by_vpn_id(&vpn_id) {
-    let connected = worker.pid.map(is_process_running).unwrap_or(false);
+    let connected = worker.is_running();
     Ok(vpn::VpnStatus {
       connected,
       vpn_id,
@@ -1261,13 +1259,11 @@ async fn get_vpn_status(vpn_id: String) -> Result<vpn::VpnStatus, String> {
 
 #[tauri::command]
 async fn list_active_vpn_connections() -> Result<Vec<vpn::VpnStatus>, String> {
-  use crate::proxy_storage::is_process_running;
-
   let workers = vpn_worker_storage::list_vpn_worker_configs();
   Ok(
     workers
       .into_iter()
-      .filter(|w| w.pid.map(is_process_running).unwrap_or(false))
+      .filter(|w| w.is_running())
       .map(|w| vpn::VpnStatus {
         connected: true,
         vpn_id: w.vpn_id,
@@ -2224,7 +2220,7 @@ pub fn run_with_builder(
           }
 
           if let Some(pid) = worker.pid {
-            if is_process_running(pid) {
+            if worker.is_running() {
               log::info!(
                 "Startup: killing orphaned VPN worker {} (PID {})",
                 worker.id,
