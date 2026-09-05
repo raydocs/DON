@@ -16,7 +16,18 @@
 ## 🚀 5 分钟一键部署指南
 
 ### 前置准备
-确保已安装 [Node.js](https://nodejs.org) 与 `pnpm`，并且拥有 Cloudflare 账号。
+确保已安装 [Node.js](https://nodejs.org) 24 LTS 与 `pnpm`，并且拥有 Cloudflare 账号。Wrangler 4 要求 Node.js 22 或更新版本。
+
+本项目固定使用 Wrangler 4.110.0 与对应的 Workers 类型，保持稳定的 Miniflare 4 工具链，避免安装时自动切换到 Miniflare 5 alpha。Miniflare 的 Undici 7 通过同主版本安全覆盖升级至 7.29.0；没有将 Undici 5 强行替换为不兼容的主版本。升级工具链时应重新检查完整 OSV 扫描与本地运行验证。
+
+### 从 Wrangler 3 迁移
+
+- Wrangler 4 的 R2/KV 对象命令默认操作本地数据。仓库的备份/恢复脚本显式使用 `--remote`，保留远程备份语义；它们会读写真实 R2，不要把它们当成本地测试。
+- D1 脚本继续明确区分 `d1:migrate:local` 与 `d1:migrate:remote`。现有 `nodejs_compat` 与 `compatibility_date` 不变；没有启用远程开发绑定。
+- 新 esbuild 会将动态通配符导入匹配的文件加入构建。本 Worker 没有此类运行时导入，也不使用已删除的 `publish`、`getBindingsProxy` 或 `node_compat` 接口。
+- 无凭据验证可使用 `pnpm exec wrangler deploy --dry-run`；本地 D1/R2 命令必须带 `--local`，并通过 `--persist-to` 指向独立临时目录。`wrangler dev` 默认本地运行。以上检查不替代远程权限、Cloudflare Access 策略或生产数据验证。
+
+完整变更参见 [Wrangler 3 → 4 迁移指南](https://developers.cloudflare.com/workers/wrangler/migration/update-v3-to-v4/)。
 
 ### 1. 安装依赖并登录 Cloudflare
 ```bash
@@ -49,7 +60,26 @@ npx wrangler secret put SYNC_TOKEN
 ```
 *(输入你自定义的强密码，如 `my-super-secret-sync-token-2026`)*
 
-### 5. 一键部署到 Cloudflare Workers
+> **安全提醒**：建议同步轮换默认的 `ADMIN_EMAILS`，避免使用仓库内公开默认值：
+> ```bash
+> npx wrangler secret put ADMIN_EMAILS   # 逗号分隔的管理员邮箱，例如 alice@example.com,bob@example.com
+> ```
+
+### 5. （可选）启用 Cloudflare Zero Trust Access 免密管理员登录
+若希望通过 Cloudflare Access 实现浏览器免密登录管理控制台，需要：
+
+1. 在 Cloudflare Zero Trust 控制台为该 Worker（尤其是 `/api/admin/*` 路由）创建一个 Application 与访问策略，使所有到达管理 API 的请求都经过 Access 鉴权。
+2. 在应用配置中记录 **Team Domain**（形如 `https://<your-team>.cloudflareaccess.com`）与 **Application Audience ID**（一个 UUID）。
+3. 通过 secret 配置 JWT 校验所需的环境变量（二者缺一不可，任一为空则 Access 登录路径自动关闭、回退到 `SYNC_TOKEN` / D1 管理员 Token）：
+   ```bash
+   npx wrangler secret put CF_ACCESS_TEAM_DOMAIN   # 例如 https://myteam.cloudflareaccess.com
+   npx wrangler secret put CF_ACCESS_AUD           # Application Audience ID (UUID)
+   ```
+4. 配置好 `ADMIN_EMAILS`（步骤 4）以指定哪些 Access 邮箱可获准管理员身份。
+
+启用后，Worker 仅信任经过 **签名 + `iss` + `aud` 校验** 的 `Cf-Access-Jwt-Assertion` / `CF_Authorization` JWT；任何客户端自行伪造的 `cf-access-*`、`cf-access-jwt-assertion`（含 `alg: none` 未签名令牌）或 `x-admin-email` 头都不会被授予管理员身份。
+
+### 6. 一键部署到 Cloudflare Workers
 ```bash
 npx wrangler deploy
 ```

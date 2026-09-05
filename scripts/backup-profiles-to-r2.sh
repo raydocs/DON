@@ -20,8 +20,8 @@ echo "==> Backup archive created: ${TMP_BACKUP} (${SIZE})"
 
 echo "==> Uploading snapshot to Cloudflare R2 (don-sync-bucket)..."
 cd "${WORKER_DIR}"
-npx wrangler r2 object put "don-sync-bucket/backups/don-profiles-backup-${TIMESTAMP}.tar.gz" --file="${TMP_BACKUP}"
-npx wrangler r2 object put "don-sync-bucket/backups/latest.tar.gz" --file="${TMP_BACKUP}"
+npx wrangler r2 object put "don-sync-bucket/backups/don-profiles-backup-${TIMESTAMP}.tar.gz" --remote --file="${TMP_BACKUP}"
+npx wrangler r2 object put "don-sync-bucket/backups/latest.tar.gz" --remote --file="${TMP_BACKUP}"
 
 rm -f "${TMP_BACKUP}"
 echo "==> Backup successfully uploaded to Cloudflare R2!"
