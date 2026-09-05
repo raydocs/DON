@@ -1506,11 +1506,9 @@ mod tests {
     fresh_test_state(&profile.id);
     clear_failed_attempts(&profile.id);
 
-    // The per-profile attempt lock must be shared across ALL four password
-    // commands, not just one — `unlock_profile` and `verify_profile_password`
-    // targeting the same profile must serialize against each other. A burst
-    // that mixes the two should still admit exactly one wrong guess before
-    // the lockout engages.
+    // The per-profile attempt lock must be shared across all four password
+    // commands. A burst that mixes them should still admit exactly one wrong
+    // guess before the lockout engages.
     let worker_count: usize = 8;
     let rt = tokio::runtime::Builder::new_multi_thread()
       .worker_threads(worker_count)
@@ -1549,10 +1547,11 @@ mod tests {
         rt.spawn(async move {
           barrier.wait().await;
           let _dir_guard = crate::app_dirs::set_test_data_dir(data_dir);
-          if i % 2 == 0 {
-            unlock_profile(id_str, pw).await
-          } else {
-            verify_profile_password(id_str, pw).await
+          match i % 4 {
+            0 => unlock_profile(id_str, pw).await,
+            1 => verify_profile_password(id_str, pw).await,
+            2 => change_profile_password(id_str, pw, "replacement-password".into()).await,
+            _ => remove_profile_password(id_str, pw).await,
           }
         })
       })
