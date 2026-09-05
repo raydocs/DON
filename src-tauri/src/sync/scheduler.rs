@@ -149,9 +149,11 @@ impl SyncScheduler {
   }
 
   pub async fn mark_profile_stopped(&self, profile_id: &str) {
-    let mut running = self.running_profiles.lock().await;
-    running.remove(profile_id);
-    log::debug!("Marked profile {} as stopped", profile_id);
+    {
+      let mut running = self.running_profiles.lock().await;
+      running.remove(profile_id);
+      log::debug!("Marked profile {} as stopped", profile_id);
+    }
 
     let mut pending = self.pending_profiles.lock().await;
     if pending.contains_key(profile_id) {

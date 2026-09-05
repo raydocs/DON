@@ -12,7 +12,22 @@ export function safeEqual(a: string, b: string): boolean {
 
 /** Get signing key from Env */
 function getSigningSecret(env: Env): string {
-  return env.SIGNING_SECRET || env.SYNC_TOKEN || "default-don-signing-secret";
+  const secret = env.SIGNING_SECRET || env.SYNC_TOKEN;
+  if (!secret) {
+    throw new Error(
+      "SIGNING_SECRET (or SYNC_TOKEN) must be configured via `wrangler secret put` before the worker can sign/verify transfer URLs",
+    );
+  }
+  if (
+    secret === "default-don-signing-secret" ||
+    secret === "don-signing-secret" ||
+    secret === "don-secret-sync-token"
+  ) {
+    throw new Error(
+      "SIGNING_SECRET/SYNC_TOKEN is set to a known-public placeholder; set a real secret via `wrangler secret put`",
+    );
+  }
+  return secret;
 }
 
 /** Generate an HMAC-SHA256 signature for a raw file transfer URL */

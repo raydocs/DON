@@ -159,12 +159,19 @@ pub fn normalize_network_dir(default_dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(&to)?;
     let dest = to.join(name);
     if dest.exists() {
-      // Both positions hold the file. The one in the source position is the
-      // stale duplicate: on Windows, Chromium's migration would copy it over
-      // the newer file ("overwrite the new file with the old file even if it
-      // exists already", network_sandbox.cc), so it has to go.
-      std::fs::remove_file(&src)?;
-      continue;
+      if cfg!(target_os = "windows") {
+        // Both positions hold the file. The one in the source position is the
+        // stale duplicate: on Windows, Chromium's migration would copy it over
+        // the newer file ("overwrite the new file with the old file even if it
+        // exists already", network_sandbox.cc), so it has to go.
+        std::fs::remove_file(&src)?;
+        continue;
+      } else {
+        // On non-Windows, from is Network/ and to is Default/. dest (Default/)
+        // is the stale pre-migration file, so drop it and let the live
+        // Network/ source move into place below.
+        std::fs::remove_file(&dest)?;
+      }
     }
     std::fs::rename(&src, &dest).or_else(|_| {
       // Rename across devices can fail even within one tree on some setups.

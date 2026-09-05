@@ -904,8 +904,26 @@ async function main() {
     if (xray) {
       await rm(xray.configPath, { force: true });
     }
+    if (process.platform === "linux") {
+      try {
+        const mountOutput = spawnSync("mount").stdout?.toString() || "";
+        for (const line of mountOutput.split("\n")) {
+          if (line.includes(runRoot)) {
+            const mountPoint = line.split(" on ")[1]?.split(" type ")[0];
+            if (mountPoint) {
+              spawnSync("fusermount3", ["-u", mountPoint]);
+            }
+          }
+        }
+      } catch {}
+    }
     if (!options.keep && !failed) {
-      await rm(runRoot, { recursive: true, force: true });
+      await rm(runRoot, {
+        recursive: true,
+        force: true,
+        maxRetries: 3,
+        retryDelay: 200,
+      }).catch(() => {});
     } else {
       await prepareRetainedArtifacts(runRoot, {
         suite: options.suite,
