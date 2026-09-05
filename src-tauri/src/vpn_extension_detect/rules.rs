@@ -119,13 +119,17 @@ pub fn signals_from_manifest(manifest: &serde_json::Value) -> ManifestSignals {
 
   let has = |list: &[&str], name: &str| list.contains(&name);
 
-  // MV2 keeps host patterns inside `permissions`; MV3 splits them into
-  // `host_permissions`. Look in both so one manifest version isn't silently
-  // under-detected.
+  // Host patterns can live in any of four manifest keys: `permissions` (MV2
+  // packs them in here), `host_permissions` (MV3's split-out key), and their
+  // optional counterparts `optional_permissions` and `optional_host_permissions`
+  // (Chrome documents both `optional_permissions` and `optional_host_permissions`
+  // as host-bearing). Chain all four so a manifest that places broad hosts in
+  // any of them is not silently under-detected.
   let all_hosts: Vec<&str> = permissions
     .iter()
     .chain(host_permissions.iter())
     .chain(optional_host_permissions.iter())
+    .chain(optional_permissions.iter())
     .copied()
     .collect();
   let broad = all_hosts.iter().any(|p| is_broad_host(p))
@@ -408,6 +412,9 @@ mod tests {
     // Optional and ungranted is not a capability, so it only matters when the
     // extension also says what it is.
     let s = signals_of(json!({ "optional_permissions": ["proxy"] }));
+    // `proxy` is an API string, not a host match pattern, so chaining
+    // `optional_permissions` into `all_hosts` must not set broad_host_permissions.
+    assert!(!s.broad_host_permissions);
     assert_eq!(
       classify(None, &s, vpn_keyword_hit("Some VPN", None)),
       Some("likely")
@@ -459,6 +466,60 @@ mod tests {
       classify(None, &s, vpn_keyword_hit("Turbo VPN", None)),
       Some("likely")
     );
+  }
+
+  #[test]
+  fn broad_hosts_detected_from_optional_permissions() {
+    let s = signals_of(json!({
+      "manifest_version": 3,
+      "permissions": ["declarativeNetRequest"],
+      "optional_permissions": ["*://*/*"]
+    }));
+    assert!(s.broad_host_permissions);
+    assert!(s.declarative_net_request);
+    assert!(!s.proxy_permission);
+    assert!(!s.optional_proxy_permission);
+    assert_eq!(
+      classify(None, &s, vpn_keyword_hit("Free VPN Proxy", None)),
+      Some("likely")
+    );
+    assert!(signal_labels(None, &s, true).contains(&"broadHostPermissions".to_string()));
+  }
+
+  #[test]
+  fn broad_hosts_detected_from_optional_host_permissions() {
+    let s = signals_of(json!({
+      "manifest_version": 3,
+      "permissions": ["declarativeNetRequest"],
+      "optional_host_permissions": ["*://*/*"]
+    }));
+    assert!(s.broad_host_permissions);
+    assert_eq!(
+      classify(None, &s, vpn_keyword_hit("Free VPN Proxy", None)),
+      Some("likely")
+    );
+  }
+
+  #[test]
+  fn non_host_strings_in_optional_permissions_do_not_set_broad_hosts() {
+    let s = signals_of(json!({
+      "optional_permissions": ["proxy", "storage", "unlimitedStorage", "tabs"]
+    }));
+    assert!(!s.broad_host_permissions);
+    assert!(s.optional_proxy_permission);
+  }
+
+  #[test]
+  fn broad_hosts_in_optional_permissions_alone_are_not_likely() {
+    let s = signals_of(json!({
+      "permissions": ["storage"],
+      "optional_permissions": ["*://*/*"]
+    }));
+    assert!(s.broad_host_permissions);
+    assert!(!s.declarative_net_request);
+    assert!(!s.web_request_blocking);
+    assert!(!s.proxy_permission);
+    assert_eq!(classify(None, &s, vpn_keyword_hit("Some VPN", None)), None);
   }
 
   #[test]
