@@ -17,7 +17,7 @@ use crate::sync::manifest::DEFAULT_EXCLUDE_PATTERNS;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::SystemTime;
 
 /// Build a JSON error payload with just a code.
@@ -53,6 +53,37 @@ lazy_static::lazy_static! {
 
   /// Per-profile failed unlock attempt tracking for rate-limiting.
   static ref FAILED_ATTEMPTS: Mutex<HashMap<uuid::Uuid, FailureRecord>> = Mutex::new(HashMap::new());
+
+  /// Per-profile serialization lock for the `check_lockout -> verify ->
+  /// record_failed_attempt` window. The lockout counter's check-then-act
+  /// pattern is otherwise a TOCTOU race: concurrent invocations of any of the
+  /// four password commands (`unlock_profile`, `verify_profile_password`,
+  /// `change_profile_password`, `remove_profile_password`) all observe the
+  /// stale `count` and slip through `check_lockout` before any of them reaches
+  /// `record_failed_attempt`, defeating the one-guess-per-window ceiling the
+  /// lockout schedule imposes. Holding this per-profile mutex across the
+  /// entire window serializes same-profile attempts (different profiles still
+  /// run fully in parallel) and closes the race. Expired weak entries are
+  /// pruned when a new lock is created, including attempts for invalid IDs.
+  static ref ATTEMPT_LOCKS: Mutex<HashMap<uuid::Uuid, Weak<Mutex<()>>>> = Mutex::new(HashMap::new());
+}
+
+/// Look up (or lazily create) the per-profile serialization lock used to close
+/// the lockout TOCTOU window across the four password commands. Returns an
+/// `Arc<Mutex<()>>` the caller must hold for the duration of `check_lockout`,
+/// the password verification, and the resulting `record_failed_attempt` /
+/// `clear_failed_attempt`.
+fn acquire_attempt_lock(profile_id: uuid::Uuid) -> Arc<Mutex<()>> {
+  let mut locks = ATTEMPT_LOCKS
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
+  if let Some(lock) = locks.get(&profile_id).and_then(Weak::upgrade) {
+    return lock;
+  }
+  locks.retain(|_, lock| lock.strong_count() > 0);
+  let lock = Arc::new(Mutex::new(()));
+  locks.insert(profile_id, Arc::downgrade(&lock));
+  lock
 }
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
@@ -308,6 +339,10 @@ pub async fn set_profile_password(profile_id: String, password: String) -> Resul
 #[tauri::command]
 pub async fn verify_profile_password(profile_id: String, password: String) -> Result<(), String> {
   let id = parse_uuid(&profile_id)?;
+  let attempt_lock = acquire_attempt_lock(id);
+  let _attempt_guard = attempt_lock
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   let profile = load_profile(&id)?;
   if !profile.password_protected {
     return Err(err_code("PROFILE_NOT_PROTECTED"));
@@ -337,6 +372,10 @@ pub async fn verify_profile_password(profile_id: String, password: String) -> Re
 #[tauri::command]
 pub async fn unlock_profile(profile_id: String, password: String) -> Result<(), String> {
   let id = parse_uuid(&profile_id)?;
+  let attempt_lock = acquire_attempt_lock(id);
+  let _attempt_guard = attempt_lock
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   let profile = load_profile(&id)?;
   if !profile.password_protected {
     return Err(err_code("PROFILE_NOT_PROTECTED"));
@@ -389,6 +428,10 @@ pub async fn change_profile_password(
 ) -> Result<(), String> {
   validate_password(&new_password)?;
   let id = parse_uuid(&profile_id)?;
+  let attempt_lock = acquire_attempt_lock(id);
+  let _attempt_guard = attempt_lock
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   let mut profile = load_profile(&id)?;
 
   if !profile.password_protected {
@@ -444,6 +487,10 @@ pub async fn change_profile_password(
 #[tauri::command]
 pub async fn remove_profile_password(profile_id: String, password: String) -> Result<(), String> {
   let id = parse_uuid(&profile_id)?;
+  let attempt_lock = acquire_attempt_lock(id);
+  let _attempt_guard = attempt_lock
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner);
   let mut profile = load_profile(&id)?;
   if !profile.password_protected {
     return Err(err_code("PROFILE_NOT_PROTECTED"));
@@ -714,6 +761,17 @@ mod tests {
   use super::*;
   use crate::profile::BrowserProfile;
   use tempfile::TempDir;
+
+  #[test]
+  fn attempt_lock_prunes_idle_ids_without_splitting_live_locks() {
+    let live_id = uuid::Uuid::new_v4();
+    let live = acquire_attempt_lock(live_id);
+    let idle_id = uuid::Uuid::new_v4();
+    drop(acquire_attempt_lock(idle_id));
+    let _next = acquire_attempt_lock(uuid::Uuid::new_v4());
+    assert!(!ATTEMPT_LOCKS.lock().unwrap().contains_key(&idle_id));
+    assert!(Arc::ptr_eq(&live, &acquire_attempt_lock(live_id)));
+  }
 
   fn make_profile(name: &str) -> BrowserProfile {
     BrowserProfile {
@@ -1310,5 +1368,241 @@ mod tests {
       .unwrap());
 
     fresh_test_state(&profile.id);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn integration_concurrent_burst_does_not_bypass_lockout_window() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+
+    let profile = make_profile("test-concurrent-lockout");
+    let profiles_dir = ProfileManager::instance().get_profiles_dir();
+    let plain_dir = profile_full_path(&profile, &profiles_dir);
+    populate_plaintext_dir(&plain_dir);
+    ProfileManager::instance().save_profile(&profile).unwrap();
+    fresh_test_state(&profile.id);
+    clear_failed_attempts(&profile.id);
+
+    // Force worker_threads=8 regardless of host CPU count so the burst is
+    // fully parallel on any runner (including 1-core CI). The per-profile
+    // attempt lock acquired in `unlock_profile` serializes same-profile
+    // attempts, so concurrent wrong-password calls cannot all read a stale
+    // count and slip through `check_lockout` before any failure is recorded.
+    let worker_count: usize = 8;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(worker_count)
+      .enable_all()
+      .build()
+      .unwrap();
+
+    rt.block_on(set_profile_password(
+      profile.id.to_string(),
+      "hunter2!".into(),
+    ))
+    .unwrap();
+    drop_cached_key(&profile.id);
+
+    // PRECONDITION: 4 failed attempts already recorded. Sequentially the next
+    // wrong attempt is the 5th (INCORRECT_PASSWORD); the attempt after that
+    // must be LOCKED_OUT (60s window).
+    {
+      let rec = FailureRecord {
+        count: 4,
+        last_failed_at_secs: now_epoch_secs(),
+      };
+      if let Ok(mut g) = FAILED_ATTEMPTS.lock() {
+        g.insert(profile.id, rec);
+      }
+      persist_record(&profile.id, &rec);
+    }
+
+    // SEQUENTIAL CONTROL: one-guess-per-window ceiling holds under serial load.
+    let first_seq = rt
+      .block_on(unlock_profile(profile.id.to_string(), "wrong".into()))
+      .unwrap_err();
+    assert_eq!(parse_err_code(&first_seq), Some("INCORRECT_PASSWORD"));
+    let second_seq = rt
+      .block_on(unlock_profile(profile.id.to_string(), "wrong".into()))
+      .unwrap_err();
+    assert_eq!(parse_err_code(&second_seq), Some("LOCKED_OUT"));
+
+    // Reset back to count=4 so the burst enters the same starting state.
+    {
+      let rec = FailureRecord {
+        count: 4,
+        last_failed_at_secs: now_epoch_secs(),
+      };
+      if let Ok(mut g) = FAILED_ATTEMPTS.lock() {
+        g.insert(profile.id, rec);
+      }
+      persist_record(&profile.id, &rec);
+    }
+
+    // CONCURRENT BURST: fire n = worker_count * 2 wrong attempts at once with
+    // distinct passwords so each task would run a full Argon2id derivation if
+    // it slipped past the lockout.
+    let n = worker_count * 2;
+    let id_str = profile.id.to_string();
+    let data_dir = temp.path().to_path_buf();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n));
+    let handles: Vec<_> = (0..n)
+      .map(|i| {
+        let barrier = barrier.clone();
+        let id_str = id_str.clone();
+        let data_dir = data_dir.clone();
+        let pw = format!("wrong_{i}");
+        rt.spawn(async move {
+          barrier.wait().await;
+          let _dir_guard = crate::app_dirs::set_test_data_dir(data_dir);
+          unlock_profile(id_str, pw).await
+        })
+      })
+      .collect();
+    let joined: Vec<_> = rt.block_on(futures_util::future::join_all(handles));
+    let results: Vec<_> = joined
+      .into_iter()
+      .map(|r| r.unwrap_or_else(|e| Err(format!("join error: {e}"))))
+      .collect();
+
+    let mut incorrect = 0;
+    let mut locked_out = 0;
+    for r in &results {
+      match r {
+        Err(e) if parse_err_code(e) == Some("INCORRECT_PASSWORD") => incorrect += 1,
+        Err(e) if parse_err_code(e) == Some("LOCKED_OUT") => locked_out += 1,
+        other => panic!("unexpected result: {other:?}"),
+      }
+    }
+
+    assert_eq!(
+      incorrect, 1,
+      "expected exactly one wrong attempt to slip (one-guess-per-window ceiling); \
+       got {incorrect} INCORRECT_PASSWORD / {locked_out} LOCKED_OUT (n={n}, worker_threads={worker_count})"
+    );
+    assert_eq!(
+      locked_out, n - 1,
+      "expected the remaining burst attempts to be locked out; \
+       got {incorrect} INCORRECT_PASSWORD / {locked_out} LOCKED_OUT (n={n}, worker_threads={worker_count})"
+    );
+    assert_eq!(
+      FAILED_ATTEMPTS
+        .lock()
+        .map(|g| g.get(&profile.id).map(|r| r.count).unwrap_or(0))
+        .unwrap_or(0),
+      5,
+      "burst must advance count by exactly 1 (4 -> 5); further attempts short-circuit at check_lockout",
+    );
+
+    eprintln!(
+      "CONCURRENCY_RACE_RESULT: {incorrect} INCORRECT_PASSWORD, {locked_out} LOCKED_OUT (out of {n}, worker_threads={worker_count})"
+    );
+
+    fresh_test_state(&profile.id);
+    clear_failed_attempts(&profile.id);
+  }
+
+  #[test]
+  #[serial_test::serial]
+  fn integration_concurrent_burst_serializes_across_password_commands() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+
+    let profile = make_profile("test-cross-command-lockout");
+    let profiles_dir = ProfileManager::instance().get_profiles_dir();
+    let plain_dir = profile_full_path(&profile, &profiles_dir);
+    populate_plaintext_dir(&plain_dir);
+    ProfileManager::instance().save_profile(&profile).unwrap();
+    fresh_test_state(&profile.id);
+    clear_failed_attempts(&profile.id);
+
+    // The per-profile attempt lock must be shared across all four password
+    // commands. A burst that mixes them should still admit exactly one wrong
+    // guess before the lockout engages.
+    let worker_count: usize = 8;
+    let rt = tokio::runtime::Builder::new_multi_thread()
+      .worker_threads(worker_count)
+      .enable_all()
+      .build()
+      .unwrap();
+
+    rt.block_on(set_profile_password(
+      profile.id.to_string(),
+      "hunter2!".into(),
+    ))
+    .unwrap();
+    drop_cached_key(&profile.id);
+
+    {
+      let rec = FailureRecord {
+        count: 4,
+        last_failed_at_secs: now_epoch_secs(),
+      };
+      if let Ok(mut g) = FAILED_ATTEMPTS.lock() {
+        g.insert(profile.id, rec);
+      }
+      persist_record(&profile.id, &rec);
+    }
+
+    let n = worker_count * 2;
+    let id_str = profile.id.to_string();
+    let data_dir = temp.path().to_path_buf();
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(n));
+    let handles: Vec<_> = (0..n)
+      .map(|i| {
+        let barrier = barrier.clone();
+        let id_str = id_str.clone();
+        let data_dir = data_dir.clone();
+        let pw = format!("wrong_{i}");
+        rt.spawn(async move {
+          barrier.wait().await;
+          let _dir_guard = crate::app_dirs::set_test_data_dir(data_dir);
+          match i % 4 {
+            0 => unlock_profile(id_str, pw).await,
+            1 => verify_profile_password(id_str, pw).await,
+            2 => change_profile_password(id_str, pw, "replacement-password".into()).await,
+            _ => remove_profile_password(id_str, pw).await,
+          }
+        })
+      })
+      .collect();
+    let joined: Vec<_> = rt.block_on(futures_util::future::join_all(handles));
+    let results: Vec<_> = joined
+      .into_iter()
+      .map(|r| r.unwrap_or_else(|e| Err(format!("join error: {e}"))))
+      .collect();
+
+    let mut incorrect = 0;
+    let mut locked_out = 0;
+    for r in &results {
+      match r {
+        Err(e) if parse_err_code(e) == Some("INCORRECT_PASSWORD") => incorrect += 1,
+        Err(e) if parse_err_code(e) == Some("LOCKED_OUT") => locked_out += 1,
+        other => panic!("unexpected result: {other:?}"),
+      }
+    }
+
+    assert_eq!(
+      incorrect, 1,
+      "expected exactly one slip across mixed unlock/verify commands; \
+       got {incorrect} INCORRECT_PASSWORD / {locked_out} LOCKED_OUT (n={n})"
+    );
+    assert_eq!(
+      locked_out,
+      n - 1,
+      "remaining mixed-command burst attempts must be locked out; \
+       got {incorrect} INCORRECT_PASSWORD / {locked_out} LOCKED_OUT (n={n})"
+    );
+    assert_eq!(
+      FAILED_ATTEMPTS
+        .lock()
+        .map(|g| g.get(&profile.id).map(|r| r.count).unwrap_or(0))
+        .unwrap_or(0),
+      5,
+      "burst must advance count by exactly 1 (4 -> 5) regardless of which command recorded it",
+    );
+
+    fresh_test_state(&profile.id);
+    clear_failed_attempts(&profile.id);
   }
 }
