@@ -1912,7 +1912,9 @@ export function WayfernConfigForm({
           <TabsContent value="automatic" className="space-y-6">
             {/* Operating System Selection */}
             <div className="mt-4 space-y-3">
-              <Label>{t("fingerprint.osLabel")}</Label>
+              <Label htmlFor="automatic-fingerprint-os">
+                {t("fingerprint.osLabel")}
+              </Label>
               <Select
                 value={selectedOS}
                 onValueChange={handleOperatingSystemChange}

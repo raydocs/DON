@@ -20,6 +20,12 @@ import { launchDonutClone } from "@/lib/donut-physics";
 import { MOTION_SPRING_POSITION } from "@/lib/motion";
 import { cn } from "@/lib/utils";
 import { Logo } from "./icons/logo";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./ui/dropdown-menu";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 export type AppPage =
@@ -191,7 +197,7 @@ function ActiveIndicator() {
       aria-hidden="true"
       layoutId="rail-indicator"
       transition={MOTION_SPRING_POSITION}
-      className="absolute inset-y-1.5 left-[-7px] w-[2px] rounded-full bg-foreground"
+      className="don-nav-indicator absolute w-[2px] rounded-full"
     />
   );
 }
@@ -253,216 +259,195 @@ export function RailNav({
     handleClick,
   } = useLogoEasterEgg({ currentPage, onNavigate });
 
-  useEffect(() => {
-    if (!moreOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setMoreOpen(false);
-      }
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [moreOpen]);
-
   return (
-    <nav className="relative flex w-10 shrink-0 flex-col items-center gap-1 border-r border-border bg-background py-2">
-      {!isHidden ? (
-        <button
-          ref={logoRef}
-          type="button"
-          aria-label={t("header.donutLogo")}
-          className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md bg-transparent text-foreground select-none"
-          onClick={handleClick}
-          onPointerDown={() => {
-            setIsPressed(true);
-          }}
-          onPointerUp={() => {
-            setIsPressed(false);
-          }}
-          onPointerLeave={() => {
-            setIsPressed(false);
-          }}
-        >
-          {/* Inner wrapper survives clicks (no `key`) so the scale change
+    <DropdownMenu modal={false} open={moreOpen} onOpenChange={setMoreOpen}>
+      <nav className="don-nav relative flex shrink-0 flex-col items-center gap-1">
+        {!isHidden ? (
+          <button
+            ref={logoRef}
+            type="button"
+            aria-label={t("header.donutLogo")}
+            className="grid size-7 shrink-0 cursor-pointer place-items-center rounded-md bg-transparent text-foreground select-none"
+            onClick={handleClick}
+            onPointerDown={() => {
+              setIsPressed(true);
+            }}
+            onPointerUp={() => {
+              setIsPressed(false);
+            }}
+            onPointerLeave={() => {
+              setIsPressed(false);
+            }}
+          >
+            {/* Inner wrapper survives clicks (no `key`) so the scale change
               animates smoothly across the wiggle layer's remounts. */}
-          <span
-            style={{
-              transform: isPressed
-                ? `scale(${(1 + growStep * 0.25) * 0.9})`
-                : `scale(${1 + growStep * 0.25})`,
-            }}
-            className="inline-grid place-items-center transition-transform duration-300 ease-out will-change-transform"
-          >
             <span
-              key={wobbleKey}
-              className={cn(
-                "inline-grid place-items-center",
-                !isFalling &&
-                  !isPressed &&
-                  wobbleKey > 0 &&
-                  "animate-[wiggle_0.3s_ease-in-out]",
-              )}
+              style={{
+                transform: isPressed
+                  ? `scale(${(1 + growStep * 0.25) * 0.9})`
+                  : `scale(${1 + growStep * 0.25})`,
+              }}
+              className="inline-grid place-items-center transition-transform duration-300 ease-out will-change-transform"
             >
-              <Logo className="size-5 will-change-transform" />
-            </span>
-          </span>
-        </button>
-      ) : (
-        <div className="size-7 shrink-0" />
-      )}
-
-      <div className="my-1 h-px w-5 shrink-0 bg-border" />
-
-      <div className="flex min-h-0 w-full scrollbar-none flex-col items-center gap-1 overflow-y-auto [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
-        {TOP_ITEMS.map(({ page, Icon, labelKey }) => {
-          const active = currentPage === page;
-          return (
-            <Tooltip key={page} delayDuration={300}>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onNavigate(page);
-                  }}
-                  aria-label={t(labelKey)}
-                  aria-current={active ? "page" : undefined}
-                  className={cn(
-                    "relative grid size-7 shrink-0 cursor-pointer place-items-center rounded-md transition-colors duration-100",
-                    active
-                      ? "bg-accent text-accent-foreground"
-                      : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-                  )}
-                >
-                  {active && <ActiveIndicator />}
-                  <Icon className="size-3.5" />
-                  {page === "cookieBot" && cookieBotRunning && (
-                    <span
-                      aria-hidden="true"
-                      className="absolute top-1 right-1 size-1.5 rounded-full bg-success"
-                    />
-                  )}
-                </button>
-              </TooltipTrigger>
-              <TooltipContent side="right">
-                {page === "cookieBot" && cookieBotRunning
-                  ? t("rail.cookieBotRunning")
-                  : t(labelKey)}
-              </TooltipContent>
-            </Tooltip>
-          );
-        })}
-      </div>
-
-      <div className="flex-1" />
-
-      <Tooltip delayDuration={300}>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={() => {
-              setMoreOpen((v) => !v);
-            }}
-            aria-label={t("rail.more.label")}
-            aria-expanded={moreOpen}
-            className={cn(
-              "grid size-7 shrink-0 cursor-pointer place-items-center rounded-md transition-colors duration-100",
-              moreOpen
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-            )}
-          >
-            <GoKebabHorizontal className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">{t("rail.more.label")}</TooltipContent>
-      </Tooltip>
-
-      <Tooltip delayDuration={300}>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onClick={() => {
-              onNavigate("settings");
-            }}
-            aria-label={t("rail.settings")}
-            aria-current={currentPage === "settings" ? "page" : undefined}
-            className={cn(
-              "relative grid size-7 shrink-0 cursor-pointer place-items-center rounded-md transition-colors duration-100",
-              currentPage === "settings"
-                ? "bg-accent text-accent-foreground"
-                : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
-            )}
-          >
-            {currentPage === "settings" && <ActiveIndicator />}
-            <GoGear className="size-3.5" />
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="right">{t("rail.settings")}</TooltipContent>
-      </Tooltip>
-
-      {moreOpen && (
-        <>
-          <button
-            type="button"
-            aria-label={t("rail.more.closeAriaLabel")}
-            className="fixed inset-0 z-30 cursor-default bg-transparent"
-            onClick={() => {
-              setMoreOpen(false);
-            }}
-          />
-          <div
-            role="menu"
-            aria-label={t("rail.more.label")}
-            className="surface-material-card absolute bottom-14 left-11 z-40 w-56 animate-in rounded-lg border border-border p-1 shadow-2xl duration-100 fade-in-0 slide-in-from-bottom-1"
-          >
-            {MORE_ITEMS.map(({ page, Icon, labelKey, hintKey }) => (
-              <button
-                key={page}
-                type="button"
-                role="menuitem"
-                onClick={() => {
-                  setMoreOpen(false);
-                  onNavigate(page);
-                }}
-                className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent hover:text-accent-foreground"
+              <span
+                key={wobbleKey}
+                className={cn(
+                  "inline-grid place-items-center",
+                  !isFalling &&
+                    !isPressed &&
+                    wobbleKey > 0 &&
+                    "animate-[wiggle_0.3s_ease-in-out]",
+                )}
               >
-                <span className="grid size-5 shrink-0 place-items-center rounded bg-muted text-muted-foreground">
-                  <Icon className="size-3" />
-                </span>
-                <span className="flex min-w-0 flex-col">
-                  <span className="truncate text-xs font-medium text-foreground">
-                    {t(labelKey)}
-                  </span>
-                  <span className="truncate text-[10px] text-muted-foreground">
-                    {t(hintKey)}
-                  </span>
+                <Logo className="size-5 will-change-transform" />
+              </span>
+            </span>
+          </button>
+        ) : (
+          <div className="size-7 shrink-0" />
+        )}
+
+        <div className="my-1 h-px w-5 shrink-0 bg-border" />
+
+        <div className="flex min-h-0 w-full scrollbar-none flex-col items-center gap-1 overflow-y-auto [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
+          {TOP_ITEMS.map(({ page, Icon, labelKey }) => {
+            const active = currentPage === page;
+            return (
+              <Tooltip key={page} delayDuration={300}>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onNavigate(page);
+                    }}
+                    aria-label={t(labelKey)}
+                    aria-current={active ? "page" : undefined}
+                    className={cn(
+                      "don-nav-item relative shrink-0 cursor-pointer",
+                      active
+                        ? "bg-accent text-accent-foreground"
+                        : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                    )}
+                  >
+                    {active && <ActiveIndicator />}
+                    <Icon className="size-4 shrink-0" />
+                    <span className="don-nav-label" aria-hidden="true">
+                      {t(labelKey)}
+                    </span>
+                    {page === "cookieBot" && cookieBotRunning && (
+                      <span
+                        aria-hidden="true"
+                        className="absolute top-1 right-1 size-1.5 rounded-full bg-success"
+                      />
+                    )}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="right">
+                  {page === "cookieBot" && cookieBotRunning
+                    ? t("rail.cookieBotRunning")
+                    : t(labelKey)}
+                </TooltipContent>
+              </Tooltip>
+            );
+          })}
+        </div>
+
+        <div className="flex-1" />
+
+        <Tooltip delayDuration={300}>
+          <DropdownMenuTrigger asChild>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                aria-label={t("rail.more.label")}
+                aria-expanded={moreOpen}
+                className={cn(
+                  "don-nav-item shrink-0 cursor-pointer",
+                  moreOpen
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                )}
+              >
+                <GoKebabHorizontal className="size-4 shrink-0" />
+                <span className="don-nav-label" aria-hidden="true">
+                  {t("rail.more.label")}
                 </span>
               </button>
-            ))}
+            </TooltipTrigger>
+          </DropdownMenuTrigger>
+          <TooltipContent side="right">{t("rail.more.label")}</TooltipContent>
+        </Tooltip>
+
+        <Tooltip delayDuration={300}>
+          <TooltipTrigger asChild>
             <button
               type="button"
-              role="menuitem"
               onClick={() => {
-                setMoreOpen(false);
-                onOpenAbout();
+                onNavigate("settings");
+              }}
+              aria-label={t("rail.settings")}
+              aria-current={currentPage === "settings" ? "page" : undefined}
+              className={cn(
+                "don-nav-item relative shrink-0 cursor-pointer",
+                currentPage === "settings"
+                  ? "bg-accent text-accent-foreground"
+                  : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+              )}
+            >
+              {currentPage === "settings" && <ActiveIndicator />}
+              <GoGear className="size-4 shrink-0" />
+              <span className="don-nav-label" aria-hidden="true">
+                {t("rail.settings")}
+              </span>
+            </button>
+          </TooltipTrigger>
+          <TooltipContent side="right">{t("rail.settings")}</TooltipContent>
+        </Tooltip>
+
+        <DropdownMenuContent
+          aria-label={t("rail.more.label")}
+          side="right"
+          align="end"
+          sideOffset={12}
+          className="w-64 rounded-xl p-2"
+        >
+          {MORE_ITEMS.map(({ page, Icon, labelKey, hintKey }) => (
+            <DropdownMenuItem
+              key={page}
+              onSelect={() => {
+                onNavigate(page);
               }}
               className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent hover:text-accent-foreground"
             >
               <span className="grid size-5 shrink-0 place-items-center rounded bg-muted text-muted-foreground">
-                <LuInfo className="size-3" />
+                <Icon className="size-3" />
               </span>
               <span className="flex min-w-0 flex-col">
-                <span className="truncate text-xs font-medium text-foreground">
-                  {t("rail.more.about")}
+                <span className="truncate text-xs font-medium">
+                  {t(labelKey)}
                 </span>
-                <span className="truncate text-[10px] text-muted-foreground">
-                  {t("rail.more.aboutHint")}
-                </span>
+                <span className="text-xs">{t(hintKey)}</span>
               </span>
-            </button>
-          </div>
-        </>
-      )}
-    </nav>
+            </DropdownMenuItem>
+          ))}
+          <DropdownMenuItem
+            onSelect={() => {
+              onOpenAbout();
+            }}
+            className="flex w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors duration-100 hover:bg-accent hover:text-accent-foreground"
+          >
+            <span className="grid size-5 shrink-0 place-items-center rounded bg-muted text-muted-foreground">
+              <LuInfo className="size-3" />
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="truncate text-xs font-medium">
+                {t("rail.more.about")}
+              </span>
+              <span className="text-xs">{t("rail.more.aboutHint")}</span>
+            </span>
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </nav>
+    </DropdownMenu>
   );
 }

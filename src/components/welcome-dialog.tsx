@@ -207,7 +207,7 @@ export function WelcomeDialog({
     <Dialog open={isOpen} onOpenChange={() => {}}>
       <DialogContent
         dismissible={false}
-        className="overflow-x-hidden p-4 sm:max-w-xl sm:p-6"
+        className="don-welcome overflow-x-hidden p-4 sm:max-w-3xl sm:p-6"
       >
         <DialogTitle className="sr-only">{t("welcome.title")}</DialogTitle>
 
@@ -237,22 +237,14 @@ export function WelcomeDialog({
               initial="enter"
               animate="center"
               transition={panelTransition}
-              className="flex flex-col gap-7"
+              className="don-welcome-intro"
             >
-              <div className="flex flex-col items-center gap-4 text-center">
-                <motion.div
-                  initial={{ opacity: 0, scale: 0.9 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                  transition={{
-                    ...panelTransition,
-                    delay: reduceMotion ? 0 : 0.05,
-                  }}
-                  className="text-foreground"
-                >
+              <div className="don-welcome-identity">
+                <div className="text-foreground" aria-hidden="true">
                   <Logo className="size-12" />
-                </motion.div>
+                </div>
                 <div className="flex flex-col gap-2">
-                  <h2 className="text-2xl font-semibold tracking-tight text-balance">
+                  <h2 className="text-3xl font-semibold tracking-tight text-balance">
                     {t("welcome.title")}
                   </h2>
                   <p className="mx-auto max-w-[55ch] text-base/7 text-pretty text-muted-foreground sm:text-sm/6">
@@ -261,32 +253,26 @@ export function WelcomeDialog({
                 </div>
               </div>
 
-              <div className="flex flex-col gap-3">
+              <div className="don-welcome-features flex flex-col gap-3">
                 <p className="text-base/7 font-medium text-muted-foreground sm:text-sm/6">
                   {t("welcome.features.title")}
                 </p>
-                <dl className="grid grid-cols-1 gap-x-6 gap-y-3 sm:grid-cols-2">
-                  {FEATURES.map(({ key, Icon }, i) => (
-                    <motion.div
-                      key={key}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{
-                        ...panelTransition,
-                        delay: reduceMotion ? 0 : 0.12 + i * 0.04,
-                      }}
-                      className="flex min-w-0 items-center gap-2.5"
-                    >
-                      <Icon className="size-4 shrink-0 text-muted-foreground" />
-                      <dt className="text-base/7 font-medium text-foreground sm:text-sm/6">
+                <ul className="grid grid-cols-1 gap-3">
+                  {FEATURES.map(({ key, Icon }) => (
+                    <li key={key} className="flex min-w-0 items-center gap-2.5">
+                      <Icon
+                        aria-hidden="true"
+                        className="size-4 shrink-0 text-muted-foreground"
+                      />
+                      <span className="text-base/7 font-medium text-foreground sm:text-sm/6">
                         {t(key)}
-                      </dt>
-                    </motion.div>
+                      </span>
+                    </li>
                   ))}
-                </dl>
+                </ul>
               </div>
 
-              <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="don-welcome-actions flex flex-wrap items-center justify-between gap-2">
                 <Button
                   variant="ghost"
                   size="sm"
@@ -450,7 +436,10 @@ export function WelcomeDialog({
             >
               {setup.phase === "error" ? (
                 <>
-                  <div className="flex flex-col items-center gap-2">
+                  <div
+                    role="alert"
+                    className="flex flex-col items-center gap-2"
+                  >
                     <h2 className="flex items-center justify-center gap-2 text-2xl font-semibold tracking-tight text-balance text-destructive-text">
                       <LuTriangleAlert className="size-5 shrink-0" />
                       {t("welcome.ready.errorTitle")}
