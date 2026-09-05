@@ -530,8 +530,8 @@ test("authenticated REST API serves its complete OpenAPI contract and CRUD lifec
       browserStr: "wayfern",
       version: "150.0.7871.100",
       releaseType: "stable",
-      proxyId: null,
-      vpnId: null,
+      proxyId: "",
+      vpnId: "",
       // A stored fingerprint keeps this suite off the real browser; the
       // browser suite covers generation.
       wayfernConfig: { fingerprint: "{}" },
@@ -540,6 +540,84 @@ test("authenticated REST API serves its complete OpenAPI contract and CRUD lifec
       dnsBlocklist: null,
       launchHook: null,
     });
+    assert.equal(launchProfile.proxy_id, null);
+    assert.equal(launchProfile.vpn_id, null);
+
+    // Empty routing IDs must reach the shared manager as clear operations,
+    // never survive as Some("") in metadata or REST responses (#48).
+    for (const routing of [
+      {},
+      { proxy_id: null, vpn_id: null },
+      { proxy_id: "" },
+      { vpn_id: "" },
+      { proxy_id: "", vpn_id: "" },
+    ]) {
+      const created = await jsonRequest(`${base}/v1/profiles`, {
+        method: "POST",
+        token: saved.api_token,
+        body: {
+          name: `REST Empty Routing ${JSON.stringify(routing)}`,
+          browser: "wayfern",
+          version: "150.0.7871.100",
+          wayfern_config: { fingerprint: "{}" },
+          ...routing,
+        },
+      });
+      assert.equal(created.response.status, 200, JSON.stringify(created.value));
+      assert.equal(created.value.profile.proxy_id, null);
+      assert.equal(created.value.profile.vpn_id, null);
+      const stored = (await app.invoke("list_browser_profiles")).find(
+        (profile) => profile.id === created.value.profile.id,
+      );
+      assert.equal(stored.proxy_id, null);
+      assert.equal(stored.vpn_id, null);
+      await app.invoke("delete_profile", {
+        profileId: created.value.profile.id,
+      });
+    }
+
+    const routingUrl = `${base}/v1/profiles/${launchProfile.id}`;
+    for (const field of ["proxy_id", "vpn_id"]) {
+      // Updates historically accept nonempty references without connecting.
+      // A proxy fixture / inert VPN reference keeps this test network-free.
+      const reference = field === "proxy_id" ? proxyId : "e2e-vpn-reference";
+      for (const [body, expected] of [
+        [{ [field]: reference }, reference],
+        [{}, reference],
+        [{ proxy_id: null, vpn_id: null }, reference],
+        [{ [field]: "" }, null],
+      ]) {
+        const updated = await jsonRequest(routingUrl, {
+          method: "PUT",
+          token: saved.api_token,
+          body,
+        });
+        assert.equal(
+          updated.response.status,
+          200,
+          JSON.stringify(updated.value),
+        );
+        assert.equal(updated.value.profile[field], expected);
+        const fetched = await jsonRequest(routingUrl, {
+          token: saved.api_token,
+        });
+        assert.equal(fetched.value.profile[field], expected);
+        const stored = (await app.invoke("list_browser_profiles")).find(
+          (profile) => profile.id === launchProfile.id,
+        );
+        assert.equal(stored[field], expected);
+      }
+      // Bypass the REST adapter as well: all manager callers must normalize.
+      const updated = await app.invoke(
+        `update_profile_${field === "proxy_id" ? "proxy" : "vpn"}`,
+        {
+          profileId: launchProfile.id,
+          [field === "proxy_id" ? "proxyId" : "vpnId"]: "",
+        },
+      );
+      assert.equal(updated[field], null);
+    }
+
     const launchGroup = await jsonRequest(`${base}/v1/extension-groups`, {
       method: "POST",
       token: saved.api_token,
