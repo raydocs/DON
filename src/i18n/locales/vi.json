@@ -917,6 +917,7 @@
       "title": "Xuất cookie",
       "description": "Xuất cookie từ profile này.",
       "formatLabel": "Định dạng",
+      "pathLabel": "Đường dẫn",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "Xuất cookie thành công",

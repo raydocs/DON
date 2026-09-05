@@ -917,6 +917,7 @@
       "title": "쿠키 내보내기",
       "description": "이 프로필의 쿠키를 내보냅니다.",
       "formatLabel": "형식",
+      "pathLabel": "경로",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "쿠키를 내보냈습니다",

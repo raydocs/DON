@@ -917,6 +917,7 @@
       "title": "导出 Cookies",
       "description": "从此配置文件导出 Cookies。",
       "formatLabel": "格式",
+      "pathLabel": "路径",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "Cookies 导出成功",

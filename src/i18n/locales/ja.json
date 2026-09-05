@@ -917,6 +917,7 @@
       "title": "Cookieのエクスポート",
       "description": "このプロファイルからCookieをエクスポートします。",
       "formatLabel": "形式",
+      "pathLabel": "パス",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "Cookieのエクスポートに成功しました",

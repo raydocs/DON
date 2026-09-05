@@ -917,6 +917,7 @@
       "title": "Çerezleri Dışa Aktar",
       "description": "Bu profildeki çerezleri dışa aktarın.",
       "formatLabel": "Biçim",
+      "pathLabel": "Yol",
       "netscape": "Netscape TXT",
       "json": "JSON",
       "success": "Çerezler başarıyla dışa aktarıldı",
