@@ -88,13 +88,17 @@ mod tests {
   }
 
   #[test]
-  fn redacts_basic_auth_credential() {
-    let out = text("Authorization: Basic dXNlcjpwYXNz");
-    assert!(!out.contains("dXNlcjpwYXNz"), "LEAKED in {out:?}");
-    assert!(
-      out.contains("<redacted-secret>"),
-      "expected redaction placeholder in {out:?}"
-    );
+  fn redacts_single_token_http_auth_credentials() {
+    for header in ["Authorization", "Proxy-Authorization"] {
+      for scheme in ["Basic", "Token", "Negotiate", "bAsIc"] {
+        let out = text(&format!("{header}: {scheme} dXNlcjpwYXNz"));
+        assert!(!out.contains("dXNlcjpwYXNz"), "LEAKED in {out:?}");
+        assert!(
+          out.contains("<redacted-secret>"),
+          "expected redaction placeholder in {out:?}"
+        );
+      }
+    }
   }
 
   #[test]
