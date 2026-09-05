@@ -1451,6 +1451,34 @@ struct ProxyUsageResponse {
   extra_limit_mb: i64,
 }
 
+/// Map a live `/api/proxy/usage` response onto a `CloudProxyUsage`, falling
+/// back field-by-field to the cached snapshot (`cached_recurring`,
+/// `cached_extra`) for each quota-split field the backend omitted. Both
+/// split fields default to 0 when absent on the wire (`#[serde(default)]`),
+/// so each is gated on its *own* value — never on its sibling's — and falls
+/// back independently, mirroring the `Err` branch's `cached_*` assignment.
+fn build_live_proxy_usage(
+  usage: &ProxyUsageResponse,
+  cached_recurring: i64,
+  cached_extra: i64,
+) -> CloudProxyUsage {
+  CloudProxyUsage {
+    used_mb: usage.used_mb,
+    limit_mb: usage.limit_mb,
+    remaining_mb: usage.remaining_mb,
+    recurring_limit_mb: if usage.recurring_limit_mb > 0 {
+      usage.recurring_limit_mb
+    } else {
+      cached_recurring
+    },
+    extra_limit_mb: if usage.extra_limit_mb > 0 {
+      usage.extra_limit_mb
+    } else {
+      cached_extra
+    },
+  }
+}
+
 #[tauri::command]
 pub async fn cloud_get_proxy_usage() -> Result<Option<CloudProxyUsage>, String> {
   let (has_proxy, cached_recurring, cached_extra) = {
@@ -1501,21 +1529,11 @@ pub async fn cloud_get_proxy_usage() -> Result<Option<CloudProxyUsage>, String> 
     })
     .await
   {
-    Ok(usage) => Ok(Some(CloudProxyUsage {
-      used_mb: usage.used_mb,
-      limit_mb: usage.limit_mb,
-      remaining_mb: usage.remaining_mb,
-      recurring_limit_mb: if usage.recurring_limit_mb > 0 {
-        usage.recurring_limit_mb
-      } else {
-        cached_recurring
-      },
-      extra_limit_mb: if usage.recurring_limit_mb > 0 {
-        usage.extra_limit_mb
-      } else {
-        cached_extra
-      },
-    })),
+    Ok(usage) => Ok(Some(build_live_proxy_usage(
+      &usage,
+      cached_recurring,
+      cached_extra,
+    ))),
     Err(e) => {
       log::warn!("Failed to fetch live proxy usage, falling back to cached: {e}");
       // Fallback to cached values
@@ -1650,5 +1668,56 @@ mod tests {
     assert!(!is_device_restriction(
       "Wayfern token request failed (500 Internal Server Error): "
     ));
+  }
+
+  fn proxy_usage_response(recurring: i64, extra: i64) -> ProxyUsageResponse {
+    ProxyUsageResponse {
+      used_mb: 40,
+      limit_mb: 100,
+      remaining_mb: 60,
+      recurring_limit_mb: recurring,
+      extra_limit_mb: extra,
+    }
+  }
+
+  #[test]
+  fn live_proxy_usage_extra_falls_back_to_cached_when_live_recurring_present_but_live_extra_absent()
+  {
+    // The regression this guards: extra_limit_mb must fall back on its own
+    // live value (extra_limit_mb), not its sibling's (recurring_limit_mb).
+    // The prior bug gated extra on recurring, so a recurring subscriber whose
+    // live response omitted extraLimitMb (-> 0) got 0 instead of the cached
+    // top-up allocation it was entitled to.
+    let usage = proxy_usage_response(100, 0);
+
+    let out = build_live_proxy_usage(&usage, 0, 300);
+
+    assert_eq!(out.recurring_limit_mb, 100);
+    assert_eq!(out.extra_limit_mb, 300);
+  }
+
+  #[test]
+  fn live_proxy_usage_extra_uses_live_value_when_live_recurring_absent() {
+    // The other broken branch of the old guard: when recurring_limit_mb == 0
+    // the old code returned cached_extra even when the live response carried a
+    // real extraLimitMb. extra must now come from its own live field.
+    let usage = proxy_usage_response(0, 500);
+
+    let out = build_live_proxy_usage(&usage, 0, 999);
+
+    assert_eq!(out.recurring_limit_mb, 0);
+    assert_eq!(out.extra_limit_mb, 500);
+  }
+
+  #[test]
+  fn live_proxy_usage_recurring_falls_back_independently_of_extra() {
+    // The split fields are independent: a top-up-only live response keeps the
+    // cached recurring allocation rather than zeroing it, and vice versa.
+    let usage = proxy_usage_response(0, 500);
+
+    let out = build_live_proxy_usage(&usage, 200, 0);
+
+    assert_eq!(out.recurring_limit_mb, 200);
+    assert_eq!(out.extra_limit_mb, 500);
   }
 }
