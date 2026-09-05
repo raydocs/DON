@@ -228,7 +228,6 @@ impl ProfileManager {
     dns_blocklist: Option<String>,
     launch_hook: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let proxy_id = proxy_id.filter(|id| !id.is_empty());
     if name.trim().is_empty() {
       return Err(
         serde_json::json!({ "code": "NAME_CANNOT_BE_EMPTY" })
@@ -237,6 +236,8 @@ impl ProfileManager {
       );
     }
 
+    let proxy_id = proxy_id.filter(|id| !id.is_empty());
+    let vpn_id = vpn_id.filter(|id| !id.is_empty());
     if proxy_id.is_some() && vpn_id.is_some() {
       return Err("Cannot set both proxy_id and vpn_id".into());
     }
@@ -1357,6 +1358,7 @@ impl ProfileManager {
     profile_id: &str,
     vpn_id: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+    let vpn_id = vpn_id.filter(|id| !id.is_empty());
     let profile = self
       .mutate_profile(profile_id, |latest| {
         latest.vpn_id = vpn_id.clone();

@@ -121,8 +121,11 @@ pub struct CreateProfileRequest {
   /// downloaded; the create path does not fetch new versions.
   #[serde(default)]
   pub version: Option<String>,
-  /// Stored proxy ID. Omit, null, or an empty string means no proxy.
+  /// Proxy reference. Omitted, null, or an empty string means no proxy.
+  /// Cannot be combined with a nonempty vpn_id.
   pub proxy_id: Option<String>,
+  /// VPN reference. Omitted, null, or an empty string means no VPN.
+  /// Cannot be combined with a nonempty proxy_id.
   pub vpn_id: Option<String>,
   pub launch_hook: Option<String>,
   pub release_type: Option<String>,
@@ -143,8 +146,13 @@ pub struct UpdateProfileRequest {
   // would invalidate the generated fingerprint and on-disk profile dir).
   // Accepting it here only to silently ignore it misled API clients.
   pub version: Option<String>,
-  /// Stored proxy ID. An empty string clears the proxy; omit or null leaves it unchanged.
+  /// Proxy reference. Omitted or null leaves routing unchanged; an empty string
+  /// clears it. Setting or clearing this field also clears vpn_id.
+  /// Send only one routing field per update.
   pub proxy_id: Option<String>,
+  /// VPN reference. Omitted or null leaves routing unchanged; an empty string
+  /// clears it. Setting or clearing this field also clears proxy_id.
+  /// Send only one routing field per update.
   pub vpn_id: Option<String>,
   pub launch_hook: Option<String>,
   pub release_type: Option<String>,
@@ -1564,13 +1572,8 @@ async fn update_profile(
   }
 
   if let Some(vpn_id) = request.vpn_id {
-    let normalized = if vpn_id.is_empty() {
-      None
-    } else {
-      Some(vpn_id)
-    };
     if let Err(e) = profile_manager
-      .update_profile_vpn(state.app_handle.clone(), &id, normalized)
+      .update_profile_vpn(state.app_handle.clone(), &id, Some(vpn_id))
       .await
     {
       return Err(manager_error_response(e));
@@ -4550,6 +4553,43 @@ mod tests {
     assert!(!unknown.is_cross_os);
   }
 
+  #[test]
+  fn update_profile_network_fields_preserve_clear_intent() {
+    for body in ["{}", r#"{"proxy_id":null,"vpn_id":null}"#] {
+      let request: UpdateProfileRequest = serde_json::from_str(body).unwrap();
+      assert_eq!(request.proxy_id, None);
+      assert_eq!(request.vpn_id, None);
+    }
+    for id in ["", "route-id", " "] {
+      let request: UpdateProfileRequest = serde_json::from_value(serde_json::json!({
+        "proxy_id": id, "vpn_id": id
+      }))
+      .unwrap();
+      assert_eq!(request.proxy_id.as_deref(), Some(id));
+      assert_eq!(request.vpn_id.as_deref(), Some(id));
+    }
+  }
+
+  #[test]
+  fn openapi_profile_network_fields_document_empty_and_null() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).unwrap();
+    for name in ["CreateProfileRequest", "UpdateProfileRequest"] {
+      let schema = &spec["components"]["schemas"][name];
+      for field in ["proxy_id", "vpn_id"] {
+        let description = schema["properties"][field]["description"].as_str().unwrap();
+        assert!(description.contains("empty string"));
+        assert!(description.contains("null"));
+        assert_eq!(
+          schema["properties"][field]["type"],
+          serde_json::json!(["string", "null"])
+        );
+        assert!(!schema["required"]
+          .as_array()
+          .is_some_and(|required| required.iter().any(|value| value == field)));
+      }
+    }
+  }
+
   // Removing `browser` from UpdateProfileRequest, and rejecting invalid
   // `browser` values on create, must NOT make the API reject requests that
   // carry extra/unknown fields — old clients still send them. serde ignores
@@ -4894,18 +4934,6 @@ mod tests {
   #[test]
   fn openapi_optional_fields_are_not_required() {
     let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec serializes");
-
-    for schema in ["CreateProfileRequest", "UpdateProfileRequest"] {
-      assert!(!schema_required(&spec, schema)
-        .iter()
-        .any(|field| field == "proxy_id"));
-      let proxy = &spec["components"]["schemas"][schema]["properties"]["proxy_id"];
-      assert_eq!(proxy["type"], serde_json::json!(["string", "null"]));
-      assert!(proxy["description"]
-        .as_str()
-        .unwrap()
-        .contains("empty string"));
-    }
 
     let create_profile = schema_required(&spec, "CreateProfileRequest");
     assert!(
