@@ -46,6 +46,7 @@ import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { translateBackendError } from "@/lib/backend-errors";
 import { getBrowserDisplayName, getBrowserIcon } from "@/lib/browser-utils";
 import { fireSprinkleConfetti } from "@/lib/confetti";
+import { mergeImportResults } from "@/lib/merge-import-results";
 import { cn } from "@/lib/utils";
 import type {
   ArchiveScanResult,
@@ -112,31 +113,6 @@ function ImportReportSummary({ report }: { report: ProfileImportReport }) {
       ))}
     </div>
   );
-}
-
-/**
- * Fold a retry's results back into the batch it came from.
- *
- * A retry only resubmits the items that failed, so the previous batch is still
- * authoritative for every other row. Replacing it wholesale would make the
- * successful imports disappear from the summary.
- */
-function mergeImportResults(
-  previous: ProfileImportBatchResult,
-  retry: ProfileImportBatchResult,
-): ProfileImportBatchResult {
-  const byPath = new Map(retry.results.map((item) => [item.source_path, item]));
-  const results = previous.results.map(
-    (item) => byPath.get(item.source_path) ?? item,
-  );
-  const count = (status: string) =>
-    results.filter((item) => item.status === status).length;
-  return {
-    imported_count: count("imported"),
-    skipped_count: count("skipped"),
-    failed_count: count("failed"),
-    results,
-  };
 }
 
 interface ImportProfileDialogProps {
@@ -519,7 +495,12 @@ export function ImportProfileDialog({
       } catch (error) {
         console.error("Failed to import profiles:", error);
         toast.error(translateBackendError(t, error));
-        setCurrentStep("configure");
+        if (previous) {
+          setResult(previous);
+          setCurrentStep("importing");
+        } else {
+          setCurrentStep("configure");
+        }
       } finally {
         setIsImporting(false);
       }
