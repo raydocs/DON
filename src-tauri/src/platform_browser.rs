@@ -3,7 +3,7 @@ use crate::profile::BrowserProfile;
 use std::path::Path;
 use std::process::Command;
 
-/// True if a process command line refers to `profile_path` as a real browser
+/// True if a browser process command line refers to `profile_path` as a real
 /// profile/data-dir argument, NOT merely a substring. A bare `contains` match
 /// force-killed unrelated processes that happened to mention the path (editors,
 /// `tail`, a terminal that `cd`'d there, or another profile whose path has this
@@ -12,13 +12,21 @@ use std::process::Command;
 /// Only the macOS and Linux process-kill paths use this; Windows has no
 /// `find_processes_by_profile_path`, so gate it to avoid a dead-code error there.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-fn cmd_matches_profile_path(cmd: &[std::ffi::OsString], profile_path: &str) -> bool {
+fn process_matches_profile_path(
+  name: &std::ffi::OsStr,
+  cmd: &[std::ffi::OsString],
+  profile_path: &str,
+) -> bool {
+  let name = name.to_string_lossy().to_lowercase();
+  if !["wayfern", "chromium", "chrome"]
+    .iter()
+    .any(|browser| name.contains(browser))
+  {
+    return false;
+  }
+
   let args: Vec<&str> = cmd.iter().filter_map(|a| a.to_str()).collect();
   for (i, arg) in args.iter().enumerate() {
-    // Exact argument equality (some launchers pass the path as its own arg).
-    if *arg == profile_path {
-      return true;
-    }
     // `--user-data-dir=<path>` (Chromium/Wayfern) or `-profile=<path>`.
     if let Some(val) = arg
       .strip_prefix("--user-data-dir=")
@@ -36,6 +44,48 @@ fn cmd_matches_profile_path(cmd: &[std::ffi::OsString], profile_path: &str) -> b
     }
   }
   false
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod process_matching_tests {
+  use super::process_matches_profile_path;
+  use std::ffi::{OsStr, OsString};
+
+  #[test]
+  fn additional_process_requires_browser_name_and_explicit_profile_flag() {
+    for (name, args, expected) in [
+      ("sh", vec!["sh", "/tmp/profile"], false),
+      ("sh", vec!["sh", "--user-data-dir=/tmp/profile"], false),
+      ("wayfern", vec!["wayfern", "/tmp/profile"], false),
+      (
+        "wayfern",
+        vec!["wayfern", "--user-data-dir=/tmp/profile"],
+        true,
+      ),
+      (
+        "Chrome",
+        vec!["chrome", "--user-data-dir", "/tmp/profile"],
+        true,
+      ),
+      (
+        "Chromium",
+        vec!["chromium", "--user-data-dir=/tmp/profile-other"],
+        false,
+      ),
+      (
+        "Wayfern Helper",
+        vec!["helper", "--user-data-dir=/tmp/profile"],
+        true,
+      ),
+    ] {
+      let args: Vec<OsString> = args.into_iter().map(OsString::from).collect();
+      assert_eq!(
+        process_matches_profile_path(OsStr::new(name), &args, "/tmp/profile"),
+        expected,
+        "{name}: {args:?}"
+      );
+    }
+  }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -270,7 +320,7 @@ pub mod macos {
         continue;
       }
 
-      if cmd_matches_profile_path(cmd, profile_path) {
+      if process_matches_profile_path(process.name(), cmd, profile_path) {
         pids.push(pid.as_u32());
       }
     }
@@ -777,7 +827,7 @@ pub mod linux {
         continue;
       }
 
-      if cmd_matches_profile_path(cmd, profile_path) {
+      if process_matches_profile_path(process.name(), cmd, profile_path) {
         pids.push(pid.as_u32());
       }
     }
@@ -813,5 +863,46 @@ pub mod linux {
     }
 
     descendants
+  }
+
+  #[cfg(test)]
+  mod tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::Stdio;
+
+    #[tokio::test]
+    async fn force_kill_preserves_unrelated_process_with_profile_argument() {
+      let profile = tempfile::TempDir::new().unwrap();
+      let profile_path = profile.path().to_str().unwrap();
+      let spawn = |argument: &str| {
+        Command::new("sh")
+          .args(["-c", "read line", argument])
+          .stdin(Stdio::piped())
+          .stdout(Stdio::null())
+          .stderr(Stdio::null())
+          .spawn()
+          .unwrap()
+      };
+      let mut unrelated = spawn(profile_path);
+      let mut target = spawn("test-browser");
+      let target_pid = target.id();
+      // Keep stdin open while a separate waiter reaps the killed target.
+      let _target_input = target.stdin.take().unwrap();
+      let target_exit = tokio::task::spawn_blocking(move || target.wait().unwrap());
+
+      let result = kill_browser_process_impl(target_pid, Some(profile_path)).await;
+      let survived = unrelated.try_wait().unwrap().is_none();
+      let _ = unrelated.kill();
+      let _ = unrelated.wait();
+      let target_exit = target_exit.await.unwrap();
+
+      assert!(
+        survived,
+        "force-kill terminated an unrelated process mentioning the profile"
+      );
+      assert_eq!(target_exit.signal(), Some(9));
+      assert!(result.is_ok(), "{result:?}");
+    }
   }
 }
