@@ -631,46 +631,6 @@ export function StatusDot({
 /* Numbers                                                                    */
 /* -------------------------------------------------------------------------- */
 
-/**
- * A cookie delta. A gain reads as a gain, a loss reads with a real minus sign
- * (U+2212, not a hyphen), and "nothing happened" reads as an em dash instead of
- * a confident zero.
- */
-export function CookieDelta({
-  value,
-  className,
-}: {
-  value: number | null | undefined;
-  className?: string;
-}) {
-  if (value === null || value === undefined) {
-    return (
-      <span className={cn("text-muted-foreground", className)} aria-hidden>
-        —
-      </span>
-    );
-  }
-  if (value === 0) {
-    return (
-      <span className={cn("text-muted-foreground", className)} aria-hidden>
-        —
-      </span>
-    );
-  }
-  const positive = value > 0;
-  return (
-    <span
-      className={cn(
-        "tabular-nums",
-        positive ? "text-chart-1" : "text-muted-foreground",
-        className,
-      )}
-    >
-      {positive ? `+${value}` : `−${Math.abs(value)}`}
-    </span>
-  );
-}
-
 /** One decimal, but only when it earns one: `4.7 h`, `128 h`. */
 export function formatHours(hours: number): string {
   if (!Number.isFinite(hours)) return "0";
