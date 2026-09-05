@@ -121,6 +121,7 @@ pub struct CreateProfileRequest {
   /// downloaded; the create path does not fetch new versions.
   #[serde(default)]
   pub version: Option<String>,
+  /// Stored proxy ID. Omit, null, or an empty string means no proxy.
   pub proxy_id: Option<String>,
   pub vpn_id: Option<String>,
   pub launch_hook: Option<String>,
@@ -142,6 +143,7 @@ pub struct UpdateProfileRequest {
   // would invalidate the generated fingerprint and on-disk profile dir).
   // Accepting it here only to silently ignore it misled API clients.
   pub version: Option<String>,
+  /// Stored proxy ID. An empty string clears the proxy; omit or null leaves it unchanged.
   pub proxy_id: Option<String>,
   pub vpn_id: Option<String>,
   pub launch_hook: Option<String>,
@@ -4892,6 +4894,18 @@ mod tests {
   #[test]
   fn openapi_optional_fields_are_not_required() {
     let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec serializes");
+
+    for schema in ["CreateProfileRequest", "UpdateProfileRequest"] {
+      assert!(!schema_required(&spec, schema)
+        .iter()
+        .any(|field| field == "proxy_id"));
+      let proxy = &spec["components"]["schemas"][schema]["properties"]["proxy_id"];
+      assert_eq!(proxy["type"], serde_json::json!(["string", "null"]));
+      assert!(proxy["description"]
+        .as_str()
+        .unwrap()
+        .contains("empty string"));
+    }
 
     let create_profile = schema_required(&spec, "CreateProfileRequest");
     assert!(

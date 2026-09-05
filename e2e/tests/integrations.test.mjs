@@ -525,21 +525,58 @@ test("authenticated REST API serves its complete OpenAPI contract and CRUD lifec
     // it, and a profile that will load that group the next time it launches.
     // Each piece already had coverage; the sequence did not, and it is the
     // sequence that has to work for extensions to be usable over REST at all.
-    const launchProfile = await app.invoke("create_browser_profile_new", {
-      name: "REST Extension Profile",
-      browserStr: "wayfern",
-      version: "150.0.7871.100",
-      releaseType: "stable",
-      proxyId: null,
-      vpnId: null,
-      // A stored fingerprint keeps this suite off the real browser; the
-      // browser suite covers generation.
-      wayfernConfig: { fingerprint: "{}" },
-      groupId: null,
-      ephemeral: false,
-      dnsBlocklist: null,
-      launchHook: null,
+    const createdProfile = await jsonRequest(`${base}/v1/profiles`, {
+      method: "POST",
+      token: saved.api_token,
+      body: {
+        name: "REST Extension Profile",
+        browser: "wayfern",
+        version: "150.0.7871.100",
+        proxy_id: "",
+        // A stored fingerprint keeps this suite off the real browser.
+        wayfern_config: { fingerprint: "{}" },
+      },
     });
+    assert.equal(
+      createdProfile.response.status,
+      200,
+      JSON.stringify(createdProfile.value),
+    );
+    const launchProfile = createdProfile.value.profile;
+    assert.equal(
+      launchProfile.proxy_id,
+      null,
+      "empty proxy on create means no proxy",
+    );
+    for (const [body, expected] of [
+      [{ proxy_id: proxyId }, proxyId],
+      [{}, proxyId],
+      [{ proxy_id: null }, proxyId],
+      [{ proxy_id: "" }, null],
+    ]) {
+      const updated = await jsonRequest(
+        `${base}/v1/profiles/${launchProfile.id}`,
+        {
+          method: "PUT",
+          token: saved.api_token,
+          body,
+        },
+      );
+      assert.equal(updated.response.status, 200, JSON.stringify(updated.value));
+      assert.equal(updated.value.profile.proxy_id, expected);
+      const fetched = await jsonRequest(
+        `${base}/v1/profiles/${launchProfile.id}`,
+        {
+          token: saved.api_token,
+        },
+      );
+      assert.equal(fetched.value.profile.proxy_id, expected);
+      const profiles = await app.invoke("list_browser_profiles");
+      assert.equal(
+        profiles.find((profile) => profile.id === launchProfile.id).proxy_id,
+        expected,
+      );
+    }
     const launchGroup = await jsonRequest(`${base}/v1/extension-groups`, {
       method: "POST",
       token: saved.api_token,

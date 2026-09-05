@@ -228,6 +228,7 @@ impl ProfileManager {
     dns_blocklist: Option<String>,
     launch_hook: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    let proxy_id = proxy_id.filter(|id| !id.is_empty());
     if name.trim().is_empty() {
       return Err(
         serde_json::json!({ "code": "NAME_CANNOT_BE_EMPTY" })
@@ -1311,6 +1312,7 @@ impl ProfileManager {
     profile_id: &str,
     proxy_id: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
+    let proxy_id = proxy_id.filter(|id| !id.is_empty());
     let profile = self
       .mutate_profile(profile_id, |latest| {
         latest.proxy_id = proxy_id.clone();
