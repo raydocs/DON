@@ -98,7 +98,7 @@ const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disabl
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
 fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
-  let args = vec![
+  vec![
     format!("--remote-debugging-port={port}"),
     "--remote-debugging-address=127.0.0.1".to_string(),
     format!("--user-data-dir={profile_path}"),
@@ -123,10 +123,9 @@ fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
     "--disable-features=DialMediaRouteProvider,DnsOverHttps,AsyncDns,Prefetch,PrefetchProxy,SpeculationRulesPrefetchFuture,NoStatePrefetch".to_string(),
     "--use-mock-keychain".to_string(),
     "--password-store=basic".to_string(),
-  ];
-  #[cfg(target_os = "macos")]
-  args.push("--use-angle=default".to_string());
-  args
+    #[cfg(target_os = "macos")]
+    "--use-angle=default".to_string(),
+  ]
 }
 
 #[derive(Debug, Deserialize)]
