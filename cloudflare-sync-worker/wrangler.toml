@@ -16,10 +16,8 @@ database_name = "don-sync-db"
 database_id = "91984417-cc14-4392-a96f-595143698b1c"
 
 [vars]
-# Secret token for authentication (can also be set securely via `wrangler secret put SYNC_TOKEN`)
-SYNC_TOKEN = "don-secret-sync-token"
-# Optional signing secret for HMAC URL signing (falls back to SYNC_TOKEN if omitted)
-SIGNING_SECRET = "don-signing-secret"
+# Secret token for authentication must be set securely via `wrangler secret put SYNC_TOKEN`
+# Optional signing secret for HMAC URL signing must be set securely via `wrangler secret put SIGNING_SECRET`
 # Authorized Admin emails when accessed via Cloudflare Access Zero Trust.
 # IMPORTANT: rotate this to your own emails and prefer `wrangler secret put ADMIN_EMAILS`
 # (leaving the committed default is a known admin-email footgun). No code-level

@@ -74,6 +74,13 @@ const SKIP_FILES: &[&str] = &[
   "Login Data For Account-journal",
   "Account Web Data",
   "Account Web Data-journal",
+  // SNSS command logs replay the source machine's windows and can embed
+  // absolute local paths in PageState blobs — the same rationale as the
+  // `Sessions` directory above.
+  "Current Session",
+  "Current Tabs",
+  "Last Session",
+  "Last Tabs",
 ];
 
 /// Suffixes that belong to a database we snapshot separately, or to scratch
