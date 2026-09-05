@@ -63,10 +63,8 @@ lazy_static::lazy_static! {
   /// `record_failed_attempt`, defeating the one-guess-per-window ceiling the
   /// lockout schedule imposes. Holding this per-profile mutex across the
   /// entire window serializes same-profile attempts (different profiles still
-  /// run fully in parallel) and closes the race. The `Weak<...>` map mirrors
-  /// `ProfileManager::profile_locks` so an idle profile's lock is reaped by
-  /// the last outstanding `Arc` dropping it, keeping the map from growing
-  /// without bound over the app lifetime.
+  /// run fully in parallel) and closes the race. Expired weak entries are
+  /// pruned when a new lock is created, including attempts for invalid IDs.
   static ref ATTEMPT_LOCKS: Mutex<HashMap<uuid::Uuid, Weak<Mutex<()>>>> = Mutex::new(HashMap::new());
 }
 
@@ -82,6 +80,7 @@ fn acquire_attempt_lock(profile_id: uuid::Uuid) -> Arc<Mutex<()>> {
   if let Some(lock) = locks.get(&profile_id).and_then(Weak::upgrade) {
     return lock;
   }
+  locks.retain(|_, lock| lock.strong_count() > 0);
   let lock = Arc::new(Mutex::new(()));
   locks.insert(profile_id, Arc::downgrade(&lock));
   lock
@@ -762,6 +761,17 @@ mod tests {
   use super::*;
   use crate::profile::BrowserProfile;
   use tempfile::TempDir;
+
+  #[test]
+  fn attempt_lock_prunes_idle_ids_without_splitting_live_locks() {
+    let live_id = uuid::Uuid::new_v4();
+    let live = acquire_attempt_lock(live_id);
+    let idle_id = uuid::Uuid::new_v4();
+    drop(acquire_attempt_lock(idle_id));
+    let _next = acquire_attempt_lock(uuid::Uuid::new_v4());
+    assert!(!ATTEMPT_LOCKS.lock().unwrap().contains_key(&idle_id));
+    assert!(Arc::ptr_eq(&live, &acquire_attempt_lock(live_id)));
+  }
 
   fn make_profile(name: &str) -> BrowserProfile {
     BrowserProfile {
