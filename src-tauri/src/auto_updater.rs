@@ -985,6 +985,63 @@ mod tests {
       "Pending updates should be empty after dismissal"
     );
   }
+
+  /// `auto_update_profile_versions` records a pending entry for a running
+  /// profile. Cleanup's keep guard reads it via `get_pending_update_versions`
+  /// and the close-time path in `browser_runner` reads it via
+  /// `get_pending_update`. Verify a pending entry shaped like the one the
+  /// running-aware helper writes round-trips through both read paths.
+  #[test]
+  fn test_pending_update_for_running_profile_round_trips() {
+    use tempfile::TempDir;
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+
+    let updater = AutoUpdater::instance();
+
+    let notification = UpdateNotification {
+      id: "wayfern_138.0.7204.50_to_138.0.7204.60".to_string(),
+      browser: "wayfern".to_string(),
+      current_version: "138.0.7204.50".to_string(),
+      new_version: "138.0.7204.60".to_string(),
+      affected_profiles: vec!["P1".to_string()],
+      timestamp: 1000,
+    };
+    let mut state = AutoUpdateState::default();
+    state.pending_updates.push(notification.clone());
+    updater.save_auto_update_state(&state).unwrap();
+
+    // Cleanup acknowledges this set via get_pending_update_versions.
+    let pending_versions = updater.get_pending_update_versions().unwrap();
+    assert!(
+      pending_versions
+        .contains(&("wayfern".to_string(), "138.0.7204.60".to_string())),
+      "get_pending_update_versions must report the just-downloaded version, got: {pending_versions:?}"
+    );
+
+    // The close-time path looks it up by (browser, current_version).
+    let pending = updater
+      .get_pending_update("wayfern", "138.0.7204.50")
+      .unwrap();
+    assert!(
+      pending.is_some(),
+      "get_pending_update must return the recorded pending update for the running profile's current version"
+    );
+    let pending = pending.unwrap();
+    assert_eq!(pending.new_version, "138.0.7204.60");
+    assert_eq!(pending.current_version, "138.0.7204.50");
+    assert_eq!(pending.browser, "wayfern");
+    assert!(pending.affected_profiles.contains(&"P1".to_string()));
+
+    // No pending entry should be returned for an unrelated current version.
+    assert!(
+      updater
+        .get_pending_update("wayfern", "138.0.7204.49")
+        .unwrap()
+        .is_none(),
+      "get_pending_update must not return a pending update for an unrelated version"
+    );
+  }
 }
 
 // Global singleton instance

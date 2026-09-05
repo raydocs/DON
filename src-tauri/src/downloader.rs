@@ -53,6 +53,14 @@ pub struct DownloadProgress {
   pub speed_bytes_per_sec: f64,
   pub eta_seconds: Option<f64>,
   pub stage: String, // "downloading", "extracting", "verifying"
+  /// Discriminator for `stage: "error"` emits. `None` on non-error stages.
+  /// One of: "download_failed", "extraction_failed", "verification_failed",
+  /// "download_timeout". Carries the cause so the frontend can render an
+  /// accurate toast instead of assuming every terminal error is an extraction
+  /// failure (which is wrong for download-phase, verification, and timeout
+  /// paths). Unknown values fall back to a generic "download failed" toast.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub error_type: Option<String>,
 }
 
 pub struct Downloader {
@@ -267,6 +275,7 @@ impl Downloader {
         speed_bytes_per_sec: 0.0,
         eta_seconds: None,
         stage: "verifying".to_string(),
+        error_type: None,
       },
     );
     verify_archive_checksum(
@@ -510,6 +519,7 @@ impl Downloader {
           speed_bytes_per_sec: 0.0,
           eta_seconds: None,
           stage: "downloading".to_string(),
+          error_type: None,
         },
       );
 
@@ -593,6 +603,7 @@ impl Downloader {
               speed_bytes_per_sec: speed,
               eta_seconds: eta,
               stage: "downloading".to_string(),
+              error_type: None,
             },
           );
           last_update = now;
@@ -772,11 +783,12 @@ impl Downloader {
 
         // Emit a terminal stage so the UI stops spinning. A user cancellation maps to
         // "cancelled"; any other failure (network error, stall timeout, bad status)
-        // maps to "error" so the frontend can show a concrete error toast.
-        let stage = if cancel_token.is_cancelled() {
-          "cancelled"
+        // maps to "error" with an `error_type` so the frontend can show a concrete,
+        // accurate toast instead of defaulting to an extraction-failure label.
+        let (stage, error_type) = if cancel_token.is_cancelled() {
+          ("cancelled", None)
         } else {
-          "error"
+          ("error", Some("download_failed".to_string()))
         };
         let progress = DownloadProgress {
           browser: browser_str.clone(),
@@ -787,6 +799,7 @@ impl Downloader {
           speed_bytes_per_sec: 0.0,
           eta_seconds: None,
           stage: stage.to_string(),
+          error_type,
         };
         let _ = events::emit("download-progress", &progress);
 
@@ -832,6 +845,7 @@ impl Downloader {
             speed_bytes_per_sec: 0.0,
             eta_seconds: None,
             stage: "error".to_string(),
+            error_type: Some("extraction_failed".to_string()),
           };
           let _ = events::emit("download-progress", &progress);
 
@@ -853,6 +867,7 @@ impl Downloader {
       speed_bytes_per_sec: 0.0,
       eta_seconds: None,
       stage: "verifying".to_string(),
+      error_type: None,
     };
     let _ = events::emit("download-progress", &progress);
 
@@ -900,6 +915,7 @@ impl Downloader {
         speed_bytes_per_sec: 0.0,
         eta_seconds: None,
         stage: "error".to_string(),
+        error_type: Some("verification_failed".to_string()),
       };
       let _ = events::emit("download-progress", &progress);
 
@@ -939,26 +955,53 @@ impl Downloader {
       speed_bytes_per_sec: 0.0,
       eta_seconds: Some(0.0),
       stage: "completed".to_string(),
+      error_type: None,
     };
     let _ = events::emit("download-progress", &progress);
 
-    // Auto-update non-running profiles to the latest installed version and cleanup unused binaries
+    // Auto-update profiles to the freshly downloaded version (defers running profiles via pending_updates) and clean up unused binaries
     {
+      let browser_for_update = browser_str.clone();
+      let version_for_update = version.clone();
       let app_handle_for_update = app_handle.clone();
       tauri::async_runtime::spawn(async move {
         let auto_updater = crate::auto_updater::AutoUpdater::instance();
-        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+        match auto_updater
+          .auto_update_profile_versions(
+            &app_handle_for_update,
+            &browser_for_update,
+            &version_for_update,
+          )
+          .await
+        {
           Ok(updated) => {
             if !updated.is_empty() {
               log::info!(
-                "Auto-updated {} profiles to latest installed versions: {:?}",
+                "Auto-updated {} profiles to {} {}: {:?}",
                 updated.len(),
+                browser_for_update,
+                version_for_update,
                 updated
               );
             }
           }
           Err(e) => {
             log::error!("Failed to auto-update profile versions: {e}");
+          }
+        }
+
+        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+          Ok(updated) => {
+            if !updated.is_empty() {
+              log::info!(
+                "Updated {} profiles to latest installed versions: {:?}",
+                updated.len(),
+                updated
+              );
+            }
+          }
+          Err(e) => {
+            log::error!("Failed to update profiles to latest installed versions: {e}");
           }
         }
 
@@ -1435,6 +1478,70 @@ mod tests {
     // Cleanup so we don't leak global state into other tests.
     clear_download_state_for_browser("wayfern");
     clear_download_state_for_browser("chromium");
+  }
+
+  #[test]
+  fn test_terminal_error_progress_round_trips_error_type() {
+    // A terminal-error event must carry its discriminator to the frontend so the
+    // listener can pick an accurate i18n key instead of assuming "extraction
+    // failed". This locks the payload contract the React listener relies on.
+    let progress = DownloadProgress {
+      browser: "wayfern".to_string(),
+      version: "1.0.0".to_string(),
+      downloaded_bytes: 0,
+      total_bytes: None,
+      percentage: 0.0,
+      speed_bytes_per_sec: 0.0,
+      eta_seconds: None,
+      stage: "error".to_string(),
+      error_type: Some("download_timeout".to_string()),
+    };
+    let value = serde_json::to_value(&progress).expect("serialize error progress");
+    assert_eq!(value["stage"], "error");
+    assert_eq!(value["error_type"], "download_timeout");
+
+    let back: DownloadProgress = serde_json::from_value(value).expect("round-trip error progress");
+    assert_eq!(back.error_type.as_deref(), Some("download_timeout"));
+  }
+
+  #[test]
+  fn test_non_error_progress_omits_error_type() {
+    // Non-error stages must not advertise an error_type: the field is omitted
+    // from the payload entirely, so older/stripped payloads stay identical and
+    // the listener never mistakes a progress/verifying/completed event for one.
+    let progress = DownloadProgress {
+      browser: "wayfern".to_string(),
+      version: "1.0.0".to_string(),
+      downloaded_bytes: 50,
+      total_bytes: Some(100),
+      percentage: 50.0,
+      speed_bytes_per_sec: 1024.0,
+      eta_seconds: Some(10.0),
+      stage: "downloading".to_string(),
+      error_type: None,
+    };
+    let value = serde_json::to_value(&progress).expect("serialize non-error progress");
+    assert_eq!(value["stage"], "downloading");
+    assert!(
+      value.get("error_type").is_none(),
+      "non-error progress must not serialize error_type"
+    );
+
+    let json = serde_json::to_string(&progress).expect("serialize");
+    let back: DownloadProgress =
+      serde_json::from_str(&json).expect("round-trip non-error progress");
+    assert!(back.error_type.is_none());
+
+    // A payload missing the field entirely (old backend) must still deserialize
+    // so the frontend/backend tolerate a rolling upgrade.
+    let legacy = r#"{"browser":"wayfern","version":"1.0.0","downloaded_bytes":0,"total_bytes":null,"percentage":0.0,"speed_bytes_per_sec":0.0,"eta_seconds":null,"stage":"error"}"#;
+    let legacy_back: DownloadProgress =
+      serde_json::from_str(legacy).expect("legacy payload without error_type deserializes");
+    assert_eq!(legacy_back.stage, "error");
+    assert!(
+      legacy_back.error_type.is_none(),
+      "missing error_type defaults to None on the unknown-error fallback path"
+    );
   }
 }
 
