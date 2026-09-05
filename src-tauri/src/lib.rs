@@ -2601,8 +2601,13 @@ pub fn run_with_builder(
         let mut subscription_manager = sync::SubscriptionManager::new();
         let work_rx = subscription_manager.take_work_receiver();
 
-        if let Err(e) = subscription_manager.start(app_handle_sync.clone()).await {
-          log::warn!("Failed to start sync subscription: {e}");
+        let is_e2e = cfg!(debug_assertions)
+          && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some();
+
+        if !is_e2e {
+          if let Err(e) = subscription_manager.start(app_handle_sync.clone()).await {
+            log::warn!("Failed to start sync subscription: {e}");
+          }
         }
 
         if let Some(work_rx) = work_rx {
@@ -2611,24 +2616,26 @@ pub fn run_with_builder(
           // Set the global scheduler so commands can access it
           sync::set_global_scheduler(scheduler.clone());
 
-          // Check for missing synced profiles (deleted locally but exist remotely)
-          match sync::SyncEngine::create_from_settings(&app_handle_sync).await {
-            Ok(engine) => {
-              if let Err(e) = engine
-                .check_for_missing_synced_profiles(&app_handle_sync)
-                .await
-              {
-                log::warn!("Failed to check for missing profiles: {}", e);
+          if !is_e2e {
+            // Check for missing synced profiles (deleted locally but exist remotely)
+            match sync::SyncEngine::create_from_settings(&app_handle_sync).await {
+              Ok(engine) => {
+                if let Err(e) = engine
+                  .check_for_missing_synced_profiles(&app_handle_sync)
+                  .await
+                {
+                  log::warn!("Failed to check for missing profiles: {}", e);
+                }
+                if let Err(e) = engine
+                  .check_for_missing_synced_entities(&app_handle_sync)
+                  .await
+                {
+                  log::warn!("Failed to check for missing entities: {}", e);
+                }
               }
-              if let Err(e) = engine
-                .check_for_missing_synced_entities(&app_handle_sync)
-                .await
-              {
-                log::warn!("Failed to check for missing entities: {}", e);
+              Err(e) => {
+                log::warn!("Sync not configured, skipping missing profile check: {}", e);
               }
-            }
-            Err(e) => {
-              log::warn!("Sync not configured, skipping missing profile check: {}", e);
             }
           }
 

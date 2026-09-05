@@ -1079,6 +1079,10 @@ impl ProfileManager {
         sync_enabled_ids.push(profile_id.clone());
       }
 
+      crate::launch_gate_prefs::forget_profile(&profile_id);
+      crate::ephemeral_dirs::remove_ephemeral_dir(&profile_id);
+      crate::traffic_stats::delete_traffic_stats(&profile_id);
+
       // Delete the profile
       let profiles_dir = self.get_profiles_dir();
       let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
@@ -1086,6 +1090,12 @@ impl ProfileManager {
       if profile_uuid_dir.exists() {
         std::fs::remove_dir_all(&profile_uuid_dir)?;
       }
+    }
+
+    self.rebuild_tag_suggestions();
+
+    if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
+      log::warn!("Warning: Failed to cleanup unused binaries after bulk profile deletion: {e}");
     }
 
     // Delete sync-enabled profiles from S3

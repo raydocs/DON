@@ -746,6 +746,11 @@ impl CloudAuthManager {
   }
 
   pub async fn is_logged_in(&self) -> bool {
+    let is_e2e =
+      cfg!(debug_assertions) && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some();
+    if is_e2e {
+      return self.state.lock().await.is_some();
+    }
     true
   }
 
@@ -837,6 +842,13 @@ impl CloudAuthManager {
   }
 
   pub async fn automation_rate_limit(&self) -> Option<(String, u64)> {
+    if cfg!(debug_assertions) {
+      if let Ok(limit) = std::env::var("DONUT_E2E_REQUESTS_PER_HOUR") {
+        if let Ok(n) = limit.parse::<u64>() {
+          return Some(("don-e2e".to_string(), n));
+        }
+      }
+    }
     Some(("don-local".to_string(), 1_000_000))
   }
 
@@ -852,6 +864,11 @@ impl CloudAuthManager {
     let state = self.state.lock().await;
     if let Some(ref s) = *state {
       return Some(s.clone());
+    }
+    let is_e2e =
+      cfg!(debug_assertions) && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some();
+    if is_e2e {
+      return None;
     }
     Some(CloudAuthState {
       user: Self::default_don_user(),
