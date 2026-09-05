@@ -98,12 +98,16 @@ function formatNetscapeCookies(cookies: UnifiedCookie[]): string {
   return lines.join("\n");
 }
 
+function getCookieKey(c: { name: string; path: string }): string {
+  return `${c.name}\t${c.path}`;
+}
+
 function initSelectionFromCookieData(data: CookieReadResult): SelectionState {
   const sel: SelectionState = {};
   for (const d of data.domains) {
     sel[d.domain] = {
       allSelected: true,
-      cookies: new Set(d.cookies.map((c) => c.name)),
+      cookies: new Set(d.cookies.map(getCookieKey)),
     };
   }
   return sel;
@@ -144,13 +148,15 @@ export function CookieManagementDialog({
     let count = 0;
     for (const domain of Object.keys(exportSelection)) {
       const ds = exportSelection[domain];
+      const domainData = exportCookieData?.domains.find(
+        (d) => d.domain === domain,
+      );
       if (ds.allSelected) {
-        const domainData = exportCookieData?.domains.find(
-          (d) => d.domain === domain,
-        );
         count += domainData?.cookie_count ?? 0;
-      } else {
-        count += ds.cookies.size;
+      } else if (domainData) {
+        count += domainData.cookies.filter((c) =>
+          ds.cookies.has(getCookieKey(c)),
+        ).length;
       }
     }
     return count;
@@ -309,7 +315,9 @@ export function CookieManagementDialog({
       if (ds.allSelected) {
         result.push(...domain.cookies);
       } else {
-        result.push(...domain.cookies.filter((c) => ds.cookies.has(c.name)));
+        result.push(
+          ...domain.cookies.filter((c) => ds.cookies.has(getCookieKey(c))),
+        );
       }
     }
     return result;
@@ -369,7 +377,7 @@ export function CookieManagementDialog({
           ...prev,
           [domain]: {
             allSelected: true,
-            cookies: new Set(cookies.map((c) => c.name)),
+            cookies: new Set(cookies.map(getCookieKey)),
           },
         };
       });
@@ -378,17 +386,17 @@ export function CookieManagementDialog({
   );
 
   const toggleCookie = useCallback(
-    (domain: string, cookieName: string, totalCookies: number) => {
+    (domain: string, cookieKey: string, totalCookies: number) => {
       setExportSelection((prev) => {
         const current = prev[domain] ?? {
           allSelected: false,
           cookies: new Set<string>(),
         };
         const newCookies = new Set(current.cookies);
-        if (newCookies.has(cookieName)) {
-          newCookies.delete(cookieName);
+        if (newCookies.has(cookieKey)) {
+          newCookies.delete(cookieKey);
         } else {
-          newCookies.add(cookieName);
+          newCookies.add(cookieKey);
         }
         if (newCookies.size === 0) {
           const next = { ...prev };
@@ -667,7 +675,7 @@ interface ExportDomainRowProps {
   onToggleDomain: (domain: string, cookies: UnifiedCookie[]) => void;
   onToggleCookie: (
     domain: string,
-    cookieName: string,
+    cookieKey: string,
     totalCookies: number,
   ) => void;
   onToggleExpand: (domain: string) => void;
@@ -683,7 +691,10 @@ function ExportDomainRow({
 }: ExportDomainRowProps) {
   const domainSelection = selection[domain.domain];
   const isAllSelected = domainSelection?.allSelected ?? false;
-  const selectedCount = domainSelection?.cookies.size ?? 0;
+  const selectedCount = domainSelection
+    ? domain.cookies.filter((c) => domainSelection.cookies.has(getCookieKey(c)))
+        .length
+    : 0;
   const isPartial =
     selectedCount > 0 && selectedCount < domain.cookie_count && !isAllSelected;
 
@@ -719,23 +730,27 @@ function ExportDomainRow({
         className="ml-7 space-y-0.5 border-l pl-2"
       >
         {domain.cookies.map((cookie) => {
-          const isSelected = domainSelection?.cookies.has(cookie.name) ?? false;
+          const key = getCookieKey(cookie);
+          const isSelected = domainSelection?.cookies.has(key) ?? false;
           return (
             <div
-              key={`${domain.domain}-${cookie.name}`}
-              className="flex items-center gap-2 rounded p-1 text-sm hover:bg-accent/30"
+              key={`${domain.domain}-${key}`}
+              className="flex items-center justify-between gap-2 rounded p-1 text-sm hover:bg-accent/30"
             >
-              <Checkbox
-                checked={isSelected || isAllSelected}
-                onCheckedChange={() => {
-                  onToggleCookie(
-                    domain.domain,
-                    cookie.name,
-                    domain.cookie_count,
-                  );
-                }}
-              />
-              <span className="truncate">{cookie.name}</span>
+              <div className="flex min-w-0 items-center gap-2">
+                <Checkbox
+                  checked={isSelected || isAllSelected}
+                  onCheckedChange={() => {
+                    onToggleCookie(domain.domain, key, domain.cookie_count);
+                  }}
+                />
+                <span className="truncate">{cookie.name}</span>
+              </div>
+              {cookie.path && (
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {cookie.path}
+                </span>
+              )}
             </div>
           );
         })}

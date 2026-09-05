@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+start_time=$(date +%s)
+
+log() {
+  echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*"
+}
+
+log "Starting orb setup..."
+
+# 1. System packages
+REQUIRED_PKGS=(
+  libwebkit2gtk-4.1-dev
+  libayatana-appindicator3-dev
+  librsvg2-dev
+  libxdo-dev
+  libssl-dev
+  pkg-config
+  openvpn
+  unzip
+  xdg-utils
+  xvfb
+)
+
+missing_pkgs=()
+for pkg in "${REQUIRED_PKGS[@]}"; do
+  if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+    missing_pkgs+=("$pkg")
+  fi
+done
+
+if [ ${#missing_pkgs[@]} -gt 0 ]; then
+  log "Installing missing system packages: ${missing_pkgs[*]}"
+  sudo apt-get update
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing_pkgs[@]}"
+else
+  log "System packages already installed."
+fi
+
+# 2. Rust toolchain
+if ! command -v cargo >/dev/null 2>&1 || ! command -v rustc >/dev/null 2>&1; then
+  log "Installing Rust toolchain via rustup..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile default -c rustfmt -c clippy
+fi
+
+if [ -f "$HOME/.cargo/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.cargo/env"
+fi
+
+if [ -d "$HOME/.cargo/bin" ]; then
+  sudo ln -sf "$HOME/.cargo/bin"/* /usr/local/bin/
+fi
+
+if [ -f "$HOME/.bash_profile" ]; then
+  if ! grep -Fq '. "$HOME/.cargo/env"' "$HOME/.bash_profile"; then
+    echo '. "$HOME/.cargo/env"' >> "$HOME/.bash_profile"
+  fi
+fi
+
+# 3. typos spellchecker
+if ! command -v typos >/dev/null 2>&1; then
+  log "Installing typos CLI..."
+  TYPOS_VERSION="v1.50.1"
+  curl -fsSL "https://github.com/crate-ci/typos/releases/download/${TYPOS_VERSION}/typos-${TYPOS_VERSION}-x86_64-unknown-linux-musl.tar.gz" | sudo tar -xz -C /usr/local/bin ./typos
+  sudo chmod +x /usr/local/bin/typos
+else
+  log "typos already installed."
+fi
+
+# 4. Node.js & workspace dependencies
+log "Installing Node.js dependencies via pnpm..."
+pnpm install --frozen-lockfile
+
+# 5. Local environment configuration template
+if [ ! -f .env.local ] && [ -f .env.example ]; then
+  log "Creating .env.local from .env.example..."
+  cp -- .env.example .env.local
+fi
+
+# 6. Generate third-party license inventory (needed for dev & build)
+log "Generating license inventory..."
+pnpm licenses:generate
+
+# 7. Sidecar binaries (donut-proxy & Xray-core)
+if ! compgen -G "src-tauri/binaries/donut-proxy-*" >/dev/null 2>&1 || ! compgen -G "src-tauri/binaries/xray-*" >/dev/null 2>&1; then
+  log "Building sidecar binaries..."
+  pnpm copy-proxy-binary
+else
+  log "Sidecar binaries already present."
+fi
+
+elapsed=$(( $(date +%s) - start_time ))
+log "Setup completed in ${elapsed}s."

@@ -363,8 +363,10 @@ pub async fn start_proxy_process_with_profile(
     }
 
     // Update config with PID
+    let start_time = crate::proxy_storage::resolve_process_start_time(pid);
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = start_time;
     save_proxy_config(&config_with_pid)?;
 
     // Don't wait for the child - it's detached
@@ -437,8 +439,10 @@ pub async fn start_proxy_process_with_profile(
     }
 
     // Update config with PID
+    let start_time = crate::proxy_storage::resolve_process_start_time(pid);
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = start_time;
     save_proxy_config(&config_with_pid)?;
 
     drop(child);
@@ -509,6 +513,19 @@ pub async fn stop_proxy_process(id: &str) -> Result<bool, Box<dyn std::error::Er
 
   if let Some(config) = config {
     if let Some(pid) = config.pid {
+      let is_ours = match config.pid_start_time {
+        Some(expected) => crate::proxy_storage::process_identity_matches(pid, Some(expected)),
+        None => crate::proxy_storage::is_process_running(pid),
+      };
+      if !is_ours {
+        delete_proxy_config(id);
+        {
+          let mut processes = PROXY_PROCESSES.lock().unwrap();
+          processes.remove(id);
+        }
+        return Ok(false);
+      }
+
       // Kill the process
       #[cfg(unix)]
       {

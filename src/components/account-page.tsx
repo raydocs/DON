@@ -9,9 +9,7 @@ import {
   LuExternalLink,
   LuEye,
   LuEyeOff,
-  LuRefreshCw,
   LuShieldCheck,
-  LuUser,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
 import { Badge } from "@/components/ui/badge";
