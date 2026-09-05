@@ -181,6 +181,10 @@ path = "tests/sync_e2e.rs"
 name = "vpn_integration"
 path = "tests/vpn_integration.rs"
 
+[[test]]
+name = "window_state_relocation"
+path = "tests/window_state_relocation.rs"
+
 [profile.dev]
 codegen-units = 256
 incremental = true
