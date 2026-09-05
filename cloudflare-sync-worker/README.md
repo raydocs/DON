@@ -16,7 +16,18 @@
 ## 🚀 5 分钟一键部署指南
 
 ### 前置准备
-确保已安装 [Node.js](https://nodejs.org) 与 `pnpm`，并且拥有 Cloudflare 账号。
+确保已安装 [Node.js](https://nodejs.org) 24 LTS 与 `pnpm`，并且拥有 Cloudflare 账号。Wrangler 4 要求 Node.js 22 或更新版本。
+
+本项目固定使用 Wrangler 4.110.0 与对应的 Workers 类型，保持稳定的 Miniflare 4 工具链，避免安装时自动切换到 Miniflare 5 alpha。Miniflare 的 Undici 7 通过同主版本安全覆盖升级至 7.29.0；没有将 Undici 5 强行替换为不兼容的主版本。升级工具链时应重新检查完整 OSV 扫描与本地运行验证。
+
+### 从 Wrangler 3 迁移
+
+- Wrangler 4 的 R2/KV 对象命令默认操作本地数据。仓库的备份/恢复脚本显式使用 `--remote`，保留远程备份语义；它们会读写真实 R2，不要把它们当成本地测试。
+- D1 脚本继续明确区分 `d1:migrate:local` 与 `d1:migrate:remote`。现有 `nodejs_compat` 与 `compatibility_date` 不变；没有启用远程开发绑定。
+- 新 esbuild 会将动态通配符导入匹配的文件加入构建。本 Worker 没有此类运行时导入，也不使用已删除的 `publish`、`getBindingsProxy` 或 `node_compat` 接口。
+- 无凭据验证可使用 `pnpm exec wrangler deploy --dry-run`；本地 D1/R2 命令必须带 `--local`，并通过 `--persist-to` 指向独立临时目录。`wrangler dev` 默认本地运行。以上检查不替代远程权限、Cloudflare Access 策略或生产数据验证。
+
+完整变更参见 [Wrangler 3 → 4 迁移指南](https://developers.cloudflare.com/workers/wrangler/migration/update-v3-to-v4/)。
 
 ### 1. 安装依赖并登录 Cloudflare
 ```bash

@@ -8,7 +8,7 @@ TMP_RESTORE="/tmp/don-restore-$(date +%Y%m%d-%H%M%S).tar.gz"
 
 echo "==> Downloading backup from Cloudflare R2 (${BACKUP_KEY})..."
 cd "${WORKER_DIR}"
-npx wrangler r2 object get "don-sync-bucket/${BACKUP_KEY}" --file="${TMP_RESTORE}"
+npx wrangler r2 object get "don-sync-bucket/${BACKUP_KEY}" --remote --file="${TMP_RESTORE}"
 
 echo "==> Restoring to ${DON_DIR}..."
 mkdir -p "${DON_DIR}"
