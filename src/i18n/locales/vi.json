@@ -595,7 +595,9 @@
       "proxiesDescription": "Hành động này không thể hoàn tác. Thao tác này sẽ xóa vĩnh viễn {{count}} proxy: {{names}}.",
       "vpnsTitle": "Xóa các VPN đã chọn",
       "vpnsDescription": "Hành động này không thể hoàn tác. Thao tác này sẽ xóa vĩnh viễn {{count}} VPN: {{names}}.",
-      "confirmButton": "Xóa {{count}}"
+      "confirmButton": "Xóa {{count}}",
+      "skippedSome": "{{count}} proxy đã chọn đang được hồ sơ sử dụng và không bị xóa.",
+      "vpnsSkippedSome": "{{count}} VPN đã chọn đang được hồ sơ sử dụng và không bị xóa."
     }
   },
   "groups": {

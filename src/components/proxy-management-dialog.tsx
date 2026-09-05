@@ -68,6 +68,7 @@ import {
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
 import { parseBackendError, translateBackendError } from "@/lib/backend-errors";
+import { selectBulkDeletable } from "@/lib/bulk-delete";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
 import type { ProxyCheckResult, StoredProxy, VpnConfig } from "@/types";
@@ -966,10 +967,18 @@ export function ProxyManagementDialog({
 
   const handleBulkDeleteProxies = useCallback(async () => {
     if (selectedProxies.length === 0) return;
+    const deletable = selectBulkDeletable(selectedProxies, proxyUsage);
+    const skipped = selectedProxies.length - deletable.length;
+    if (deletable.length === 0) {
+      toast.warning(t("proxies.bulkDelete.skippedSome", { count: skipped }));
+      setProxiesRowSelection({});
+      setShowBulkDeleteProxiesDialog(false);
+      return;
+    }
     setIsBulkDeletingProxies(true);
     try {
       const results = await Promise.allSettled(
-        selectedProxies.map((proxy) =>
+        deletable.map((proxy) =>
           invoke("delete_stored_proxy", { proxyId: proxy.id }),
         ),
       );
@@ -981,22 +990,33 @@ export function ProxyManagementDialog({
       if (failed > 0) {
         toast.error(t("proxies.management.deleteFailed"));
       }
+      if (skipped > 0) {
+        toast.warning(t("proxies.bulkDelete.skippedSome", { count: skipped }));
+      }
       await emit("stored-proxies-changed");
       setProxiesRowSelection({});
     } finally {
       setIsBulkDeletingProxies(false);
       setShowBulkDeleteProxiesDialog(false);
     }
-  }, [selectedProxies, t]);
+  }, [selectedProxies, proxyUsage, t]);
 
   const handleBulkDeleteVpns = useCallback(async () => {
     if (selectedVpns.length === 0) return;
+    const deletable = selectBulkDeletable(selectedVpns, vpnUsage);
+    const skipped = selectedVpns.length - deletable.length;
+    if (deletable.length === 0) {
+      toast.warning(
+        t("proxies.bulkDelete.vpnsSkippedSome", { count: skipped }),
+      );
+      setVpnsRowSelection({});
+      setShowBulkDeleteVpnsDialog(false);
+      return;
+    }
     setIsBulkDeletingVpns(true);
     try {
       const results = await Promise.allSettled(
-        selectedVpns.map((vpn) =>
-          invoke("delete_vpn_config", { vpnId: vpn.id }),
-        ),
+        deletable.map((vpn) => invoke("delete_vpn_config", { vpnId: vpn.id })),
       );
       const failed = results.filter((r) => r.status === "rejected").length;
       const succeeded = results.length - failed;
@@ -1006,13 +1026,18 @@ export function ProxyManagementDialog({
       if (failed > 0) {
         toast.error(t("vpns.management.deleteFailed"));
       }
+      if (skipped > 0) {
+        toast.warning(
+          t("proxies.bulkDelete.vpnsSkippedSome", { count: skipped }),
+        );
+      }
       await emit("vpn-configs-changed");
       setVpnsRowSelection({});
     } finally {
       setIsBulkDeletingVpns(false);
       setShowBulkDeleteVpnsDialog(false);
     }
-  }, [selectedVpns, t]);
+  }, [selectedVpns, vpnUsage, t]);
 
   // Bulk-toggle sync: if every selectable row has sync ON, turn them all
   // OFF; otherwise turn them all ON. Items locked by a synced profile

@@ -595,7 +595,9 @@
       "proxiesDescription": "Esta ação não pode ser desfeita. Isso excluirá permanentemente {{count}} proxy(s): {{names}}.",
       "vpnsTitle": "Excluir VPNs selecionadas",
       "vpnsDescription": "Esta ação não pode ser desfeita. Isso excluirá permanentemente {{count}} VPN(s): {{names}}.",
-      "confirmButton": "Excluir {{count}}"
+      "confirmButton": "Excluir {{count}}",
+      "skippedSome": "{{count}} proxy(s) selecionado(s) estão em uso por perfis e não foram excluídos.",
+      "vpnsSkippedSome": "{{count}} VPN(s) selecionada(s) estão em uso por perfis e não foram excluídas."
     }
   },
   "groups": {

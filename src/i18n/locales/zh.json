@@ -595,7 +595,9 @@
       "proxiesDescription": "此操作无法撤销。将永久删除 {{count}} 个代理：{{names}}。",
       "vpnsTitle": "删除所选 VPN",
       "vpnsDescription": "此操作无法撤销。将永久删除 {{count}} 个 VPN：{{names}}。",
-      "confirmButton": "删除 {{count}}"
+      "confirmButton": "删除 {{count}}",
+      "skippedSome": "{{count}} 个所选代理正被配置文件使用，未删除。",
+      "vpnsSkippedSome": "{{count}} 个所选 VPN 正被配置文件使用，未删除。"
     }
   },
   "groups": {

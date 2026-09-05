@@ -595,7 +595,9 @@
       "proxiesDescription": "Cette action est irréversible. {{count}} proxy(s) seront définitivement supprimés : {{names}}.",
       "vpnsTitle": "Supprimer les VPN sélectionnés",
       "vpnsDescription": "Cette action est irréversible. {{count}} VPN(s) seront définitivement supprimés : {{names}}.",
-      "confirmButton": "Supprimer {{count}}"
+      "confirmButton": "Supprimer {{count}}",
+      "skippedSome": "{{count}} proxy(s) sélectionné(s) sont utilisés par des profils et n'ont pas été supprimés.",
+      "vpnsSkippedSome": "{{count}} VPN(s) sélectionnée(s) sont utilisées par des profils et n'ont pas été supprimées."
     }
   },
   "groups": {

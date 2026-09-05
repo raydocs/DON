@@ -595,7 +595,9 @@
       "proxiesDescription": "This action cannot be undone. This will permanently delete {{count}} proxy(s): {{names}}.",
       "vpnsTitle": "Delete Selected VPNs",
       "vpnsDescription": "This action cannot be undone. This will permanently delete {{count}} VPN(s): {{names}}.",
-      "confirmButton": "Delete {{count}}"
+      "confirmButton": "Delete {{count}}",
+      "skippedSome": "{{count}} selected proxy(s) are in use by profiles and were not deleted.",
+      "vpnsSkippedSome": "{{count}} selected VPN(s) are in use by profiles and were not deleted."
     }
   },
   "groups": {
