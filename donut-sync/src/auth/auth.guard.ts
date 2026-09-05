@@ -139,8 +139,9 @@ export class AuthGuard implements CanActivate {
           const scope = sub ? await this.resolveTeamScope(sub) : null;
           if (scope && /^[^/]+$/.test(scope.ownerId)) {
             effectivePrefix = `users/${scope.ownerId}/`;
-            if (scope.teamProfileLimit > 0) {
-              effectiveProfileLimit = scope.teamProfileLimit;
+            const teamLimit = scope.teamProfileLimit;
+            if (typeof teamLimit === "number" && teamLimit >= 0) {
+              effectiveProfileLimit = teamLimit;
             }
           }
         } catch (err) {

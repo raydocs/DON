@@ -97,9 +97,8 @@ const FINGERPRINT_GENERATION_ATTEMPTS: usize = 30;
 const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
-#[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
 fn base_wayfern_launch_args(port: u16, profile_path: &str) -> Vec<String> {
-  let mut args = vec![
+  let args = vec![
     format!("--remote-debugging-port={port}"),
     "--remote-debugging-address=127.0.0.1".to_string(),
     format!("--user-data-dir={profile_path}"),

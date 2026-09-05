@@ -71,3 +71,7 @@ HANDOFF.md
 .claude/stop-failure-events.jsonl
 .claude/quota-blocked.json
 session-recover.yaml
+
+# Amp portals
+.amp/portals/*
+

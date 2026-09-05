@@ -188,8 +188,7 @@ fn generate_tray_icons() {
     // macOS will automatically handle light/dark mode by inverting the icon
     // For template icons: RGB should be 0,0,0 (black) and alpha controls visibility
     let data = pixmap.data_mut();
-    let (pixels, _remainder) = data.as_chunks_mut::<4>();
-    for pixel in pixels {
+    for pixel in data.as_chunks_mut::<4>().0 {
       // Keep the original alpha (shows where icon content is)
       // but make the color black for template icon format
       pixel[0] = 0; // R
