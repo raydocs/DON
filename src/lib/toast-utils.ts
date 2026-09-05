@@ -38,16 +38,6 @@ interface DownloadToastProps extends BaseToastProps {
   };
 }
 
-interface VersionUpdateToastProps extends BaseToastProps {
-  type: "version-update";
-  progress?: {
-    current: number;
-    total: number;
-    found: number;
-    current_browser?: string;
-  };
-}
-
 interface SyncProgressToastProps extends BaseToastProps {
   type: "sync-progress";
   progress?: {
@@ -67,7 +57,6 @@ type ToastProps =
   | ErrorToastProps
   | DownloadToastProps
   | LoadingToastProps
-  | VersionUpdateToastProps
   | SyncProgressToastProps;
 
 export function showToast(props: ToastProps & { id?: string }) {
@@ -93,9 +82,6 @@ export function showToast(props: ToastProps & { id?: string }) {
         break;
       case "error":
         duration = 10000;
-        break;
-      case "version-update":
-        duration = 15000;
         break;
       case "sync-progress":
         duration = Number.POSITIVE_INFINITY;
