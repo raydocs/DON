@@ -56,6 +56,9 @@ nodecar/nodecar-bin
 # sync test harness cache
 .cache/
 
+# Wrangler local build/runtime state
+/cloudflare-sync-worker/.wrangler/
+
 # env
 .env
 
@@ -74,4 +77,3 @@ session-recover.yaml
 
 # Amp portals
 .amp/portals/*
-
