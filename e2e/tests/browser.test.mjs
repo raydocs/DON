@@ -5,7 +5,7 @@ import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { appFromEnvironment } from "../lib/app.mjs";
+import { appFromEnvironment, withApp } from "../lib/app.mjs";
 import { CdpClient } from "../lib/cdp.mjs";
 import {
   defaultWayfernPath,
@@ -140,6 +140,42 @@ async function createRealProfile(
     launchHook: null,
   });
 }
+
+test("a deleted proxy reference refuses launch before starting a browser", async () => {
+  await withApp("browser-missing-proxy", async (app) => {
+    const profile = await createRealProfile(
+      app,
+      "150.0.7871.100",
+      "Missing proxy reference",
+      "{}",
+    );
+    const proxy = await app.invoke("create_stored_proxy", {
+      name: "Deleted proxy",
+      proxySettings: {
+        proxy_type: "http",
+        host: "127.0.0.1",
+        port: 9,
+        username: null,
+        password: null,
+      },
+    });
+    const assigned = await app.invoke("update_profile_proxy", {
+      profileId: profile.id,
+      proxyId: proxy.id,
+    });
+    await app.invoke("delete_stored_proxy", { proxyId: proxy.id });
+    const error = await app.invokeError("launch_browser_profile", {
+      profile: assigned,
+      url: null,
+    });
+    assert.match(error, /"code":"PROXY_NOT_FOUND"/);
+    const persisted = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === profile.id,
+    );
+    assert.equal(persisted.proxy_id, proxy.id);
+    assert.equal(persisted.process_id, null);
+  });
+});
 
 test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and process cleanup", async () => {
   assert.ok(process.env.WAYFERN_TEST_TOKEN, "WAYFERN_TEST_TOKEN is required");
