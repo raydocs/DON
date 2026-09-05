@@ -1724,6 +1724,13 @@ impl SyncEngine {
     group_id: &str,
     app_handle: Option<&tauri::AppHandle>,
   ) -> SyncResult<()> {
+    // A late upload notification can follow tombstone processing. The stale
+    // remote object must not recreate the group that was just deleted locally.
+    let tombstone_key = format!("tombstones/groups/{group_id}.json");
+    if self.client.stat(&tombstone_key).await?.exists {
+      return Ok(());
+    }
+
     let local_group = {
       let group_manager = crate::group_manager::GROUP_MANAGER.lock().unwrap();
       let groups = group_manager.get_all_groups().unwrap_or_default();
@@ -4275,6 +4282,77 @@ pub async fn rollover_encryption_for_all_entities(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn queued_group_sync_does_not_download_a_tombstoned_remote_copy() {
+    use crate::group_manager::{ProfileGroup, GROUP_MANAGER};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let server = MockServer::start().await;
+    let engine = SyncEngine::new(server.uri(), "isolated-test-token".to_string());
+    let group = ProfileGroup {
+      id: uuid::Uuid::new_v4().to_string(),
+      name: "Remote group".to_string(),
+      sync_enabled: true,
+      last_sync: None,
+      updated_at: Some(1),
+    };
+
+    for tombstoned in [true, false] {
+      server.reset().await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(serde_json::json!({
+          "key": format!("tombstones/groups/{}.json", group.id)
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": tombstoned
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(
+          serde_json::json!({"key": format!("groups/{}.json", group.id)}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": true
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/presign-download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "url": format!("{}/download", server.uri()), "expiresAt": "unused"
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("GET"))
+        .and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&group))
+        .mount(&server)
+        .await;
+
+      // A late object notification arrives after local tombstone deletion,
+      // while the remote object was recreated by an earlier peer upload.
+      engine.sync_group(&group.id, None).await.unwrap();
+      let groups = GROUP_MANAGER.lock().unwrap().get_all_groups().unwrap();
+      if tombstoned {
+        assert!(
+          groups.is_empty(),
+          "late sync resurrected a tombstoned group"
+        );
+      } else {
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, group.id);
+        assert_eq!(groups[0].name, group.name);
+        assert_eq!(groups[0].updated_at, Some(1));
+      }
+    }
+  }
 
   #[tokio::test]
   async fn proxy_upload_writeback_preserves_deletion_and_newer_edits() {
