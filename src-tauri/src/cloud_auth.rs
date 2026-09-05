@@ -1540,14 +1540,17 @@ pub async fn cloud_get_proxy_usage() -> Result<Option<CloudProxyUsage>, String> 
 
 #[tauri::command]
 pub async fn restart_sync_service(app_handle: tauri::AppHandle) -> Result<(), String> {
-  // Stop existing scheduler
-  if let Some(scheduler) = sync::get_global_scheduler() {
-    scheduler.stop();
-  }
-
   // Restart sync pipeline
   let app_handle_sync = app_handle.clone();
   tauri::async_runtime::spawn(async move {
+    let mut active_subscription = sync::subscription::GLOBAL_SUBSCRIPTION.lock().await;
+    if let Some(mut previous) = active_subscription.take() {
+      previous.stop().await;
+    }
+    if let Some(scheduler) = sync::get_global_scheduler() {
+      scheduler.stop();
+    }
+
     let mut subscription_manager = sync::SubscriptionManager::new();
     let work_rx = subscription_manager.take_work_receiver();
 
@@ -1586,6 +1589,7 @@ pub async fn restart_sync_service(app_handle: tauri::AppHandle) -> Result<(), St
         .await;
       log::info!("Sync scheduler restarted");
     }
+    *active_subscription = Some(subscription_manager);
   });
 
   Ok(())

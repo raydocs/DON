@@ -8,6 +8,10 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
 
+// Held through startup/restart so overlapping requests cannot orphan a pipeline.
+pub(crate) static GLOBAL_SUBSCRIPTION: tokio::sync::Mutex<Option<SubscriptionManager>> =
+  tokio::sync::Mutex::const_new(None);
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubscribeEvent {
   #[serde(rename = "type")]
@@ -44,6 +48,16 @@ pub struct SyncSubscription {
   source: TokenSource,
   running: Arc<AtomicBool>,
   work_tx: mpsc::UnboundedSender<SyncWorkItem>,
+  task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Drop for SyncSubscription {
+  fn drop(&mut self) {
+    self.running.store(false, Ordering::SeqCst);
+    if let Some(task) = &self.task {
+      task.abort();
+    }
+  }
 }
 
 impl SyncSubscription {
@@ -60,6 +74,7 @@ impl SyncSubscription {
       source,
       running: Arc::new(AtomicBool::new(false)),
       work_tx,
+      task: None,
     }
   }
 
@@ -107,11 +122,16 @@ impl SyncSubscription {
     self.running.load(Ordering::SeqCst)
   }
 
-  pub fn stop(&self) {
+  pub async fn stop(&mut self) {
     self.running.store(false, Ordering::SeqCst);
+    if let Some(task) = self.task.take() {
+      task.abort();
+      // Release the socket and sender before a replacement can start.
+      let _ = task.await;
+    }
   }
 
-  pub async fn start(&self, app_handle: tauri::AppHandle) {
+  pub async fn start(&mut self, app_handle: tauri::AppHandle) {
     if self.running.swap(true, Ordering::SeqCst) {
       return;
     }
@@ -123,11 +143,9 @@ impl SyncSubscription {
     let client = self.client.clone();
     let mut token = self.token.clone();
 
-    tokio::spawn(async move {
+    self.task = Some(tokio::spawn(async move {
       while running.load(Ordering::SeqCst) {
-        match Self::connect_and_listen(&client, &base_url, &token, &work_tx, &running, &app_handle)
-          .await
-        {
+        match Self::connect_and_listen(&client, &base_url, &token, &work_tx, &running).await {
           Ok(()) => {
             log::info!("SSE connection closed gracefully");
           }
@@ -156,8 +174,9 @@ impl SyncSubscription {
         }
       }
 
+      running.store(false, Ordering::SeqCst);
       log::info!("Sync subscription stopped");
-    });
+    }));
   }
 
   /// Fetch a current sync token from the same source the subscription was
@@ -189,7 +208,6 @@ impl SyncSubscription {
     token: &str,
     work_tx: &mpsc::UnboundedSender<SyncWorkItem>,
     running: &Arc<AtomicBool>,
-    _app_handle: &tauri::AppHandle,
   ) -> Result<(), String> {
     let url = format!("{base_url}/v1/objects/subscribe");
 
@@ -403,7 +421,7 @@ impl SubscriptionManager {
     let subscription =
       SyncSubscription::create_from_settings(&app_handle, self.work_tx.clone()).await?;
 
-    if let Some(sub) = subscription {
+    if let Some(mut sub) = subscription {
       sub.start(app_handle).await;
       self.subscription = Some(sub);
       log::info!("Sync subscription manager started");
@@ -414,9 +432,9 @@ impl SubscriptionManager {
     Ok(())
   }
 
-  pub fn stop(&mut self) {
-    if let Some(sub) = &self.subscription {
-      sub.stop();
+  pub async fn stop(&mut self) {
+    if let Some(sub) = &mut self.subscription {
+      sub.stop().await;
     }
     self.subscription = None;
     log::info!("Sync subscription manager stopped");
@@ -424,5 +442,108 @@ impl SubscriptionManager {
 
   pub fn is_running(&self) -> bool {
     self.subscription.as_ref().is_some_and(|s| s.is_running())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use tokio::io::{AsyncReadExt, AsyncWriteExt};
+  use tokio::time::timeout;
+
+  // Exercise the real HTTP/SSE listener without cloud credentials or a GUI.
+  async fn idle_subscription() -> (
+    SubscriptionManager,
+    std::sync::Weak<AtomicBool>,
+    tokio::task::JoinHandle<()>,
+  ) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+      let (mut socket, _) = listener.accept().await.unwrap();
+      let mut request = Vec::new();
+      while !request.ends_with(b"\r\n\r\n") {
+        request.push(socket.read_u8().await.unwrap());
+      }
+      socket
+        .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {\"type\":\"change\",\"key\":\"proxies/fixture.json\"}\n\n")
+        .await
+        .unwrap();
+      let mut remaining = Vec::new();
+      socket.read_to_end(&mut remaining).await.unwrap();
+    });
+    let mut manager = SubscriptionManager::new();
+    let mut subscription = SyncSubscription::new(
+      url.clone(),
+      "fixture".into(),
+      TokenSource::SelfHosted,
+      manager.work_tx.clone(),
+    );
+    subscription.running.store(true, Ordering::SeqCst);
+    let running = subscription.running.clone();
+    let weak = Arc::downgrade(&running);
+    let client = subscription.client.clone();
+    let sender = subscription.work_tx.clone();
+    subscription.task = Some(tokio::spawn(async move {
+      SyncSubscription::connect_and_listen(&client, &url, "fixture", &sender, &running)
+        .await
+        .unwrap();
+    }));
+    manager.subscription = Some(subscription);
+    let event = timeout(
+      Duration::from_secs(2),
+      manager.work_rx.as_mut().unwrap().recv(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(matches!(event, SyncWorkItem::Proxy(id) if id == "fixture"));
+    (manager, weak, server)
+  }
+
+  #[tokio::test]
+  async fn repeated_replacement_keeps_one_idle_sse_listener() {
+    let mut active: Option<SubscriptionManager> = None;
+    let mut listeners = Vec::new();
+    let mut servers = Vec::new();
+    for _ in 0..11 {
+      if let Some(mut previous) = active.take() {
+        timeout(Duration::from_secs(1), previous.stop())
+          .await
+          .unwrap();
+        assert!(!previous.is_running());
+      }
+      let (manager, listener, server) = idle_subscription().await;
+      active = Some(manager);
+      listeners.push(listener);
+      servers.push(server);
+    }
+    let alive = listeners
+      .iter()
+      .filter(|listener| listener.strong_count() > 0)
+      .count();
+    println!("After 10 replacements: {alive} live SSE listener(s)");
+    assert_eq!(alive, 1);
+    active.as_mut().unwrap().stop().await;
+    assert!(listeners
+      .iter()
+      .all(|listener| listener.strong_count() == 0));
+    for server in servers {
+      timeout(Duration::from_secs(1), server)
+        .await
+        .unwrap()
+        .unwrap();
+    }
+  }
+
+  #[tokio::test]
+  async fn dropping_manager_closes_idle_sse_socket() {
+    let (manager, listener, server) = idle_subscription().await;
+    drop(manager);
+    timeout(Duration::from_secs(1), server)
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(listener.strong_count(), 0);
   }
 }
