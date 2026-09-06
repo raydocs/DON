@@ -1593,6 +1593,13 @@ impl SyncEngine {
     proxy_id: &str,
     app_handle: Option<&tauri::AppHandle>,
   ) -> SyncResult<()> {
+    // A late object notification must not recreate a proxy already deleted
+    // by a tombstone, even if an older upload left its remote JSON behind.
+    let tombstone_key = format!("tombstones/proxies/{proxy_id}.json");
+    if self.client.stat(&tombstone_key).await?.exists {
+      return Ok(());
+    }
+
     let proxy_manager = &crate::proxy_manager::PROXY_MANAGER;
     let proxies = proxy_manager.get_stored_proxies();
     let local_proxy = proxies.iter().find(|p| p.id == proxy_id).cloned();
@@ -4282,6 +4289,93 @@ pub async fn rollover_encryption_for_all_entities(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn queued_proxy_sync_does_not_download_a_tombstoned_remote_copy() {
+    use crate::proxy_manager::{StoredProxy, PROXY_MANAGER};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let server = MockServer::start().await;
+    let engine = SyncEngine::new(server.uri(), "isolated-test-token".into());
+
+    for tombstoned in [true, false] {
+      server.reset().await;
+      let mut proxy = StoredProxy::new(
+        "Remote proxy".into(),
+        crate::browser::ProxySettings {
+          proxy_type: "http".into(),
+          host: "proxy.invalid".into(),
+          port: 8080,
+          username: None,
+          password: None,
+          vless_uri: None,
+        },
+      );
+      proxy.sync_enabled = true;
+      proxy.updated_at = Some(1);
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(serde_json::json!({
+          "key": format!("tombstones/proxies/{}.json", proxy.id)
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": tombstoned
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(
+          serde_json::json!({"key": format!("proxies/{}.json", proxy.id)}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"exists": true})))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/presign-download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "url": format!("{}/download", server.uri()), "expiresAt": "unused"
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("GET"))
+        .and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&proxy))
+        .mount(&server)
+        .await;
+
+      // Tombstone processing already removed the local record. A delayed
+      // notification still points at a remote copy left by an earlier upload.
+      engine.sync_proxy(&proxy.id, None).await.unwrap();
+      let saved = PROXY_MANAGER
+        .get_stored_proxies()
+        .into_iter()
+        .find(|p| p.id == proxy.id);
+      PROXY_MANAGER.remove_from_memory(&proxy.id);
+      let file = PROXY_MANAGER.get_proxy_file_path(&proxy.id);
+      if tombstoned {
+        assert!(
+          saved.is_none(),
+          "late sync resurrected tombstoned proxy in memory"
+        );
+        assert!(
+          !file.exists(),
+          "late sync resurrected tombstoned proxy on disk"
+        );
+      } else {
+        let saved = saved.unwrap();
+        assert_eq!(saved.name, proxy.name);
+        assert_eq!(saved.updated_at, Some(1));
+        assert!(
+          file.exists(),
+          "non-tombstoned remote proxy must still download"
+        );
+      }
+    }
+  }
 
   #[tokio::test]
   async fn queued_group_sync_does_not_download_a_tombstoned_remote_copy() {
