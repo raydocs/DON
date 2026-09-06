@@ -4287,6 +4287,10 @@ pub async fn rollover_encryption_for_all_entities(
 }
 
 #[cfg(test)]
+#[path = "rollover_tests.rs"]
+mod rollover_tests;
+
+#[cfg(test)]
 mod tests {
   use super::*;
 
