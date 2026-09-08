@@ -10,9 +10,6 @@ import { invoke } from "@tauri-apps/api/core";
  * the server reports.
  */
 
-/** Bit 0 = Monday, bit 6 = Sunday. */
-export const COOKIE_BOT_DAY_BITS = [1, 2, 4, 8, 16, 32, 64] as const;
-
 /**
  * What marks a `template_id` as one of the USER's own rather than a curated one.
  *
@@ -362,15 +359,6 @@ export function getCookieBotSchedules(
   scope?: CookieBotScope,
 ): Promise<CookieBotScheduleList> {
   return invoke<CookieBotScheduleList>("get_cookie_bot_schedules", { scope });
-}
-
-/** `null` means the profile is not enrolled, which is a state, not a failure. */
-export function getCookieBotSchedule(
-  profileId: string,
-): Promise<CookieBotSchedule | null> {
-  return invoke<CookieBotSchedule | null>("get_cookie_bot_schedule", {
-    profileId,
-  });
 }
 
 /**
