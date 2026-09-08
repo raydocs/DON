@@ -573,13 +573,3 @@ export function extractLockoutSeconds(err: unknown): number | null {
   const secs = Number.parseInt(parsed.params?.seconds ?? "0", 10);
   return Number.isFinite(secs) && secs > 0 ? secs : null;
 }
-
-/**
- * True if the error is a known structured backend error code.
- */
-export function isBackendErrorCode(
-  err: unknown,
-  code: BackendErrorCode,
-): boolean {
-  return parseBackendError(err)?.code === code;
-}
