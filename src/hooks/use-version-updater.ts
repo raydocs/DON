@@ -18,20 +18,6 @@ interface VersionUpdateProgress {
   status: string; // "updating", "completed", "error"
 }
 
-interface BackgroundUpdateResult {
-  browser: string;
-  new_versions_count: number;
-  total_versions_count: number;
-  updated_successfully: boolean;
-  error?: string;
-}
-
-interface BrowserVersionsResult {
-  versions: string[];
-  new_versions_count?: number;
-  total_versions_count: number;
-}
-
 interface AutoUpdateEvent {
   browser: string;
   new_version: string;
@@ -303,150 +289,11 @@ export function useVersionUpdater() {
     };
   }, [loadUpdateStatus]);
 
-  const triggerManualUpdate = useCallback(async () => {
-    try {
-      setIsUpdating(true);
-      const results = await invoke<BackgroundUpdateResult[]>(
-        "trigger_manual_version_update",
-      );
-
-      const totalNewVersions = results.reduce(
-        (sum, result) => sum + result.new_versions_count,
-        0,
-      );
-      const successfulUpdates = results.filter(
-        (r) => r.updated_successfully,
-      ).length;
-      const failedUpdates = results.filter(
-        (r) => !r.updated_successfully,
-      ).length;
-
-      if (failedUpdates > 0) {
-        showErrorToast(i18n.t("versionUpdater.toast.updateWithErrors"), {
-          description: i18n.t(
-            "versionUpdater.toast.updateWithErrorsDescription",
-            {
-              newVersions: totalNewVersions,
-              failedUpdates,
-            },
-          ),
-          duration: 5000,
-        });
-      } else if (totalNewVersions > 0) {
-        showSuccessToast(i18n.t("versionUpdater.toast.updateSuccess"), {
-          description: i18n.t("versionUpdater.toast.updateSuccessDescription", {
-            newVersions: totalNewVersions,
-            successfulUpdates,
-          }),
-          duration: 4000,
-        });
-      } else {
-        showSuccessToast(i18n.t("versionUpdater.toast.upToDate"), {
-          description: i18n.t("versionUpdater.toast.upToDateDescription"),
-          duration: 3000,
-        });
-      }
-
-      await loadUpdateStatus();
-      return results;
-    } catch (error) {
-      console.error("Failed to trigger manual update:", error);
-      let errorMessage = i18n.t("common.errors.unknown");
-      if (error instanceof Error) {
-        errorMessage = error.message;
-      } else if (typeof error === "string") {
-        errorMessage = error;
-      } else if (error && typeof error === "object" && "message" in error) {
-        errorMessage = String(error.message);
-      }
-
-      showErrorToast(i18n.t("versionUpdater.toast.updateAllFailed"), {
-        description: errorMessage,
-        duration: 4000,
-      });
-      throw error;
-    } finally {
-      setIsUpdating(false);
-    }
-  }, [loadUpdateStatus]);
-
-  const fetchBrowserVersionsWithNewCount = useCallback(
-    async (browserStr: string) => {
-      try {
-        const result = await invoke<BrowserVersionsResult>(
-          "fetch_browser_versions_with_count",
-          { browserStr },
-        );
-
-        // Show notification about new versions if any were found
-        if (result.new_versions_count && result.new_versions_count > 0) {
-          const browserName = getBrowserDisplayName(browserStr);
-          showSuccessToast(
-            i18n.t("browserDownload.toast.foundNewVersions", {
-              count: result.new_versions_count,
-              browser: browserName,
-            }),
-            {
-              duration: 3000,
-              description: i18n.t(
-                "browserDownload.toast.totalAvailableVersions",
-                { count: result.total_versions_count },
-              ),
-            },
-          );
-        }
-
-        return result;
-      } catch (error) {
-        console.error("Failed to fetch browser versions with count:", error);
-        throw error;
-      }
-    },
-    [],
-  );
-
-  const formatTimeUntilUpdate = useCallback((seconds: number): string => {
-    if (seconds < 60) {
-      return `${seconds} seconds`;
-    }
-    const minutes = Math.floor(seconds / 60);
-    if (minutes < 60) {
-      return `${minutes} minute${minutes === 1 ? "" : "s"}`;
-    }
-    const hours = Math.floor(minutes / 60);
-    return `${hours} hour${hours === 1 ? "" : "s"}`;
-  }, []);
-
-  const formatLastUpdateTime = useCallback(
-    (timestamp: number | null): string => {
-      if (!timestamp) return "Never";
-
-      const date = new Date(timestamp * 1000);
-      const now = new Date();
-      const diffMs = now.getTime() - date.getTime();
-      const diffHours = Math.floor(diffMs / (1000 * 60 * 60));
-      const diffMinutes = Math.floor((diffMs % (1000 * 60 * 60)) / (1000 * 60));
-
-      if (diffHours > 0) {
-        return `${diffHours}h ${diffMinutes}m ago`;
-      }
-      if (diffMinutes > 0) {
-        return `${diffMinutes}m ago`;
-      }
-      return "Just now";
-    },
-    [],
-  );
-
   return {
     isUpdating,
     lastUpdateTime,
     timeUntilNextUpdate,
     updateProgress,
-    triggerManualUpdate,
-    fetchBrowserVersionsWithNewCount,
-    formatTimeUntilUpdate,
-    formatLastUpdateTime,
     loadUpdateStatus,
   };
 }
