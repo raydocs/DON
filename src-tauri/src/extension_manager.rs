@@ -1383,6 +1383,25 @@ impl ExtensionManager {
 
   // Sync helpers
 
+  /// Call with EXTENSION_MANAGER locked so upload bookkeeping cannot replay a
+  /// snapshot from before an edit, or recreate an extension deleted in flight.
+  pub fn update_extension_last_sync(
+    &self,
+    id: &str,
+    last_sync: u64,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata_path = self.get_metadata_path(id);
+    let content = match fs::read_to_string(&metadata_path) {
+      Ok(content) => content,
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+      Err(e) => return Err(e.into()),
+    };
+    let mut ext: Extension = serde_json::from_str(&content)?;
+    ext.last_sync = Some(last_sync);
+    fs::write(metadata_path, serde_json::to_string_pretty(&ext)?)?;
+    Ok(())
+  }
+
   pub fn update_extension_internal(
     &self,
     ext: &Extension,

@@ -2168,7 +2168,7 @@ impl SyncEngine {
     // Update local extension with new last_sync
     {
       let manager = crate::extension_manager::EXTENSION_MANAGER.lock().unwrap();
-      if let Err(e) = manager.update_extension_internal(&updated_ext) {
+      if let Err(e) = manager.update_extension_last_sync(&ext.id, now) {
         log::warn!("Failed to update extension last_sync: {}", e);
       }
     }
@@ -4539,6 +4539,111 @@ mod tests {
       }
     }
     server.abort();
+  }
+
+  async fn extension_upload_writeback_interleaving(delete: bool) {
+    use crate::extension_manager::{EXTENSION_MANAGER, SOURCE_KIND_UNPACKED};
+    use axum::{routing::post, routing::put, Json, Router};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let folder = temp.path().join("replacement");
+    fs::create_dir_all(&folder).unwrap();
+    fs::write(
+      folder.join("manifest.json"),
+      r#"{"manifest_version":3,"name":"Replacement","version":"3.1.4"}"#,
+    )
+    .unwrap();
+    let ext = EXTENSION_MANAGER
+      .lock()
+      .unwrap()
+      .add_extension("Original".into(), "original.zip".into(), vec![1, 2, 3])
+      .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let upload_base = url.clone();
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app = Router::new()
+      .route(
+        "/v1/objects/presign-upload",
+        post(move |Json(body): Json<serde_json::Value>| {
+          let url = format!(
+            "{}/{}",
+            upload_base,
+            if body["key"].as_str().unwrap().contains("/file/") {
+              "payload"
+            } else {
+              "metadata"
+            }
+          );
+          async move { Json(serde_json::json!({"url": url, "expiresAt": "unused"})) }
+        }),
+      )
+      .route("/metadata", put(|| async { axum::http::StatusCode::OK }))
+      .route(
+        "/payload",
+        put({
+          let started = started.clone();
+          let release = release.clone();
+          move || {
+            let started = started.clone();
+            let release = release.clone();
+            async move {
+              started.notify_one();
+              release.notified().await;
+              axum::http::StatusCode::OK
+            }
+          }
+        }),
+      );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let engine = SyncEngine::new(url, "isolated-test-token".into());
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+      tokio::join!(engine.upload_extension(&ext), async {
+        // Hold the final HTTP response after the old metadata and payload were read.
+        started.notified().await;
+        let manager = EXTENSION_MANAGER.lock().unwrap();
+        let edited = if delete {
+          manager.delete_extension_internal(&ext.id).unwrap();
+          None
+        } else {
+          Some(
+            manager
+              .update_extension_from_path(&ext.id, None, &folder, false)
+              .unwrap(),
+          )
+        };
+        release.notify_one();
+        edited
+      })
+    })
+    .await;
+    server.abort();
+    let (result, edited) = outcome.expect("upload and concurrent mutation should complete");
+    result.unwrap();
+    let saved = EXTENSION_MANAGER.lock().unwrap().get_extension(&ext.id);
+    if let Some(edited) = edited {
+      assert_eq!(edited.source_kind, SOURCE_KIND_UNPACKED);
+      let mut saved = saved.unwrap();
+      assert!(saved.last_sync.take().is_some());
+      assert_eq!(
+        serde_json::to_value(saved).unwrap(),
+        serde_json::to_value(edited).unwrap()
+      );
+    } else {
+      assert!(saved.is_err(), "upload resurrected deleted extension");
+    }
+  }
+
+  #[tokio::test]
+  async fn extension_upload_writeback_preserves_user_edit() {
+    extension_upload_writeback_interleaving(false).await;
+  }
+
+  #[tokio::test]
+  async fn extension_upload_writeback_preserves_deletion() {
+    extension_upload_writeback_interleaving(true).await;
   }
 
   #[test]
