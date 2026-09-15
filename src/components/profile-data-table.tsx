@@ -14,7 +14,7 @@ import {
 } from "@tanstack/react-table";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { invoke } from "@tauri-apps/api/core";
-import { emit, listen } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { AnimatePresence, motion } from "motion/react";
 import type { Dispatch, SetStateAction } from "react";
@@ -141,7 +141,6 @@ import { cn } from "@/lib/utils";
 import type {
   BrowserProfile,
   ExtensionGroup,
-  LocationItem,
   ProfileBotState,
   ProxyCheckResult,
   StoredProxy,
@@ -271,15 +270,6 @@ interface TableMeta {
   onToggleProfileSync?: (profile: BrowserProfile) => void;
   crossOsUnlocked?: boolean;
   syncUnlocked?: boolean;
-
-  // Country proxy creation (inline in proxy dropdown)
-  countries: LocationItem[];
-  canCreateLocationProxy: boolean;
-  loadCountries: () => Promise<void>;
-  handleCreateCountryProxy: (
-    profileId: string,
-    country: LocationItem,
-  ) => Promise<void>;
 
   onLaunchWithSync: (profile: BrowserProfile) => void;
 
@@ -1853,23 +1843,6 @@ export function ProfilesDataTable({
     Record<string, { status: string; error?: string }>
   >({});
 
-  // Country proxy creation state (for inline proxy creation in dropdown)
-  const [countries, setCountries] = React.useState<LocationItem[]>([]);
-  const [countriesLoaded, setCountriesLoaded] = React.useState(false);
-
-  const canCreateLocationProxy = false;
-
-  const loadCountries = React.useCallback(async () => {
-    if (countriesLoaded || !canCreateLocationProxy) return;
-    try {
-      const data = await invoke<LocationItem[]>("cloud_get_countries");
-      setCountries(data);
-      setCountriesLoaded(true);
-    } catch (e) {
-      console.error("Failed to load countries:", e);
-    }
-  }, [countriesLoaded]);
-
   // Load cached check results for proxies
   React.useEffect(() => {
     const loadCachedResults = async () => {
@@ -1943,36 +1916,6 @@ export function ProfilesDataTable({
       }
     },
     [],
-  );
-
-  const handleCreateCountryProxy = React.useCallback(
-    async (profileId: string, country: LocationItem) => {
-      try {
-        await invoke("create_cloud_location_proxy", {
-          name: country.name,
-          country: country.code,
-          region: null,
-          city: null,
-          isp: null,
-        });
-        await emit("stored-proxies-changed");
-        // Wait briefly for proxy list to update, then find and assign the new proxy
-        await new Promise((r) => setTimeout(r, 200));
-        const updatedProxies =
-          await invoke<StoredProxy[]>("get_stored_proxies");
-        const newProxy = updatedProxies.find(
-          (p: StoredProxy) =>
-            p.is_cloud_derived && p.geo_country === country.code,
-        );
-        if (newProxy) {
-          await handleProxySelection(profileId, newProxy.id);
-        }
-        setOpenProxySelectorFor(null);
-      } catch (error) {
-        console.error("Failed to create country proxy:", error);
-      }
-    },
-    [handleProxySelection],
   );
 
   const getProfileBotState = React.useCallback(
@@ -2710,12 +2653,6 @@ export function ProfilesDataTable({
       crossOsUnlocked,
       syncUnlocked,
 
-      // Country proxy creation
-      countries,
-      canCreateLocationProxy,
-      loadCountries,
-      handleCreateCountryProxy,
-
       onLaunchWithSync:
         onLaunchWithSync ??
         (() => {
@@ -2784,9 +2721,6 @@ export function ProfilesDataTable({
       onToggleProfileSync,
       crossOsUnlocked,
       syncUnlocked,
-      countries,
-      loadCountries,
-      handleCreateCountryProxy,
       onLaunchWithSync,
       cookieBotUnlocked,
       containerWidth,
@@ -3547,15 +3481,7 @@ export function ProfilesDataTable({
                   >
                     <Command>
                       <CommandInput
-                        placeholder={
-                          meta.canCreateLocationProxy
-                            ? t("createProfile.proxy.searchWithCountries")
-                            : t("createProfile.proxy.search")
-                        }
-                        onFocus={() => {
-                          if (meta.canCreateLocationProxy)
-                            void meta.loadCountries();
-                        }}
+                        placeholder={t("createProfile.proxy.search")}
                       />
                       <CommandList>
                         <CommandEmpty>
@@ -3640,37 +3566,6 @@ export function ProfilesDataTable({
                             ))}
                           </CommandGroup>
                         )}
-                        {meta.canCreateLocationProxy &&
-                          meta.countries.length > 0 && (
-                            <CommandGroup
-                              heading={t("profileTable.createByCountryHeading")}
-                            >
-                              {meta.countries
-                                .filter(
-                                  (c) =>
-                                    !meta.storedProxies.some(
-                                      (p) =>
-                                        p.is_cloud_derived &&
-                                        p.geo_country === c.code,
-                                    ),
-                                )
-                                .map((country) => (
-                                  <CommandItem
-                                    key={`country-${country.code}`}
-                                    value={`create-${country.name}`}
-                                    onSelect={() =>
-                                      void meta.handleCreateCountryProxy(
-                                        profile.id,
-                                        country,
-                                      )
-                                    }
-                                  >
-                                    <span className="mr-2 size-4" />+{" "}
-                                    {country.name}
-                                  </CommandItem>
-                                ))}
-                            </CommandGroup>
-                          )}
                       </CommandList>
                     </Command>
                   </PopoverContent>
