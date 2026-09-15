@@ -91,7 +91,6 @@ export class SyncService implements OnModuleInit {
   private static readonly MAX_BATCH_ITEMS = 1000;
 
   private changeSubject = new Subject<SubscribeEventDto>();
-  private s3Ready = false;
   private backendInternalUrl: string | undefined;
   private backendInternalKey: string | undefined;
 
@@ -204,7 +203,6 @@ export class SyncService implements OnModuleInit {
   private async ensureBucketExists(): Promise<void> {
     try {
       await this.s3Client.send(new HeadBucketCommand({ Bucket: this.bucket }));
-      this.s3Ready = true;
     } catch (error: unknown) {
       const isNotFound =
         error &&
@@ -219,7 +217,6 @@ export class SyncService implements OnModuleInit {
           await this.s3Client.send(
             new CreateBucketCommand({ Bucket: this.bucket }),
           );
-          this.s3Ready = true;
         } catch (createError: unknown) {
           // BucketAlreadyOwnedByYou means the bucket exists and we own it - this is fine
           const isAlreadyOwned =
@@ -228,7 +225,6 @@ export class SyncService implements OnModuleInit {
             "name" in createError &&
             createError.name === "BucketAlreadyOwnedByYou";
           if (isAlreadyOwned) {
-            this.s3Ready = true;
           } else {
             console.error("Failed to create S3 bucket:", createError);
             throw createError;
@@ -239,10 +235,6 @@ export class SyncService implements OnModuleInit {
         throw error;
       }
     }
-  }
-
-  isReady(): boolean {
-    return this.s3Ready;
   }
 
   async checkS3Connectivity(): Promise<boolean> {
@@ -889,10 +881,6 @@ export class SyncService implements OnModuleInit {
     const ping$ = interval(30000).pipe(map(() => ({ type: "ping" as const })));
 
     return merge(pollChanges$, ping$, this.changeSubject.asObservable());
-  }
-
-  emitChange(event: SubscribeEventDto) {
-    this.changeSubject.next(event);
   }
 
   async cleanupExcessProfiles(
