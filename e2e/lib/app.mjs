@@ -118,6 +118,7 @@ export class AppSession {
             onboarding_completed: true,
             window_resize_warning_dismissed: true,
             disable_auto_updates: true,
+            sync_disabled: true,
           },
           null,
           2,

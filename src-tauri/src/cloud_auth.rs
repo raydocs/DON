@@ -1365,7 +1365,7 @@ pub async fn cloud_logout(app_handle: tauri::AppHandle) -> Result<(), String> {
   // user never typed. The cloud-URL-only check we used to do here missed
   // trailing-slash / scheme variants and any future cloud endpoint moves.
   let manager = crate::settings_manager::SettingsManager::instance();
-  let _ = manager.save_sync_server_url(None);
+  let _ = manager.save_sync_configuration(None, true);
   let _ = manager.remove_sync_token(&app_handle).await;
 
   // Remove cloud-managed and cloud-derived proxies
@@ -1527,6 +1527,7 @@ pub async fn restart_sync_service(app_handle: tauri::AppHandle) -> Result<(), St
   if let Some(scheduler) = sync::get_global_scheduler() {
     scheduler.stop();
   }
+  sync::stop_active_subscription();
 
   // Restart sync pipeline
   let app_handle_sync = app_handle.clone();

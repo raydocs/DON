@@ -62,6 +62,9 @@ nodecar/nodecar-bin
 # next
 **/next-env.d.ts
 
+# Amp orb runtime
+/.amp/portals/
+
 # claude
 .claude/
 # Claude Code session-recovery runtime state

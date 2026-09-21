@@ -850,12 +850,22 @@ impl BrowserRunner {
             let latest_fingerprint = latest
               .wayfern_config
               .as_ref()
-              .and_then(|config| config.fingerprint.as_ref());
-            if latest_fingerprint == persisted_fingerprint_before_launch.as_ref() {
+              .and_then(|config| config.fingerprint.clone());
+            if latest_fingerprint == persisted_fingerprint_before_launch {
               let config = latest.wayfern_config.get_or_insert_with(Default::default);
-              config.fingerprint = Some(applied);
+              let mut fingerprint_metadata_changed = false;
+              if config.fingerprint.as_ref() != Some(&applied) {
+                config.fingerprint = Some(applied);
+                fingerprint_metadata_changed = true;
+              }
               if let Some(signature) = regenerated_geo_proxy_signature {
-                config.geo_proxy_signature = signature;
+                if config.geo_proxy_signature != signature {
+                  config.geo_proxy_signature = signature;
+                  fingerprint_metadata_changed = true;
+                }
+              }
+              if fingerprint_metadata_changed {
+                latest.updated_at = Some(crate::proxy_manager::now_secs());
               }
             }
           }

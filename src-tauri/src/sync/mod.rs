@@ -27,7 +27,7 @@ pub use manifest::{
   SyncManifest,
 };
 pub use scheduler::{get_global_scheduler, set_global_scheduler, SyncScheduler};
-pub use subscription::{SubscriptionManager, SyncWorkItem};
+pub use subscription::{stop_active_subscription, SubscriptionManager, SyncWorkItem};
 pub use types::{SyncError, SyncResult};
 
 /// Queue a profile sync if the profile has sync enabled. No-op otherwise.

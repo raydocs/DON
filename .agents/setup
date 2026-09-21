@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+step() {
+  local label="$1"
+  shift
+  local started=$SECONDS
+  printf '\n==> %s\n' "$label"
+  "$@"
+  printf '<== %s (%ss)\n' "$label" "$((SECONDS - started))"
+}
+
+install_system_packages() {
+  local packages=(
+    build-essential
+    ca-certificates
+    curl
+    dbus-x11
+    docker.io
+    file
+    libayatana-appindicator3-dev
+    libgtk-3-dev
+    librsvg2-dev
+    libssl-dev
+    libwebkit2gtk-4.1-dev
+    libxdo-dev
+    openvpn
+    pkg-config
+    unzip
+    wget
+    xdg-utils
+    xvfb
+    xz-utils
+  )
+  local missing=()
+  local package
+
+  for package in "${packages[@]}"; do
+    if ! dpkg-query -W -f='${Status}' "$package" 2>/dev/null | grep -Fq 'install ok installed'; then
+      missing+=("$package")
+    fi
+  done
+
+  if ((${#missing[@]} == 0)); then
+    echo "System packages are already installed."
+    return
+  fi
+
+  sudo apt-get update
+  sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${missing[@]}"
+}
+
+install_node() {
+  local required_node
+  local required_major
+  local current_major=""
+
+  required_node="$(tr -d '[:space:]' < .node-version)"
+  required_major="${required_node%%.*}"
+  if command -v node >/dev/null 2>&1; then
+    current_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
+  fi
+
+  if [[ "$current_major" != "$required_major" ]]; then
+    if ! command -v n >/dev/null 2>&1; then
+      sudo npm install --global n@10.2.0
+    fi
+    sudo n "$required_node"
+    hash -r
+  fi
+
+  echo "Node $(node --version)"
+}
+
+install_pnpm() {
+  local required_pnpm
+  local current_pnpm=""
+
+  required_pnpm="$(node -p "require('./package.json').packageManager.split('@').pop()")"
+  if command -v pnpm >/dev/null 2>&1; then
+    current_pnpm="$(pnpm --version)"
+  fi
+
+  if [[ "$current_pnpm" != "$required_pnpm" ]]; then
+    sudo npm install --global "pnpm@$required_pnpm"
+  fi
+
+  echo "pnpm $(pnpm --version)"
+}
+
+install_rust() {
+  if [[ ! -x "$HOME/.cargo/bin/rustup" ]]; then
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+      sh -s -- -y --profile minimal --default-toolchain stable
+  fi
+
+  # shellcheck disable=SC1091
+  source "$HOME/.cargo/env"
+  rustup set profile minimal
+  rustup toolchain install stable --component clippy,rustfmt
+  rustup default stable
+  echo "$(rustc --version)"
+}
+
+install_typos() {
+  local version="1.49.0"
+  local target
+
+  if command -v typos >/dev/null 2>&1 && typos --version | grep -Fq "$version"; then
+    echo "$(typos --version)"
+    return
+  fi
+
+  case "$(uname -m)" in
+    x86_64) target="x86_64-unknown-linux-musl" ;;
+    aarch64 | arm64) target="aarch64-unknown-linux-musl" ;;
+    *)
+      echo "Unsupported architecture for the typos binary: $(uname -m)" >&2
+      return 1
+      ;;
+  esac
+
+  (
+    local temporary
+    temporary="$(mktemp -d)"
+    trap 'rm -rf "$temporary"' EXIT
+    curl -fsSL \
+      "https://github.com/crate-ci/typos/releases/download/v${version}/typos-v${version}-${target}.tar.gz" \
+      -o "$temporary/typos.tar.gz"
+    tar -xzf "$temporary/typos.tar.gz" -C "$temporary" ./typos
+    install -Dm755 "$temporary/typos" "$HOME/.local/bin/typos"
+  )
+
+  echo "$(typos --version)"
+}
+
+configure_login_shell() {
+  local marker="# don orb toolchain"
+
+  if ! grep -Fqx "$marker" "$HOME/.bash_profile" 2>/dev/null; then
+    cat >> "$HOME/.bash_profile" <<'EOF'
+
+# don orb toolchain
+case ":$PATH:" in
+  *":$HOME/.cargo/bin:"*) ;;
+  *) export PATH="$HOME/.cargo/bin:$PATH" ;;
+esac
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*) ;;
+  *) export PATH="$HOME/.local/bin:$PATH" ;;
+esac
+EOF
+  fi
+
+  export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+}
+
+configure_docker() {
+  if ! getent group docker >/dev/null; then
+    sudo groupadd --system docker
+  fi
+  if ! getent group docker | cut -d: -f4 | tr ',' '\n' | grep -Fqx "$USER"; then
+    sudo usermod -aG docker "$USER"
+  fi
+}
+
+fetch_cargo_dependencies() {
+  cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+  cargo fetch --locked --manifest-path e2e/app/Cargo.toml
+}
+
+step "Install system packages" install_system_packages
+step "Install pinned Node.js" install_node
+step "Install pinned pnpm" install_pnpm
+step "Install Rust stable" install_rust
+step "Configure login shell" configure_login_shell
+step "Install typos" install_typos
+step "Configure Docker access" configure_docker
+step "Install JavaScript dependencies" pnpm install --frozen-lockfile
+step "Fetch Rust dependencies" fetch_cargo_dependencies
+
+echo
+echo "Orb setup complete."

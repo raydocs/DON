@@ -7,6 +7,18 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::sleep;
+use tokio_util::sync::CancellationToken;
+
+static ACTIVE_SUBSCRIPTION: std::sync::Mutex<Option<CancellationToken>> =
+  std::sync::Mutex::new(None);
+
+pub fn stop_active_subscription() {
+  if let Ok(mut active) = ACTIVE_SUBSCRIPTION.lock() {
+    if let Some(cancellation) = active.take() {
+      cancellation.cancel();
+    }
+  }
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SubscribeEvent {
@@ -43,6 +55,7 @@ pub struct SyncSubscription {
   token: String,
   source: TokenSource,
   running: Arc<AtomicBool>,
+  cancellation: CancellationToken,
   work_tx: mpsc::UnboundedSender<SyncWorkItem>,
 }
 
@@ -59,6 +72,7 @@ impl SyncSubscription {
       token,
       source,
       running: Arc::new(AtomicBool::new(false)),
+      cancellation: CancellationToken::new(),
       work_tx,
     }
   }
@@ -67,6 +81,31 @@ impl SyncSubscription {
     app_handle: &tauri::AppHandle,
     work_tx: mpsc::UnboundedSender<SyncWorkItem>,
   ) -> Result<Option<Self>, String> {
+    let manager = SettingsManager::instance();
+    let settings = manager.load_settings().unwrap_or_default();
+    if settings.sync_disabled {
+      return Ok(None);
+    }
+
+    // An explicit URL is a self-hosted configuration and must take priority
+    // over cloud auth. In the DON fork cloud capabilities are unlocked even
+    // while signed out, so checking cloud state first silently subscribed to
+    // the built-in service while SyncEngine wrote to the configured server.
+    if let Some(server_url) = settings.sync_server_url {
+      let token = manager
+        .get_sync_token(app_handle)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
+      return Ok(Some(Self::new(
+        server_url,
+        token,
+        TokenSource::SelfHosted,
+        work_tx,
+      )));
+    }
+
     // Cloud auth takes priority
     if crate::cloud_auth::CLOUD_AUTH.is_logged_in().await {
       let url = crate::cloud_auth::CLOUD_SYNC_URL.to_string();
@@ -80,14 +119,7 @@ impl SyncSubscription {
       return Ok(Some(Self::new(url, token, TokenSource::Cloud, work_tx)));
     }
 
-    // Fall back to self-hosted settings
-    let manager = SettingsManager::instance();
-    let settings = manager.load_settings().unwrap_or_default();
-
-    let server_url = settings
-      .sync_server_url
-      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string());
-
+    // Fall back to the built-in DON sync service.
     let token = manager
       .get_sync_token(app_handle)
       .await
@@ -96,7 +128,7 @@ impl SyncSubscription {
       .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
 
     Ok(Some(Self::new(
-      server_url,
+      crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string(),
       token,
       TokenSource::SelfHosted,
       work_tx,
@@ -109,6 +141,7 @@ impl SyncSubscription {
 
   pub fn stop(&self) {
     self.running.store(false, Ordering::SeqCst);
+    self.cancellation.cancel();
   }
 
   pub async fn start(&self, app_handle: tauri::AppHandle) {
@@ -116,7 +149,14 @@ impl SyncSubscription {
       return;
     }
 
+    if let Ok(mut active) = ACTIVE_SUBSCRIPTION.lock() {
+      if let Some(previous) = active.replace(self.cancellation.clone()) {
+        previous.cancel();
+      }
+    }
+
     let running = self.running.clone();
+    let cancellation = self.cancellation.clone();
     let base_url = self.base_url.clone();
     let source = self.source;
     let work_tx = self.work_tx.clone();
@@ -124,21 +164,37 @@ impl SyncSubscription {
     let mut token = self.token.clone();
 
     tokio::spawn(async move {
-      while running.load(Ordering::SeqCst) {
-        match Self::connect_and_listen(&client, &base_url, &token, &work_tx, &running, &app_handle)
-          .await
+      while running.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
+        match Self::connect_and_listen(
+          &client,
+          &base_url,
+          &token,
+          &work_tx,
+          &cancellation,
+          &app_handle,
+        )
+        .await
         {
           Ok(()) => {
             log::info!("SSE connection closed gracefully");
           }
           Err(e) => {
             log::warn!("SSE connection error: {e}, reconnecting in 5s");
-            sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+              _ = cancellation.cancelled() => break,
+              _ = sleep(Duration::from_secs(5)) => {}
+            }
           }
         }
 
-        if running.load(Ordering::SeqCst) {
-          sleep(Duration::from_secs(1)).await;
+        if running.load(Ordering::SeqCst) && !cancellation.is_cancelled() {
+          tokio::select! {
+            _ = cancellation.cancelled() => break,
+            _ = sleep(Duration::from_secs(1)) => {}
+          }
+          if cancellation.is_cancelled() {
+            break;
+          }
           // Refresh the sync token before reconnecting. The token may have
           // expired while the stream was open (tokens last ~15 min); reusing
           // the construction-time token otherwise produces an endless 401
@@ -156,6 +212,7 @@ impl SyncSubscription {
         }
       }
 
+      running.store(false, Ordering::SeqCst);
       log::info!("Sync subscription stopped");
     });
   }
@@ -188,18 +245,19 @@ impl SyncSubscription {
     base_url: &str,
     token: &str,
     work_tx: &mpsc::UnboundedSender<SyncWorkItem>,
-    running: &Arc<AtomicBool>,
+    cancellation: &CancellationToken,
     _app_handle: &tauri::AppHandle,
   ) -> Result<(), String> {
     let url = format!("{base_url}/v1/objects/subscribe");
 
-    let response = client
-      .get(&url)
-      .header("Authorization", format!("Bearer {token}"))
-      .header("Accept", "text/event-stream")
-      .send()
-      .await
-      .map_err(|e| format!("Failed to connect to SSE: {e}"))?;
+    let response = tokio::select! {
+      _ = cancellation.cancelled() => return Ok(()),
+      result = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("Accept", "text/event-stream")
+        .send() => result.map_err(|e| format!("Failed to connect to SSE: {e}"))?,
+    };
 
     if !response.status().is_success() {
       return Err(format!(
@@ -216,8 +274,12 @@ impl SyncSubscription {
 
     use futures_util::StreamExt;
 
-    while running.load(Ordering::SeqCst) {
-      match tokio::time::timeout(Duration::from_secs(60), bytes_stream.next()).await {
+    loop {
+      let next = tokio::select! {
+        _ = cancellation.cancelled() => return Ok(()),
+        result = tokio::time::timeout(Duration::from_secs(60), bytes_stream.next()) => result,
+      };
+      match next {
         Ok(Some(Ok(bytes))) => {
           let chunk = String::from_utf8_lossy(&bytes);
           buffer.push_str(&chunk);
@@ -242,8 +304,6 @@ impl SyncSubscription {
         }
       }
     }
-
-    Ok(())
   }
 
   fn parse_sse_event(event_str: &str) -> Option<SubscribeEvent> {
@@ -415,6 +475,7 @@ impl SubscriptionManager {
   }
 
   pub fn stop(&mut self) {
+    stop_active_subscription();
     if let Some(sub) = &self.subscription {
       sub.stop();
     }

@@ -341,7 +341,12 @@ test("all primary navigation buttons and sub-page tabs render and remain interac
       await app.waitFor(async () => expected.test(await app.bodyText()), {
         description: `${label} surface`,
       });
-      assert.match(await app.bodyText(), expected);
+      const body = await app.bodyText();
+      assert.match(body, expected);
+      if (label === "Account") {
+        assert.match(body, new RegExp(en.account.donCloud.title));
+        assert.doesNotMatch(body, /[\u3400-\u9fff]/);
+      }
       await dismissSurface(app);
     }
 

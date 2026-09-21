@@ -40,6 +40,11 @@ pub struct AppSettings {
   pub api_token: Option<String>, // Displayed token for user to copy
   #[serde(default)]
   pub sync_server_url: Option<String>, // URL of the sync server
+  /// Explicit opt-out for the built-in DON sync service. A missing custom URL
+  /// means "use the built-in service", so it cannot also represent a user
+  /// pressing Disconnect.
+  #[serde(default)]
+  pub sync_disabled: bool,
   #[serde(default)]
   pub mcp_enabled: bool, // Enable MCP (Model Context Protocol) server
   #[serde(default)]
@@ -93,6 +98,7 @@ impl Default for AppSettings {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
+      sync_disabled: false,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
@@ -691,20 +697,14 @@ impl SettingsManager {
     Ok(())
   }
 
-  pub fn get_sync_settings(&self) -> Result<SyncSettings, Box<dyn std::error::Error>> {
-    let settings = self.load_settings()?;
-    Ok(SyncSettings {
-      sync_server_url: settings.sync_server_url,
-      sync_token: None, // Token needs to be loaded separately via async method
-    })
-  }
-
-  pub fn save_sync_server_url(
+  pub fn save_sync_configuration(
     &self,
     url: Option<String>,
+    disabled: bool,
   ) -> Result<(), Box<dyn std::error::Error>> {
     let mut settings = self.load_settings()?;
     settings.sync_server_url = url;
+    settings.sync_disabled = disabled;
     self.save_settings(&settings)
   }
 }
@@ -953,16 +953,23 @@ pub const DEFAULT_DON_SYNC_TOKEN: &str = "don-secret-sync-token";
 #[tauri::command]
 pub async fn get_sync_settings(app_handle: tauri::AppHandle) -> Result<SyncSettings, String> {
   let manager = SettingsManager::instance();
-  let sync_settings = manager
-    .get_sync_settings()
+  let settings = manager
+    .load_settings()
     .map_err(|e| format!("Failed to load sync settings: {e}"))?;
+
+  if settings.sync_disabled {
+    return Ok(SyncSettings {
+      sync_server_url: None,
+      sync_token: None,
+    });
+  }
 
   let token = manager
     .get_sync_token(&app_handle)
     .await
     .map_err(|e| format!("Failed to load sync token: {e}"))?;
 
-  let server_url = sync_settings
+  let server_url = settings
     .sync_server_url
     .unwrap_or_else(|| DEFAULT_DON_SYNC_URL.to_string());
   let sync_token = token.or_else(|| Some(DEFAULT_DON_SYNC_TOKEN.to_string()));
@@ -981,10 +988,6 @@ pub async fn save_sync_settings(
 ) -> Result<SyncSettings, String> {
   let manager = SettingsManager::instance();
 
-  manager
-    .save_sync_server_url(sync_server_url.clone())
-    .map_err(|e| format!("Failed to save sync server URL: {e}"))?;
-
   if let Some(ref token) = sync_token {
     manager
       .store_sync_token(&app_handle, token)
@@ -996,6 +999,13 @@ pub async fn save_sync_settings(
       .await
       .map_err(|e| format!("Failed to remove sync token: {e}"))?;
   }
+
+  manager
+    .save_sync_configuration(
+      sync_server_url.clone(),
+      sync_server_url.is_none() && sync_token.is_none(),
+    )
+    .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?;
 
   Ok(SyncSettings {
     sync_server_url,
@@ -1175,6 +1185,7 @@ mod tests {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
+      sync_disabled: false,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
@@ -1202,6 +1213,22 @@ mod tests {
       loaded_settings.theme, "dark",
       "Loaded theme should match saved"
     );
+  }
+
+  #[test]
+  fn sync_configuration_and_disconnect_state_are_persisted_together() {
+    let (manager, _temp_dir, _guard) = create_test_settings_manager();
+
+    assert!(!manager.load_settings().unwrap().sync_disabled);
+    manager
+      .save_sync_configuration(Some("https://sync.example.com".to_string()), true)
+      .unwrap();
+    let settings = manager.load_settings().unwrap();
+    assert_eq!(
+      settings.sync_server_url.as_deref(),
+      Some("https://sync.example.com")
+    );
+    assert!(settings.sync_disabled);
   }
 
   #[test]

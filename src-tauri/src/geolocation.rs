@@ -352,17 +352,13 @@ async fn fetch_online_geolocation(
 ) -> Result<Geolocation, GeolocationError> {
   let client_builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(4));
   let client = if let Some(proxy_url) = proxy {
-    if let Ok(p) = reqwest::Proxy::all(proxy_url) {
-      client_builder
-        .no_proxy()
-        .proxy(p)
-        .build()
-        .map_err(|e| GeolocationError::Network(e.to_string()))?
-    } else {
-      client_builder
-        .build()
-        .map_err(|e| GeolocationError::Network(e.to_string()))?
-    }
+    let configured_proxy = reqwest::Proxy::all(proxy_url)
+      .map_err(|e| GeolocationError::Network(format!("Invalid proxy URL: {e}")))?;
+    client_builder
+      .no_proxy()
+      .proxy(configured_proxy)
+      .build()
+      .map_err(|e| GeolocationError::Network(e.to_string()))?
   } else {
     client_builder
       .build()
@@ -498,5 +494,11 @@ mod tests {
     let geo = get_geolocation_async("204.252.119.24", None).await.unwrap();
     assert_eq!(geo.timezone, "America/Los_Angeles");
     assert_eq!(geo.locale.region, Some("US".to_string()));
+  }
+
+  #[tokio::test]
+  async fn invalid_proxy_never_falls_back_to_a_direct_online_request() {
+    let result = fetch_online_geolocation("204.252.119.24", Some("://invalid-proxy")).await;
+    assert!(matches!(result, Err(GeolocationError::Network(_))));
   }
 }

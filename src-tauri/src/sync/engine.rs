@@ -361,17 +361,21 @@ impl SyncProgressTracker {
 
 /// Check if sync is configured (cloud or self-hosted)
 pub fn is_sync_configured() -> bool {
+  let manager = SettingsManager::instance();
+  if let Ok(settings) = manager.load_settings() {
+    if settings.sync_disabled {
+      return false;
+    }
+    if settings.sync_server_url.is_some() {
+      return true;
+    }
+  }
+
   // Cloud backup is a plan capability. Every paid plan (incl. the future
   // "solo" tier) grants it, but gating on the capability — not just "is paid"
   // — keeps this correct if a plan without cloud backup is ever added.
   if crate::cloud_auth::CLOUD_AUTH.can_use_cloud_backup_sync() {
     return true;
-  }
-  let manager = SettingsManager::instance();
-  if let Ok(settings) = manager.load_settings() {
-    if settings.sync_server_url.is_some() {
-      return true;
-    }
   }
   !crate::settings_manager::DEFAULT_DON_SYNC_URL.is_empty()
 }
@@ -390,6 +394,9 @@ impl SyncEngine {
   pub async fn create_from_settings(app_handle: &tauri::AppHandle) -> Result<Self, String> {
     let manager = SettingsManager::instance();
     let settings = manager.load_settings().unwrap_or_default();
+    if settings.sync_disabled {
+      return Err("Sync is disabled".to_string());
+    }
     let server_url = settings
       .sync_server_url
       .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string());
@@ -2791,7 +2798,7 @@ impl SyncEngine {
         .collect();
 
       if !local_synced.is_empty() {
-        let personal_tombstones = self.client.list("tombstones/profiles/").await.ok();
+        let personal_tombstones = self.client.list_all("tombstones/profiles/").await.ok();
         let team_prefix = if let Some(auth) = crate::cloud_auth::CLOUD_AUTH.get_user().await {
           auth.user.team_id.map(|tid| format!("teams/{}/", tid))
         } else {
@@ -2799,7 +2806,7 @@ impl SyncEngine {
         };
         let team_tombstones = if let Some(ref tp) = team_prefix {
           let prefix = format!("{}tombstones/profiles/", tp);
-          self.client.list(&prefix).await.ok()
+          self.client.list_all(&prefix).await.ok()
         } else {
           None
         };
@@ -2808,11 +2815,11 @@ impl SyncEngine {
           let tombstone_file = format!("{}.json", pid);
           let has_personal = personal_tombstones
             .as_ref()
-            .map(|l| l.objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
+            .map(|objects| objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
             .unwrap_or(false);
           let has_team = team_tombstones
             .as_ref()
-            .map(|l| l.objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
+            .map(|objects| objects.iter().any(|o| o.key.ends_with(&tombstone_file)))
             .unwrap_or(false);
 
           if has_personal || has_team {
@@ -3367,8 +3374,21 @@ pub async fn set_profile_sync_mode(
     }
   }
 
-  // If switching between Regular<->Encrypted, delete remote manifest to force full re-upload
   let mode_switched = old_mode != SyncMode::Disabled && enabling && old_mode != new_mode;
+  profile = profile_manager
+    .mutate_profile(&profile_id, move |latest| {
+      latest.sync_mode = new_mode;
+      if latest.encryption_salt.is_none() {
+        latest.encryption_salt = generated_encryption_salt;
+      }
+      latest.updated_at = Some(crate::proxy_manager::now_secs());
+      Ok(())
+    })
+    .map_err(|e| format!("Failed to save profile: {e}"))?;
+
+  // Persist the new mode before any network await. Otherwise the scheduler can
+  // capture the old Regular profile while this command is deleting its remote
+  // manifest, then upload plaintext files after the user selected Encrypted.
   if mode_switched {
     if let Ok(engine) = SyncEngine::create_from_settings(&app_handle).await {
       let key_prefix = SyncEngine::get_team_key_prefix(&profile).await;
@@ -3382,17 +3402,6 @@ pub async fn set_profile_sync_mode(
       );
     }
   }
-
-  profile = profile_manager
-    .mutate_profile(&profile_id, move |latest| {
-      latest.sync_mode = new_mode;
-      if latest.encryption_salt.is_none() {
-        latest.encryption_salt = generated_encryption_salt;
-      }
-      latest.updated_at = Some(crate::proxy_manager::now_secs());
-      Ok(())
-    })
-    .map_err(|e| format!("Failed to save profile: {e}"))?;
 
   // The bot materialises the profile from donut-sync, so switching sync off (or
   // to Encrypted, which the host cannot decrypt) is a refusal reason. The server

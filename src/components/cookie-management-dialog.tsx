@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { writeTextFile } from "@tauri-apps/plugin-fs";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { LuChevronRight } from "react-icons/lu";
 import { toast } from "sonner";
@@ -131,16 +131,25 @@ export function CookieManagementDialog({
   // Export state
   const [format, setFormat] = useState<"netscape" | "json">("json");
   const [isExporting, setIsExporting] = useState(false);
-  const [exportCookieData, setExportCookieData] =
-    useState<CookieReadResult | null>(null);
+  const [loadedExportCookies, setLoadedExportCookies] = useState<{
+    profileId: string;
+    data: CookieReadResult;
+  } | null>(null);
   const [isLoadingExportCookies, setIsLoadingExportCookies] = useState(false);
   const [exportSelection, setExportSelection] = useState<SelectionState>({});
   const [expandedDomains, setExpandedDomains] = useState<Set<string>>(
     new Set(),
   );
   const [activeTab, setActiveTab] = useState<string>(initialTab);
+  const exportRequestRef = useRef(0);
+  const profileId = profile?.id;
+  const exportCookieData =
+    loadedExportCookies && loadedExportCookies.profileId === profileId
+      ? loadedExportCookies.data
+      : null;
 
   const selectedExportCount = useMemo(() => {
+    if (!exportCookieData) return 0;
     let count = 0;
     for (const domain of Object.keys(exportSelection)) {
       const ds = exportSelection[domain];
@@ -156,34 +165,41 @@ export function CookieManagementDialog({
     return count;
   }, [exportSelection, exportCookieData]);
 
-  const loadExportCookies = useCallback(
-    async (profileId: string) => {
-      if (exportCookieData) return;
-      setIsLoadingExportCookies(true);
-      try {
-        const result = await invoke<CookieReadResult>("read_profile_cookies", {
-          profileId,
-        });
-        setExportCookieData(result);
+  useEffect(() => {
+    if (!isOpen || activeTab !== "export" || !profileId) return;
+
+    const requestId = ++exportRequestRef.current;
+    setLoadedExportCookies(null);
+    setExportSelection({});
+    setExpandedDomains(new Set());
+    setIsLoadingExportCookies(true);
+
+    void invoke<CookieReadResult>("read_profile_cookies", { profileId })
+      .then((result) => {
+        if (exportRequestRef.current !== requestId) return;
+        setLoadedExportCookies({ profileId, data: result });
         setExportSelection(initSelectionFromCookieData(result));
-      } catch (err) {
+      })
+      .catch((err: unknown) => {
+        if (exportRequestRef.current !== requestId) return;
         toast.error(
           t("cookies.management.loadFailed", {
             error: translateBackendError(t, err),
           }),
         );
-      } finally {
-        setIsLoadingExportCookies(false);
-      }
-    },
-    [exportCookieData, t],
-  );
+      })
+      .finally(() => {
+        if (exportRequestRef.current === requestId) {
+          setIsLoadingExportCookies(false);
+        }
+      });
 
-  useEffect(() => {
-    if (activeTab === "export" && profile && !exportCookieData) {
-      void loadExportCookies(profile.id);
-    }
-  }, [activeTab, profile, exportCookieData, loadExportCookies]);
+    return () => {
+      if (exportRequestRef.current === requestId) {
+        exportRequestRef.current += 1;
+      }
+    };
+  }, [isOpen, activeTab, profileId, t]);
 
   const resetImportState = useCallback(() => {
     setPasteContent("");
@@ -198,9 +214,11 @@ export function CookieManagementDialog({
   }, []);
 
   const resetExportState = useCallback(() => {
+    exportRequestRef.current += 1;
     setFormat("json");
     setIsExporting(false);
-    setExportCookieData(null);
+    setLoadedExportCookies(null);
+    setIsLoadingExportCookies(false);
     setExportSelection({});
     setExpandedDomains(new Set());
   }, []);
@@ -222,8 +240,6 @@ export function CookieManagementDialog({
     },
     [resetImportState, resetExportState],
   );
-
-  const profileId = profile?.id;
 
   useEffect(() => {
     if (!isOpen || !profileId || importResult) return;
@@ -316,7 +332,7 @@ export function CookieManagementDialog({
   }, [exportCookieData, exportSelection]);
 
   const handleExport = useCallback(async () => {
-    if (!profile) return;
+    if (!profile || !exportCookieData) return;
     setIsExporting(true);
     try {
       const cookies = getSelectedCookies();
@@ -351,7 +367,7 @@ export function CookieManagementDialog({
     } finally {
       setIsExporting(false);
     }
-  }, [profile, format, getSelectedCookies, handleClose, t]);
+  }, [profile, exportCookieData, format, getSelectedCookies, handleClose, t]);
 
   const toggleDomain = useCallback(
     (domain: string, cookies: UnifiedCookie[]) => {

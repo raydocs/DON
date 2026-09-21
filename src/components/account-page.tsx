@@ -9,9 +9,7 @@ import {
   LuExternalLink,
   LuEye,
   LuEyeOff,
-  LuRefreshCw,
   LuShieldCheck,
-  LuUser,
 } from "react-icons/lu";
 import { LoadingButton } from "@/components/loading-button";
 import { Badge } from "@/components/ui/badge";
@@ -102,14 +100,14 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
       const result = await probeServer(targetUrl);
       if (result.ok) {
         setConnectionStatus("connected");
-        showSuccessToast("连接成功！DON 云端同步集群在线");
+        showSuccessToast(t("account.donCloud.toasts.connectionSuccess"));
       } else {
         setConnectionStatus("error");
-        showErrorToast("连接失败，请检查服务器网络");
+        showErrorToast(t("account.donCloud.toasts.connectionFailed"));
       }
     } catch {
       setConnectionStatus("error");
-      showErrorToast("连接超时，请检查网络");
+      showErrorToast(t("account.donCloud.toasts.connectionTimeout"));
     } finally {
       setIsTestingConnection(false);
     }
@@ -128,11 +126,11 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
       } catch (e) {
         console.error("Failed to restart sync service:", e);
       }
-      showSuccessToast("DON 云端同步配置已生效");
+      showSuccessToast(t("account.donCloud.toasts.settingsSaved"));
       void testConnection(targetUrl);
     } catch (error) {
       console.error("Failed to save sync settings:", error);
-      showErrorToast("保存配置失败");
+      showErrorToast(t("account.donCloud.toasts.saveFailed"));
     } finally {
       setIsSaving(false);
     }
@@ -152,10 +150,10 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
       }
       setToken("");
       setConnectionStatus("unknown");
-      showSuccessToast("已断开云端同步");
+      showSuccessToast(t("account.donCloud.toasts.disconnected"));
     } catch (error) {
       console.error("Failed to disconnect:", error);
-      showErrorToast("断开连接失败");
+      showErrorToast(t("account.donCloud.toasts.disconnectFailed"));
     } finally {
       setIsSaving(false);
     }
@@ -188,11 +186,10 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
               </div>
               <div className="min-w-0 flex-1">
                 <h2 className="text-lg font-bold tracking-tight">
-                  DON Cloud 账户与同步中心
+                  {t("account.donCloud.title")}
                 </h2>
                 <p className="mt-0.5 text-xs text-muted-foreground">
-                  DON 原生 Serverless 云端集群，支持全自动多机 Profile
-                  同步、指纹防关联与白名单权限分发。
+                  {t("account.donCloud.description")}
                 </p>
               </div>
             </div>
@@ -202,49 +199,55 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 font-medium text-foreground">
                   <span className="relative flex size-2.5">
-                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
-                    <span className="relative inline-flex size-2.5 rounded-full bg-emerald-500" />
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-success opacity-75" />
+                    <span className="relative inline-flex size-2.5 rounded-full bg-success" />
                   </span>
                   <span className="font-semibold text-sm">
-                    DON Cloudflare Serverless Cluster
+                    {t("account.donCloud.clusterName")}
                   </span>
                 </div>
                 <Badge
                   variant="outline"
-                  className="text-[10px] uppercase font-mono border-emerald-500/30 text-emerald-500 bg-emerald-500/10"
+                  className="border-success/30 bg-success/10 font-mono text-[10px] text-success uppercase"
                 >
-                  Active · Global Edge
+                  {t("account.donCloud.clusterStatus")}
                 </Badge>
               </div>
 
               <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-muted-foreground pt-1 border-t border-border/40">
-                <span>同步服务器:</span>
+                <span>{t("account.donCloud.serverLabel")}</span>
                 <code className="font-mono text-foreground truncate">
                   {serverUrl}
                 </code>
-                <span>存储架构:</span>
+                <span>{t("account.donCloud.storageLabel")}</span>
                 <span className="text-foreground">
-                  Cloudflare R2 Bucket (全球无出口费对象存储)
+                  {t("account.donCloud.storageValue")}
                 </span>
-                <span>权限数据库:</span>
+                <span>{t("account.donCloud.permissionsLabel")}</span>
                 <span className="text-foreground">
-                  Cloudflare D1 (Serverless SQLite 集群)
+                  {t("account.donCloud.permissionsValue")}
                 </span>
-                <span>连接状态:</span>
+                <span>{t("account.donCloud.connectionLabel")}</span>
                 <span className="text-foreground font-medium">
                   {connectionStatus === "connected" && (
-                    <span className="text-emerald-500">已连接 (Readyz OK)</span>
+                    <span className="text-success">
+                      {t("account.donCloud.status.connected")}
+                    </span>
                   )}
                   {connectionStatus === "testing" && (
                     <span className="text-muted-foreground">
-                      正在检测通信...
+                      {t("account.donCloud.status.testing")}
                     </span>
                   )}
                   {connectionStatus === "error" && (
-                    <span className="text-destructive">连接异常</span>
+                    <span className="text-destructive">
+                      {t("account.donCloud.status.error")}
+                    </span>
                   )}
                   {connectionStatus === "unknown" && (
-                    <span className="text-muted-foreground">未检测</span>
+                    <span className="text-muted-foreground">
+                      {t("account.donCloud.status.unknown")}
+                    </span>
                   )}
                 </span>
               </div>
@@ -257,13 +260,13 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                   htmlFor="account-sync-token"
                   className="text-sm font-semibold"
                 >
-                  Sync Token (您的专属授权密钥)
+                  {t("account.donCloud.tokenLabel")}
                 </Label>
                 <div className="relative">
                   <Input
                     id="account-sync-token"
                     type={showToken ? "text" : "password"}
-                    placeholder="输入专属 Token (如 don_usr_... 或 Master Admin Token)"
+                    placeholder={t("account.donCloud.tokenPlaceholder")}
                     value={token}
                     onChange={(e) => setToken(e.target.value)}
                     className="pr-10 font-mono text-sm"
@@ -271,6 +274,11 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                   <button
                     type="button"
                     onClick={() => setShowToken(!showToken)}
+                    aria-label={t(
+                      showToken
+                        ? "account.donCloud.hideToken"
+                        : "account.donCloud.showToken",
+                    )}
                     className="absolute top-1/2 right-3 -translate-y-1/2 transform rounded-sm p-1 transition-colors hover:bg-accent hover:text-accent-foreground text-muted-foreground"
                   >
                     {showToken ? (
@@ -281,8 +289,7 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                   </button>
                 </div>
                 <p className="text-[11px] text-muted-foreground">
-                  填入在管理控制台分配的专属 Token
-                  后，客户端将自动同步拉取授权给您的 Profile 环境。
+                  {t("account.donCloud.tokenDescription")}
                 </p>
               </div>
 
@@ -295,14 +302,14 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                 >
                   <span>
                     {showAdvanced
-                      ? "▼ 收起高级自定义域名"
-                      : "▶ 自定义同步服务器地址 (高级)"}
+                      ? t("account.donCloud.advancedCollapse")
+                      : t("account.donCloud.advancedExpand")}
                   </span>
                 </button>
                 {showAdvanced && (
                   <div className="space-y-1.5 pt-1 animate-in fade-in">
                     <Label htmlFor="account-server-url" className="text-xs">
-                      Server Endpoint URL
+                      {t("account.donCloud.serverUrlLabel")}
                     </Label>
                     <Input
                       id="account-server-url"
@@ -325,7 +332,7 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                     className="h-8 gap-1.5 text-xs"
                   >
                     <LuShieldCheck className="size-3.5" />
-                    <span>打开 Web 管理控制台</span>
+                    <span>{t("account.donCloud.openAdmin")}</span>
                     <LuExternalLink className="size-3" />
                   </Button>
                   {token && (
@@ -336,7 +343,7 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                       disabled={isSaving}
                       className="h-8 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
                     >
-                      清除凭证
+                      {t("account.donCloud.clearCredentials")}
                     </Button>
                   )}
                 </div>
@@ -349,7 +356,9 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                     onClick={() => void handleTestConnection()}
                     className="h-8 text-xs"
                   >
-                    {isTestingConnection ? "测试中..." : "测试连接"}
+                    {isTestingConnection
+                      ? t("account.donCloud.testing")
+                      : t("account.donCloud.testConnection")}
                   </Button>
                   <LoadingButton
                     size="sm"
@@ -358,7 +367,7 @@ export function AccountPage({ isOpen, onClose, subPage }: AccountPageProps) {
                     onClick={() => void handleSave()}
                     className="h-8 text-xs"
                   >
-                    保存并立即同步
+                    {t("account.donCloud.saveAndSync")}
                   </LoadingButton>
                 </div>
               </div>

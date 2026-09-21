@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use tokio::time::sleep;
+use tokio::time::{interval, MissedTickBehavior};
 
 static GLOBAL_SCHEDULER: std::sync::Mutex<Option<Arc<SyncScheduler>>> = std::sync::Mutex::new(None);
 
@@ -347,7 +347,16 @@ impl SyncScheduler {
     let app_handle_clone = app_handle.clone();
 
     tokio::spawn(async move {
-      let mut last_remote_poll = Instant::now();
+      let mut process_tick = interval(Duration::from_secs(2));
+      process_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+      let mut remote_poll_tick = interval(Duration::from_secs(30));
+      remote_poll_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+      // Tokio intervals tick immediately once. Consume that startup tick so
+      // these keep the existing 2-second processing cadence and the startup
+      // path's initial remote check is not repeated.
+      process_tick.tick().await;
+      remote_poll_tick.tick().await;
+
       while scheduler.running.load(Ordering::SeqCst) {
         tokio::select! {
           Some(work_item) = work_rx.recv() => {
@@ -363,16 +372,13 @@ impl SyncScheduler {
               }
             }
           }
-          _ = sleep(Duration::from_millis(2000)) => {
+          _ = process_tick.tick() => {
             scheduler.process_pending(&app_handle_clone).await;
-
-            // Periodically check for remote updates / newly added profiles every 30 seconds
-            if last_remote_poll.elapsed() >= Duration::from_secs(30) {
-              last_remote_poll = Instant::now();
-              if let Ok(engine) = super::engine::SyncEngine::create_from_settings(&app_handle_clone).await {
-                let _ = engine.check_for_missing_synced_profiles(&app_handle_clone).await;
-                let _ = engine.check_for_missing_synced_entities(&app_handle_clone).await;
-              }
+          }
+          _ = remote_poll_tick.tick() => {
+            if let Ok(engine) = super::engine::SyncEngine::create_from_settings(&app_handle_clone).await {
+              let _ = engine.check_for_missing_synced_profiles(&app_handle_clone).await;
+              let _ = engine.check_for_missing_synced_entities(&app_handle_clone).await;
             }
           }
         }

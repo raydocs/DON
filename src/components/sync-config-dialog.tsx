@@ -125,19 +125,19 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
       setStorageEndpoint(result.storageEndpoint ?? null);
       if (result.ok) {
         setConnectionStatus("connected");
-        showSuccessToast("连接成功！DON 云端同步节点正常响应");
+        showSuccessToast(t("account.donCloud.toasts.connectionSuccess"));
       } else {
         setConnectionStatus("error");
-        showErrorToast("连接失败，请检查服务器网络");
+        showErrorToast(t("account.donCloud.toasts.connectionFailed"));
       }
     } catch {
       setStorageEndpoint(null);
       setConnectionStatus("error");
-      showErrorToast("连接超时，请检查网络");
+      showErrorToast(t("account.donCloud.toasts.connectionTimeout"));
     } finally {
       setIsTesting(false);
     }
-  }, [serverUrl, probeServer]);
+  }, [serverUrl, probeServer, t]);
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
@@ -152,15 +152,15 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
       } catch (e) {
         console.error("Failed to restart sync service:", e);
       }
-      showSuccessToast("DON 云端同步配置已保存并生效！");
+      showSuccessToast(t("account.donCloud.toasts.settingsSaved"));
       onClose();
     } catch (error) {
       console.error("Failed to save sync settings:", error);
-      showErrorToast("保存同步设置失败");
+      showErrorToast(t("account.donCloud.toasts.saveFailed"));
     } finally {
       setIsSaving(false);
     }
-  }, [serverUrl, token, onClose]);
+  }, [serverUrl, token, onClose, t]);
 
   const handleDisconnect = useCallback(async () => {
     setIsSaving(true);
@@ -176,14 +176,14 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
       }
       setToken("");
       setConnectionStatus("unknown");
-      showSuccessToast("已断开云端同步");
+      showSuccessToast(t("account.donCloud.toasts.disconnected"));
     } catch (error) {
       console.error("Failed to disconnect:", error);
-      showErrorToast("断开连接失败");
+      showErrorToast(t("account.donCloud.toasts.disconnectFailed"));
     } finally {
       setIsSaving(false);
     }
-  }, []);
+  }, [t]);
 
   const handleOpenAdmin = useCallback(async () => {
     try {
@@ -204,11 +204,10 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
             <div className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary">
               <LuCloud className="size-5" />
             </div>
-            <DialogTitle>DON Cloud Sync</DialogTitle>
+            <DialogTitle>{t("account.donCloud.dialogTitle")}</DialogTitle>
           </div>
           <DialogDescription>
-            DON 官方云端多机同步集群，支持 Profile
-            浏览器环境实时同步、权限分配与多端指纹隔离。
+            {t("account.donCloud.dialogDescription")}
           </DialogDescription>
         </DialogHeader>
 
@@ -219,12 +218,14 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
         ) : (
           <div className="grid gap-4 py-3">
             <div className="space-y-2">
-              <Label htmlFor="sync-token">Sync Token (专属授权密钥)</Label>
+              <Label htmlFor="sync-token">
+                {t("account.donCloud.tokenLabel")}
+              </Label>
               <div className="relative">
                 <Input
                   id="sync-token"
                   type={showToken ? "text" : "password"}
-                  placeholder="输入专属 Token (如 don_usr_... 或管理员 Token)"
+                  placeholder={t("account.donCloud.tokenPlaceholder")}
                   value={token}
                   onChange={(e) => {
                     setToken(e.target.value);
@@ -238,6 +239,11 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
                       onClick={() => {
                         setShowToken(!showToken);
                       }}
+                      aria-label={t(
+                        showToken
+                          ? "account.donCloud.hideToken"
+                          : "account.donCloud.showToken",
+                      )}
                       className="absolute top-1/2 right-3 -translate-y-1/2 transform rounded-sm p-1 transition-colors hover:bg-accent hover:text-accent-foreground"
                     >
                       {showToken ? (
@@ -248,13 +254,14 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
                     </button>
                   </TooltipTrigger>
                   <TooltipContent>
-                    {showToken ? "隐藏密钥" : "显示密钥"}
+                    {showToken
+                      ? t("account.donCloud.hideToken")
+                      : t("account.donCloud.showToken")}
                   </TooltipContent>
                 </Tooltip>
               </div>
               <p className="text-[11px] text-muted-foreground">
-                填入管理员提供的用户专属 Token
-                后，客户端将自动同步分配给您的环境。
+                {t("account.donCloud.tokenDescription")}
               </p>
             </div>
 
@@ -266,15 +273,15 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
               >
                 <span>
                   {showAdvanced
-                    ? "▼ 收起高级设置"
-                    : "▶ 高级设置 (自定义服务器地址)"}
+                    ? t("account.donCloud.advancedCollapse")
+                    : t("account.donCloud.advancedExpand")}
                 </span>
               </button>
 
               {showAdvanced && (
                 <div className="pt-2 space-y-1.5 animate-in fade-in">
                   <Label htmlFor="sync-server-url" className="text-xs">
-                    Server URL
+                    {t("account.donCloud.serverUrlLabel")}
                   </Label>
                   <Input
                     id="sync-server-url"
@@ -291,35 +298,39 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
 
             <div className="rounded-lg border border-border bg-muted/30 p-3 text-xs space-y-2">
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">节点状态:</span>
+                <span className="text-muted-foreground">
+                  {t("account.donCloud.nodeStatus")}
+                </span>
                 {connectionStatus === "testing" && (
                   <span className="flex items-center gap-1.5 text-muted-foreground">
                     <div className="size-3 animate-spin rounded-full border-2 border-current border-t-transparent" />
-                    正在检测...
+                    {t("account.donCloud.status.testing")}
                   </span>
                 )}
                 {connectionStatus === "connected" && (
-                  <span className="flex items-center gap-1.5 text-emerald-500 font-medium">
-                    <span className="size-2 rounded-full bg-emerald-500" />
-                    Cloudflare Edge (已连接)
+                  <span className="flex items-center gap-1.5 font-medium text-success">
+                    <span className="size-2 rounded-full bg-success" />
+                    {t("account.donCloud.status.nodeConnected")}
                   </span>
                 )}
                 {connectionStatus === "error" && (
                   <span className="flex items-center gap-1.5 text-destructive font-medium">
                     <span className="size-2 rounded-full bg-destructive" />
-                    连接失败
+                    {t("account.donCloud.status.error")}
                   </span>
                 )}
                 {connectionStatus === "unknown" && (
-                  <span className="text-muted-foreground">未检测</span>
+                  <span className="text-muted-foreground">
+                    {t("account.donCloud.status.unknown")}
+                  </span>
                 )}
               </div>
 
               {storageEndpoint && (
                 <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                  <span>存储引擎:</span>
+                  <span>{t("account.donCloud.storageEngine")}</span>
                   <span className="font-mono text-foreground">
-                    Cloudflare R2 (Zero Egress)
+                    {t("account.donCloud.storageEngineValue")}
                   </span>
                 </div>
               )}
@@ -333,7 +344,7 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
                 onClick={() => void handleOpenAdmin()}
               >
                 <LuShieldCheck className="size-3.5" />
-                <span>Web 管理控制台</span>
+                <span>{t("account.donCloud.openAdmin")}</span>
                 <LuExternalLink className="size-3" />
               </Button>
             </div>
@@ -347,7 +358,7 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
               onClick={() => void handleDisconnect()}
               disabled={isSaving}
             >
-              断开连接
+              {t("account.donCloud.disconnect")}
             </Button>
           )}
           <Button
@@ -355,14 +366,16 @@ export function SyncConfigDialog({ isOpen, onClose }: SyncConfigDialogProps) {
             onClick={() => void handleTestConnection()}
             disabled={isTesting}
           >
-            {isTesting ? "测试中..." : "测试连接"}
+            {isTesting
+              ? t("account.donCloud.testing")
+              : t("account.donCloud.testConnection")}
           </Button>
           <LoadingButton
             onClick={() => void handleSave()}
             isLoading={isSaving}
             disabled={!token}
           >
-            保存并同步
+            {t("account.donCloud.saveAndSync")}
           </LoadingButton>
         </DialogFooter>
       </DialogContent>

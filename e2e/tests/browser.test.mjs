@@ -460,6 +460,7 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     const directProfile = (await app.invoke("list_browser_profiles")).find(
       (item) => item.id === profile.id,
     );
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
     const directLaunch = await app.invoke("launch_browser_profile", {
       profile: directProfile,
       url: `${fixtureUrl}/direct-command`,
@@ -481,6 +482,10 @@ test("real Wayfern fingerprinting, terms, API automation, CDP, cookies, and proc
     assert.equal(
       migratedProfile.wayfern_config.randomize_fingerprint_on_launch,
       false,
+    );
+    assert.ok(
+      migratedProfile.updated_at > directProfile.updated_at,
+      "launch-time fingerprint migration did not advance updated_at",
     );
     assert.equal(
       await readFile(migrationSentinel, "utf8"),

@@ -79,6 +79,34 @@ async function waitFor(app, callback, description, timeoutMs = 45_000) {
   return app.waitFor(callback, { description, timeoutMs, intervalMs: 250 });
 }
 
+test("disconnecting sync remains disabled after the app restarts", async () => {
+  assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
+  const app = appFromEnvironment("sync-disconnect");
+  try {
+    await app.start();
+    await configureSync(app);
+
+    const disconnected = await app.invoke("save_sync_settings", {
+      syncServerUrl: null,
+      syncToken: null,
+    });
+    assert.deepEqual(disconnected, {
+      sync_server_url: null,
+      sync_token: null,
+    });
+    assert.deepEqual(await app.invoke("get_sync_settings"), disconnected);
+    await app.invoke("restart_sync_service");
+
+    await app.restart();
+    assert.deepEqual(await app.invoke("get_sync_settings"), disconnected);
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await app.close();
+  }
+});
+
 test("two real app devices reconcile profile files and every config entity with last-write-wins", async () => {
   assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
   const deviceA = appFromEnvironment("sync-regular-a");
