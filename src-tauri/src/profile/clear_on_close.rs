@@ -20,6 +20,7 @@ const PROFILE_KEEP: &[&str] = &[
   "Extension Scripts",
   "Extension Cookies",
   "Local Extension Settings",
+  "Sync Extension Settings",
   "Managed Extension Settings",
   // Preferences hold the extension registry + user settings; deleting them
   // disables every installed extension, so they stay.
@@ -147,6 +148,45 @@ mod tests {
 
   fn mkdir(dir: &Path, name: &str) {
     fs::create_dir_all(dir.join(name)).unwrap();
+  }
+
+  #[test]
+  fn preserves_extension_storage_without_preserving_browsing_data() {
+    for (subdir, preferences) in [("", true), ("Default", true), ("Profile 2", false)] {
+      let tmp = TempDir::new().unwrap();
+      let dir = tmp.path().join(subdir);
+      fs::create_dir_all(&dir).unwrap();
+      if preferences {
+        touch(&dir, "Preferences");
+      }
+      let stores = [
+        "Local Extension Settings",
+        "Sync Extension Settings",
+        "Managed Extension Settings",
+      ];
+      for store in stores {
+        mkdir(&dir, &format!("{store}/extension-id"));
+        fs::write(dir.join(store).join("extension-id/000001.log"), b"settings").unwrap();
+      }
+      touch(&dir, "History");
+      mkdir(&dir, "Network");
+      touch(&dir.join("Network"), "Cookies");
+      mkdir(&dir, "Local Storage");
+      touch(&dir.join("Local Storage"), "site-data");
+
+      assert_eq!(clear_user_data_dir(tmp.path()), 3, "layout {subdir:?}");
+      for store in stores {
+        assert_eq!(
+          fs::read(dir.join(store).join("extension-id/000001.log")).unwrap(),
+          b"settings",
+          "layout {subdir:?}, store {store}"
+        );
+      }
+      for removed in ["History", "Network", "Local Storage"] {
+        assert!(!dir.join(removed).exists(), "{removed} must be cleared");
+      }
+      assert_eq!(clear_user_data_dir(tmp.path()), 0);
+    }
   }
 
   #[test]
