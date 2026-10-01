@@ -12,6 +12,8 @@ pub struct VpnWorkerConfig {
   pub local_port: Option<u16>,
   pub local_url: Option<String>,
   pub pid: Option<u32>,
+  #[serde(default)]
+  pub pid_start_time: Option<u64>,
 }
 
 impl VpnWorkerConfig {
@@ -24,7 +26,14 @@ impl VpnWorkerConfig {
       local_port: None,
       local_url: None,
       pid: None,
+      pid_start_time: None,
     }
+  }
+
+  pub fn is_running(&self) -> bool {
+    self
+      .pid
+      .is_some_and(|pid| crate::proxy_storage::process_identity_matches(pid, self.pid_start_time))
   }
 }
 
@@ -131,4 +140,20 @@ pub fn generate_vpn_worker_id() -> String {
       .as_secs(),
     rand::random::<u32>()
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn legacy_worker_config_does_not_authorize_a_live_pid() {
+    let config: VpnWorkerConfig = serde_json::from_value(serde_json::json!({
+      "id": "legacy", "vpn_id": "test", "vpn_type": "wireguard",
+      "config_file_path": "unused", "pid": std::process::id()
+    }))
+    .unwrap();
+    assert_eq!(config.pid_start_time, None);
+    assert!(!config.is_running());
+  }
 }

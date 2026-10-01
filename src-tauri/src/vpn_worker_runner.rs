@@ -61,7 +61,7 @@ async fn wait_for_vpn_worker_ready(
     .await;
 
     if let Some(updated_config) = get_vpn_worker_config(id) {
-      let process_running = updated_config.pid.map(is_process_running).unwrap_or(false);
+      let process_running = updated_config.is_running();
 
       if !process_running && attempts > 2 {
         let log_output = read_worker_log(id);
@@ -69,7 +69,7 @@ async fn wait_for_vpn_worker_ready(
         return Err(format!("VPN worker process crashed. Log output:\n{}", log_output).into());
       }
 
-      if vpn_worker_accepting_connections(&updated_config).await {
+      if process_running && vpn_worker_accepting_connections(&updated_config).await {
         return Ok(updated_config);
       }
     }
@@ -77,7 +77,7 @@ async fn wait_for_vpn_worker_ready(
     attempts += 1;
     if tokio::time::Instant::now() >= startup_deadline {
       if let Some(config) = get_vpn_worker_config(id) {
-        let process_running = config.pid.map(is_process_running).unwrap_or(false);
+        let process_running = config.is_running();
         let log_output = read_worker_log(id);
         delete_vpn_worker_config(id);
         return Err(
@@ -146,33 +146,27 @@ pub async fn start_vpn_worker_tracked(
   crate::proxy_runner::ensure_sidecar_version().await?;
 
   for config in list_vpn_worker_configs() {
-    if let Some(pid) = config.pid {
-      if !is_process_running(pid) {
-        delete_vpn_worker_config(&config.id);
-      }
-    } else {
+    if !config.is_running() {
       delete_vpn_worker_config(&config.id);
     }
   }
 
   // Check if a VPN worker for this vpn_id already exists and is running
   if let Some(existing) = find_vpn_worker_by_vpn_id(vpn_id) {
-    if let Some(pid) = existing.pid {
-      if is_process_running(pid) {
-        if vpn_worker_accepting_connections(&existing).await {
-          return Ok(VpnWorkerStart {
-            config: existing,
-            created: false,
-          });
-        }
-
-        return wait_for_vpn_worker_ready(&existing.id)
-          .await
-          .map(|config| VpnWorkerStart {
-            config,
-            created: false,
-          });
+    if existing.is_running() {
+      if vpn_worker_accepting_connections(&existing).await {
+        return Ok(VpnWorkerStart {
+          config: existing,
+          created: false,
+        });
       }
+
+      return wait_for_vpn_worker_ready(&existing.id)
+        .await
+        .map(|config| VpnWorkerStart {
+          config,
+          created: false,
+        });
     }
     // Worker config exists but process is dead, clean up
     delete_vpn_worker_config(&existing.id);
@@ -266,6 +260,7 @@ pub async fn start_vpn_worker_tracked(
 
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = crate::proxy_storage::resolve_process_start_time(pid);
     config_with_pid.local_port = Some(local_port);
     save_vpn_worker_config(&config_with_pid)?;
 
@@ -308,6 +303,7 @@ pub async fn start_vpn_worker_tracked(
 
     let mut config_with_pid = config.clone();
     config_with_pid.pid = Some(pid);
+    config_with_pid.pid_start_time = crate::proxy_storage::resolve_process_start_time(pid);
     config_with_pid.local_port = Some(local_port);
     save_vpn_worker_config(&config_with_pid)?;
 
@@ -326,7 +322,7 @@ pub async fn stop_vpn_worker(id: &str) -> Result<bool, Box<dyn std::error::Error
   let config = get_vpn_worker_config(id);
 
   if let Some(config) = config {
-    if let Some(pid) = config.pid {
+    if let Some(pid) = config.pid.filter(|_| config.is_running()) {
       #[cfg(unix)]
       {
         use std::process::Command;
@@ -372,4 +368,48 @@ pub async fn stop_all_vpn_workers() -> Result<(), Box<dyn std::error::Error>> {
     let _ = stop_vpn_worker(&config.id).await;
   }
   Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn stop_vpn_worker_preserves_unrelated_process() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_cache_dir(tmp.path().to_path_buf());
+    let mut child = std::process::Command::new("sleep")
+      .arg("60")
+      .spawn()
+      .unwrap();
+    let pid = child.id();
+    let start = crate::proxy_storage::resolve_process_start_time(pid).unwrap();
+    let mut config = VpnWorkerConfig::new(
+      "identity-test".into(),
+      "test-vpn".into(),
+      "wireguard".into(),
+      tmp.path().join("vpn.conf").to_string_lossy().into_owned(),
+    );
+    config.pid = Some(pid);
+    // Cover legacy configs as well as PID reuse, then the matching identity.
+    for expected in [None, Some(start.saturating_sub(1)), Some(start)] {
+      config.pid_start_time = expected;
+      let should_run = expected == Some(start);
+      assert_eq!(config.is_running(), should_run);
+      std::fs::write(&config.config_file_path, "test").unwrap();
+      save_vpn_worker_config(&config).unwrap();
+      let result = stop_vpn_worker(&config.id).await;
+      let survived = child.try_wait().unwrap().is_none();
+      if survived == should_run || result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+      }
+      assert!(result.unwrap());
+      assert_eq!(survived, !should_run, "identity: {expected:?}");
+      assert!(get_vpn_worker_config(&config.id).is_none());
+      assert!(!std::path::Path::new(&config.config_file_path).exists());
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+  }
 }

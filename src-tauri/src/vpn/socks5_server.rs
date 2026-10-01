@@ -509,6 +509,8 @@ impl WireGuardSocks5Server {
       None => crate::vpn_worker_storage::get_vpn_worker_config(&config_id),
     };
     if let Some(mut wc) = updated {
+      wc.pid = Some(std::process::id());
+      wc.pid_start_time = crate::proxy_storage::resolve_process_start_time(std::process::id());
       wc.local_port = Some(actual_port);
       wc.local_url = Some(format!("socks5://127.0.0.1:{}", actual_port));
       let result = match &config_path {
