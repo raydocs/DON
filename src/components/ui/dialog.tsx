@@ -108,8 +108,8 @@ function DialogOverlay({
     <DialogPrimitive.Overlay data-slot="dialog-overlay" asChild forceMount>
       <motion.div
         key="dialog-overlay"
-        initial={{ opacity: 0, filter: "blur(4px)" }}
-        animate={{ opacity: 1, filter: "blur(0px)" }}
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
         transition={transition}
         className={cn("fixed inset-0 z-9999 bg-background/50", className)}
         {...props}
@@ -165,12 +165,8 @@ function SubPageContent({
     <motion.div
       data-slot="sub-page"
       data-sub-page="true"
-      // Sub-pages enter with a short rise+fade so rail navigation reads as a
-      // transition instead of a hard cut. Same axis for every page (spatial
-      // consistency); the outgoing page unmounts under the incoming fade.
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.25, ease: [0.23, 1, 0.32, 1] }}
+      // Content is readable on its first frame, even in a throttled WebView.
+      initial={false}
       style={{
         position: "relative",
         display: "flex",
@@ -247,17 +243,13 @@ function DialogContent({
         <motion.div
           key="dialog-content"
           data-slot="dialog-content"
-          // Open motion modeled on transitions.dev's modal: a subtle scale
-          // from 0.96 → 1 with opacity, eased with cubic-bezier(0.22, 1, 0.36,
-          // 1). The portal unmounts immediately on close so a closed Radix
-          // surface cannot linger over the app. The centering translate stays
-          // in `style` so `scale` animates around the center without fighting
-          // the transform-based positioning.
+          // Keep content visible while a small displacement signals elevation.
+          // Closing unmounts immediately; effects never gate interaction.
           style={{ transformOrigin: "center" }}
-          initial={{ opacity: 0, scale: 0.96 }}
-          animate={{ opacity: 1, scale: 1 }}
+          initial={{ y: 4 }}
+          animate={{ y: 0 }}
           transition={
-            transition ?? { duration: 0.25, ease: [0.22, 1, 0.36, 1] }
+            transition ?? { duration: 0.12, ease: [0.22, 1, 0.36, 1] }
           }
           className={cn(
             // w-[calc(100%-2rem)] (not w-full + max-w) keeps the 1rem window

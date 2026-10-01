@@ -4011,19 +4011,19 @@ export function ProfilesDataTable({
                   <TableRow className="border-0! hover:bg-transparent">
                     <TableCell
                       colSpan={table.getVisibleLeafColumns().length}
-                      className="py-16"
+                      className="py-8"
                     >
-                      <div className="flex flex-col items-center gap-3 text-center">
-                        <Logo className="size-12 text-muted-foreground" />
+                      <div className="don-empty flex flex-col items-start gap-5 text-left">
+                        <Logo className="size-10 text-foreground" />
                         <div>
-                          <p className="text-sm font-medium text-foreground">
+                          <p className="text-2xl font-semibold tracking-tight text-foreground">
                             {t("profiles.table.emptyTitle")}
                           </p>
-                          <p className="mt-1 text-xs text-muted-foreground">
+                          <p className="mt-2 text-sm/6 text-muted-foreground">
                             {t("profiles.table.emptyHint")}
                           </p>
                         </div>
-                        <div className="mt-1 flex gap-2">
+                        <div className="mt-1 flex flex-wrap gap-2">
                           {onCreateProfile && (
                             <RippleButton size="sm" onClick={onCreateProfile}>
                               {t("profiles.table.emptyCreate")}
