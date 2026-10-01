@@ -52,6 +52,7 @@ pub const DEFAULT_EXCLUDE_PATTERNS: &[&str] = &[
   "**/LOCK",
   "**/*-journal",
   "**/*-wal",
+  "**/*-shm",
   "**/SingletonLock",
   "**/SingletonSocket",
   "**/SingletonCookie",
@@ -538,6 +539,26 @@ pub fn get_cache_path(profile_dir: &Path) -> std::path::PathBuf {
 mod tests {
   use super::*;
   use tempfile::TempDir;
+
+  #[test]
+  fn manifest_excludes_sqlite_sidecars_at_every_depth() {
+    let root = TempDir::new().unwrap();
+    for database in ["Cookies", "profile/Default/History"] {
+      let path = root.path().join(database);
+      fs::create_dir_all(path.parent().unwrap()).unwrap();
+      fs::write(&path, "database").unwrap();
+      for suffix in ["-wal", "-journal", "-shm"] {
+        fs::write(root.path().join(format!("{database}{suffix}")), "scratch").unwrap();
+      }
+    }
+    let manifest = generate_manifest("test", root.path(), &mut HashCache::default()).unwrap();
+    let paths: Vec<_> = manifest
+      .files
+      .iter()
+      .map(|file| file.path.as_str())
+      .collect();
+    assert_eq!(paths, ["Cookies", "profile/Default/History"]);
+  }
 
   #[test]
   fn test_hash_cache_operations() {
