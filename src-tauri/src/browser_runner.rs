@@ -236,12 +236,14 @@ impl BrowserRunner {
       CLOUD_AUTH.sync_cloud_proxy().await;
     }
     // For cloud-derived proxies, inject profile-specific sid for sticky sessions
-    if let Some(pid) = profile_id {
-      if PROXY_MANAGER.is_cloud_or_derived(proxy_id) {
-        return Ok(PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid));
-      }
-    }
-    Ok(PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+    let settings = match profile_id {
+      Some(pid) => PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid),
+      None => PROXY_MANAGER.get_proxy_settings_by_id(proxy_id),
+    };
+    // Only an absent assignment permits direct routing, not a dangling reference.
+    settings
+      .map(Some)
+      .ok_or_else(|| crate::backend_error("PROXY_NOT_FOUND"))
   }
 
   fn fire_launch_hook(profile: &BrowserProfile) {
@@ -1952,6 +1954,32 @@ pub async fn open_url_with_profile(
 mod tests {
   use super::*;
   use tempfile::TempDir;
+
+  #[tokio::test]
+  async fn proxy_resolution_rejects_missing_references() {
+    let temp = TempDir::new().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let runner = BrowserRunner::instance();
+    for proxy_id in [uuid::Uuid::new_v4().to_string(), String::new()] {
+      for profile_id in [None, Some("missing-proxy-regression")] {
+        let error = runner
+          .resolve_proxy_with_refresh(Some(&proxy_id), profile_id)
+          .await
+          .expect_err("an unresolved configured proxy must not become a direct connection");
+        assert_eq!(error, crate::backend_error("PROXY_NOT_FOUND"));
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn proxy_resolution_allows_explicitly_unassigned_profiles() {
+    let runner = BrowserRunner::instance();
+    assert!(runner
+      .resolve_proxy_with_refresh(None, Some("direct-profile"))
+      .await
+      .unwrap()
+      .is_none());
+  }
 
   fn profile_with_timezone(timezone: &str) -> BrowserProfile {
     BrowserProfile {
