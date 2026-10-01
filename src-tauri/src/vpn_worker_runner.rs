@@ -99,11 +99,9 @@ async fn wait_for_vpn_worker_ready(
   }
 }
 
-/// Serializes worker startup for a given VPN, so two concurrent launches cannot
-/// both observe "no worker" and both believe they created it. Benign until a
-/// launch guard may stop one on failure; then double-ownership means a
-/// cancelled launch tears down a tunnel another profile is using. Mirrors
-/// `xray_worker_runner::XRAY_START_LOCK`.
+/// Serializes VPN adoption and failed-launch cleanup. Browser launches retain
+/// this lock until their PID is published, so cleanup cannot overlook an
+/// adopter that has not yet become visible in profile storage.
 static VPN_START_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// A started VPN worker plus whether *this* call spawned it.
@@ -112,6 +110,21 @@ pub struct VpnWorkerStart {
   /// False when an already-running worker was adopted. Only the creator may
   /// stop it while unwinding a failed launch.
   pub created: bool,
+  pub launch_lock: tokio::sync::MutexGuard<'static, ()>,
+}
+
+impl VpnWorkerStart {
+  fn new(
+    config: VpnWorkerConfig,
+    created: bool,
+    launch_lock: tokio::sync::MutexGuard<'static, ()>,
+  ) -> Self {
+    Self {
+      config,
+      created,
+      launch_lock,
+    }
+  }
 }
 
 /// Whether any profile with a live browser process is routing through this VPN.
@@ -160,18 +173,12 @@ pub async fn start_vpn_worker_tracked(
     if let Some(pid) = existing.pid {
       if is_process_running(pid) {
         if vpn_worker_accepting_connections(&existing).await {
-          return Ok(VpnWorkerStart {
-            config: existing,
-            created: false,
-          });
+          return Ok(VpnWorkerStart::new(existing, false, _start_guard));
         }
 
         return wait_for_vpn_worker_ready(&existing.id)
           .await
-          .map(|config| VpnWorkerStart {
-            config,
-            created: false,
-          });
+          .map(|config| VpnWorkerStart::new(config, false, _start_guard));
       }
     }
     // Worker config exists but process is dead, clean up
@@ -316,10 +323,7 @@ pub async fn start_vpn_worker_tracked(
 
   wait_for_vpn_worker_ready(&id)
     .await
-    .map(|config| VpnWorkerStart {
-      config,
-      created: true,
-    })
+    .map(|config| VpnWorkerStart::new(config, true, _start_guard))
 }
 
 pub async fn stop_vpn_worker(id: &str) -> Result<bool, Box<dyn std::error::Error>> {
@@ -372,4 +376,39 @@ pub async fn stop_all_vpn_workers() -> Result<(), Box<dyn std::error::Error>> {
     let _ = stop_vpn_worker(&config.id).await;
   }
   Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[tokio::test]
+  async fn pending_vpn_launch_excludes_failed_creator_cleanup() {
+    for created in [true, false] {
+      let start_lock = lock_vpn_starts().await;
+      let started = VpnWorkerStart::new(
+        VpnWorkerConfig::new(
+          "worker".into(),
+          "vpn".into(),
+          "wireguard".into(),
+          "unused".into(),
+        ),
+        created,
+        start_lock,
+      );
+      // After adoption but before browser PID publication, a failed creator's
+      // cleanup must not enter its check-then-stop section.
+      assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(10), lock_vpn_starts())
+          .await
+          .is_err(),
+        "cleanup entered while a browser launch was still pending (created={created})"
+      );
+      drop(started);
+      // Both successful completion and cancellation release the RAII guard.
+      let _cleanup = tokio::time::timeout(std::time::Duration::from_secs(1), lock_vpn_starts())
+        .await
+        .expect("completed launch must not leak the start lock");
+    }
+  }
 }
