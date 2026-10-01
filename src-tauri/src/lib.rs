@@ -2598,6 +2598,11 @@ pub fn run_with_builder(
       tauri::async_runtime::spawn(async move {
         use std::sync::Arc;
 
+        let mut active_subscription = sync::subscription::GLOBAL_SUBSCRIPTION.lock().await;
+        // A settings restart may already have initialized the pipeline.
+        if active_subscription.is_some() {
+          return;
+        }
         let mut subscription_manager = sync::SubscriptionManager::new();
         let work_rx = subscription_manager.take_work_receiver();
 
@@ -2645,6 +2650,7 @@ pub fn run_with_builder(
             .await;
           log::info!("Sync scheduler started");
         }
+        *active_subscription = Some(subscription_manager);
       });
 
       // Start cloud auth background refresh loop
