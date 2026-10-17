@@ -5,8 +5,15 @@ use crate::proxy_storage::{
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[derive(Clone, Copy)]
+struct ProxyProcess {
+  pid: u32,
+  start_time: Option<u64>,
+}
+
 static PROXY_PROCESSES: std::sync::LazyLock<
-  std::sync::Mutex<std::collections::HashMap<String, u32>>,
+  std::sync::Mutex<std::collections::HashMap<String, ProxyProcess>>,
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 static SIDECAR_VERSION_VERIFIED: AtomicBool = AtomicBool::new(false);
@@ -369,7 +376,7 @@ async fn spawn_proxy_worker(
     crate::app_dirs::create_owner_only(&log_path)
   };
   prune_stale_proxy_logs(&temp_dir, RETAINED_PROXY_LOGS);
-  let spawned_pid: u32;
+  let child: std::process::Child;
 
   #[cfg(unix)]
   {
@@ -411,22 +418,7 @@ async fn spawn_proxy_worker(
     }
 
     // Spawn detached process
-    let child = cmd.spawn()?;
-    let pid = child.id();
-    spawned_pid = pid;
-    log::debug!("Proxy worker spawned id={id} pid={pid}");
-
-    // Store PID
-    {
-      let mut processes = PROXY_PROCESSES.lock().unwrap();
-      processes.insert(id.clone(), pid);
-    }
-
-    let mut config_with_pid = config.clone();
-    config_with_pid.pid = Some(pid);
-    config_with_pid.pid_start_time = crate::proxy_storage::resolve_process_start_time(pid);
-    save_proxy_config(&config_with_pid)?;
-    watch_proxy_exit(child, id.clone());
+    child = cmd.spawn()?;
   }
 
   #[cfg(windows)]
@@ -476,9 +468,8 @@ async fn spawn_proxy_worker(
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
     cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
 
-    let child = cmd.spawn()?;
+    child = cmd.spawn()?;
     let pid = child.id();
-    spawned_pid = pid;
 
     // Set high priority so the proxy is killed last under resource pressure
     unsafe {
@@ -487,19 +478,18 @@ async fn spawn_proxy_worker(
         let _ = CloseHandle(handle);
       }
     }
-
-    // Store PID
-    {
-      let mut processes = PROXY_PROCESSES.lock().unwrap();
-      processes.insert(id.clone(), pid);
-    }
-
-    let mut config_with_pid = config.clone();
-    config_with_pid.pid = Some(pid);
-    config_with_pid.pid_start_time = crate::proxy_storage::resolve_process_start_time(pid);
-    save_proxy_config(&config_with_pid)?;
-    watch_proxy_exit(child, id.clone());
   }
+
+  let spawned_pid = child.id();
+  log::debug!("Proxy worker spawned id={id} pid={spawned_pid}");
+  let process = ProxyProcess {
+    pid: spawned_pid,
+    start_time: crate::proxy_storage::resolve_process_start_time(spawned_pid),
+  };
+  PROXY_PROCESSES.lock().unwrap().insert(id.clone(), process);
+  // Only the worker publishes PID + readiness. A parent write after spawn can
+  // truncate the config while the worker reads it, or erase its ready URL.
+  watch_proxy_exit(child, id.clone());
 
   // Give the process a moment to start up before checking
   tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -593,18 +583,22 @@ async fn stop_proxy_process_inner(
   remove_config: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
   let config = get_proxy_config(id);
-  let pid = PROXY_PROCESSES
+  let process = PROXY_PROCESSES
     .lock()
     .unwrap()
     .get(id)
     .copied()
-    .or_else(|| config.as_ref().and_then(|config| config.pid));
+    .or_else(|| {
+      config.as_ref().and_then(|config| {
+        config.pid.map(|pid| ProxyProcess {
+          pid,
+          start_time: config.pid_start_time,
+        })
+      })
+    });
 
-  if let Some(pid) = pid {
-    if !crate::proxy_storage::process_identity_matches(
-      pid,
-      config.as_ref().and_then(|config| config.pid_start_time),
-    ) {
+  if let Some(ProxyProcess { pid, start_time }) = process {
+    if !crate::proxy_storage::process_identity_matches(pid, start_time) {
       PROXY_PROCESSES.lock().unwrap().remove(id);
       if remove_config {
         delete_proxy_config(id);
