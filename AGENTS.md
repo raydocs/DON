@@ -44,6 +44,7 @@ donutbrowser/
 │   │   ├── mcp_server.rs            # MCP protocol server
 │   │   ├── mcp_remote.rs            # Authenticated remote MCP bridge
 │   │   ├── agent_console.rs         # Agent conversations and batches
+│   │   ├── browser_agent.rs         # Consent-gated local single-tab Messages API tasks
 │   │   ├── agent_schedules.rs       # Scheduled automation recipes
 │   │   ├── wayfern_identity_storage.rs # Browser identities and cross-OS storage conversion
 │   │   ├── sync/restore_points.rs   # Profile restore points

@@ -5,6 +5,7 @@ import type { TFunction } from "i18next";
  * Keep this list in sync with the codes used in `src-tauri/src/profile/password.rs`.
  */
 export type BackendErrorCode =
+  | "BROWSER_AGENT_FAILED"
   | "DATA_RECOVERY_REQUIRED"
   | "DATA_RECOVERY_INVALID"
   | "DATA_RECOVERY_NOT_NEEDED"
@@ -1141,6 +1142,10 @@ export function translateBackendError(t: TFunction, err: unknown): string {
     case "DATA_RECOVERY_FAILED":
       return t("backendErrors.dataRecoveryFailed", {
         detail: parsed.params?.detail ?? "",
+      });
+    case "BROWSER_AGENT_FAILED":
+      return t("backendErrors.browserAgentFailed", {
+        reason: parsed.params?.reason ?? "",
       });
     case "INTERNAL_ERROR":
       return t("backendErrors.internal", {

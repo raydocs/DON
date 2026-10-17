@@ -150,6 +150,7 @@ mod window_decorations;
 // mod theme_detector; // removed: theme detection handled in webview via CSS prefers-color-scheme
 mod agent_console;
 mod agent_schedules;
+mod browser_agent;
 mod cloud_api;
 pub mod cloud_auth;
 mod cloud_errors;
@@ -3762,6 +3763,12 @@ pub fn run_with_builder(
       agent_console::set_agents_paused,
       agent_console::clear_agent_activity,
       agent_console::show_profile_window,
+      browser_agent::get_browser_agent_config,
+      browser_agent::save_browser_agent_config,
+      browser_agent::get_browser_agent_tabs,
+      browser_agent::start_browser_agent_task,
+      browser_agent::get_browser_agent_task,
+      browser_agent::control_browser_agent_task,
       // Profile password commands
       set_profile_password,
       change_profile_password,

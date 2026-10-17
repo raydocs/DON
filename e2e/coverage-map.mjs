@@ -421,6 +421,12 @@ export const commandCoverage = {
     suite: "integrations",
     level: "integration",
     commands: [
+      "browser_agent::get_browser_agent_config",
+      "browser_agent::save_browser_agent_config",
+      "browser_agent::get_browser_agent_tabs",
+      "browser_agent::start_browser_agent_task",
+      "browser_agent::get_browser_agent_task",
+      "browser_agent::control_browser_agent_task",
       "agent_console::get_agent_console",
       "agent_console::answer_agent_request",
       "agent_console::dismiss_agent_request",

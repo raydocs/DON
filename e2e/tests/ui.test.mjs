@@ -4202,6 +4202,7 @@ test("the agent page guides setup, then shows agents, requests, notes, take-over
             `return [...document.querySelectorAll('[role="tab"]')].map((node) => node.textContent.trim().replace(/\\d+$/, ""));`,
           ),
           [
+            en.browserAgent.title,
             en.agent.tabs.conversation,
             en.agent.tabs.profiles,
             en.agent.tabs.activity,

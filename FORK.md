@@ -68,11 +68,64 @@ See **[UPSTREAM_REQUESTS.md](./UPSTREAM_REQUESTS.md)** for the fork's TLS/JA3 de
 
 See **[CLAUDE_WORKFLOW.md](./CLAUDE_WORKFLOW.md)**.
 
-In short: **1 profile · 1 家宽 IP · matching timezone · 1 card**.
+The Claude health workflow distinguishes configuration from runtime observations.
+Residential labels and recent observed exit IPs are separate, advisory groups:
+duplicates do not block use, and there are no three/seven-day reuse gates.
+Missing required routes still fail closed. Never put card numbers or session keys
+in labels. Fingerprint checks distinguish a simulated target from native DPR.
 
-- Create dialog: Claude isolation mode (default on) requires dedicated proxy + card label.
-- Header **Claude** button: rules + fleet health scan (shared proxy / DPR / randomize / geo).
-- Defaults: `geoip: true`, `block_webrtc: true`, host DPR, no randomize-on-launch.
+## Local Browser Agent
+
+Open **Agent → Browser tasks**. Configure an explicitly authorised Messages API
+endpoint and model, save the key in the password input, then choose a running
+local Wayfern profile, an HTTP(S) tab, and a task. No cloud DON identity is needed.
+The default model ID is [`claude-haiku-5-5`](https://platform.claude.com/docs/en/models/haiku-5-5/overview),
+verified against official documentation; account access and real inference need
+the user's own provider key and were not tested without it. Inference is billable;
+this feature deploys no hosted browser or paid infrastructure.
+
+- The existing CDP transport and Agent pause/profile holds are reused. Only the
+  selected local tab is controlled; no cloud fallback, shell, arbitrary model
+  JavaScript, desktop, file, cookie or credential-reading tools are exposed.
+- Every navigation, fill and click (including submission) requires a separate,
+  one-use desktop confirmation with the origin and masked field state. Changes
+  to form values invalidate approval. Inspect the actual browser before approval.
+  Cross-origin navigation and ordinary cross-origin form/link targets are refused.
+- Passwords, payment data and verification codes must be entered manually. Use
+  **Take over**, then **Resume**; CAPTCHA/OTP bypass, SMS integration and bulk
+  Claude registration are not implemented. Page text cannot grant tool authority.
+- The API key is sealed in the existing installation vault and has no getter.
+  A blank key preserves it only for the same endpoint; changing endpoint clears
+  it. URL credentials/queries and remote plaintext HTTP endpoints are rejected.
+  Only HTTPS or explicit loopback HTTP providers are supported, without redirects.
+- Visible page text may still be private and is sent only after task consent.
+  Field values, hidden text and private approval digests are omitted from model
+  observations. Do not paste secrets into task instructions or page text.
+- Tasks are in-memory, single-instance, capped at 30 model turns / 20 minutes.
+  Only inference HTTP 429/503 retries twice; uncertain browser actions never
+  auto-retry. Pause/cancel cannot undo a submission already dispatched. Closing
+  the panel does not cancel; closing DON loses the task history.
+- This is not a network sandbox: existing page scripts may make requests, open
+  windows or cause side effects. No claim is made to prevent all prompt injection
+  or to sandbox CDP. Visual computer-use fallback is not enabled.
+
+Reference: [`anthropics/claude-quickstarts`](https://github.com/anthropics/claude-quickstarts)
+(MIT, copyright 2023 Anthropic); the browser-use example illustrates a tool loop
+and human approval. No source or assets were copied; DON uses its existing Rust
+Messages/CDP boundaries rather than deploying the example's cloud stack.
+
+Local deterministic proof (requires a separately installed Chromium, no model key):
+
+```bash
+DONUT_E2E_AGENT_CHROME=/absolute/path/to/chrome DONUT_E2E_HEADED=1 \
+  xvfb-run -a pnpm e2e:integrations
+```
+
+The fixture performs a real local registration submission and checks approval,
+changed fields, pause/takeover/cancel, forbidden tools/origins and key isolation.
+The Messages server is scripted; this proves browser/control integration, not
+Haiku task reasoning or real-site compatibility. Without the explicit Chromium
+path, only the credential test runs and the real-action test is skipped.
 
 ## Roadmap
 
