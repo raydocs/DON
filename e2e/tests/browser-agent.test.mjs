@@ -90,11 +90,12 @@ test("browser agent really fills and submits one local tab only after desktop co
       );
     } else if (req.url === "/submit") {
       submissions.push(Object.fromEntries(new URLSearchParams(body)));
+      res.setHeader("content-type", "text/html; charset=utf-8");
       res.end(
         "<title>Local receipt</title><h1 id='receipt'>Registration received — local fixture only</h1>",
       );
     } else {
-      res.setHeader("content-type", "text/html");
+      res.setHeader("content-type", "text/html; charset=utf-8");
       res.end(`<title>Local registration fixture</title><h1>Local account registration</h1>
         <p>Fixture only. No real account is created.</p>
         <div style="display:none">hidden-fixture-secret</div>
@@ -117,6 +118,8 @@ test("browser agent really fills and submits one local tab only after desktop co
   try {
     await withApp("browser-agent-actions", async (app) => {
       await app.session.command("POST", "/window/rect", {
+        x: 0,
+        y: 0,
         width: 1280,
         height: 900,
       });
@@ -235,6 +238,8 @@ test("browser agent really fills and submits one local tab only after desktop co
       );
       await control("approve", fill.pending);
       await wait("human");
+      await app.waitForText("Automation is waiting.");
+      await app.capture("browser-agent-human");
       assert.equal(
         await cdp.evaluate("document.querySelector('#name').value"),
         "Ada Local",
@@ -254,12 +259,28 @@ test("browser agent really fills and submits one local tab only after desktop co
       assert.equal(submissions.length, 0);
       await app.waitForText("Review before acting");
       await app.capture("browser-agent-confirmation");
+      await app.session.command("POST", "/window/rect", {
+        width: 880,
+        height: 700,
+      });
+      await app.waitFor(() => app.execute("return window.innerWidth < 1000"));
+      await app.capture("browser-agent-compact");
+      await app.session.command("POST", "/window/rect", {
+        width: 1280,
+        height: 900,
+      });
+      await app.waitFor(() => app.execute("return window.innerWidth >= 1200"));
       await app.clickSelector('[data-testid="ai-approve"]');
       const completed = await wait("completed");
       assert.match(completed.observation.text, /Registration received/);
       assert.deepEqual(submissions, [
         { name: "Ada Local", password: manualSecret },
       ]);
+      await app.waitForText("Finished");
+      await app.clickSelector(
+        '[data-testid="browser-agent"] section details > summary',
+      );
+      await app.waitForText("Registration received — local fixture only");
       await app.capture("browser-agent-completed");
       assert.equal(requests.length, 4);
       for (const request of requests) {
@@ -318,6 +339,8 @@ test("browser agent really fills and submits one local tab only after desktop co
       await wait("human");
       await control("pause");
       await wait("paused");
+      await app.waitForText("Paused");
+      await app.capture("browser-agent-paused");
       await control("cancel");
       await wait("cancelled");
       assert.equal(submissions.length, 1);
@@ -326,6 +349,8 @@ test("browser agent really fills and submits one local tab only after desktop co
       replies = [tool("evaluate", { expression: "fetch('/submit')" })];
       await start();
       assert.match((await wait("failed")).result, /AI_TOOL_NOT_ALLOWED/);
+      await app.waitForText("Stopped with error");
+      await app.capture("browser-agent-error");
       assert.equal(submissions.length, 1);
       replies = [tool("navigate", { url: "https://example.com" })];
       await start();

@@ -2240,7 +2240,7 @@ test("clearing a device preset removes its fingerprint and preset DPR", async ()
         { description: "fingerprint device preset control" },
       );
       await app.clickSelector("#advanced-device-preset");
-      await app.clickText(en.devicePresets.none, { roles: ["option"] });
+      await app.clickText(en.common.labels.none, { roles: ["option"] });
       await app.waitFor(
         () =>
           app.execute(
@@ -4068,6 +4068,7 @@ test("the agent page guides setup, then shows agents, requests, notes, take-over
             id: "ui-agent",
             email: "agent@example.test",
             plan: "pro",
+            entitlements: { active: true, remoteControl: true },
             planPeriod: "monthly",
             subscriptionStatus: "active",
             profileLimit: 50,
