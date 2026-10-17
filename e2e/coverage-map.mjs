@@ -18,6 +18,8 @@ export const commandCoverage = {
       "update_tray_menu",
       "get_app_settings",
       "save_app_settings",
+      "data_recovery::get_data_recovery_items",
+      "data_recovery::recover_data_file",
       "read_log_files",
       "get_table_preferences",
       "save_table_preferences",
@@ -257,6 +259,7 @@ export const commandCoverage = {
     suite: "integrations",
     level: "integration",
     commands: [
+      "fingerprint_consistency::get_profile_exit_observations",
       "start_api_server",
       "stop_api_server",
       "get_api_server_status",

@@ -56,7 +56,7 @@ import {
 } from "@/lib/entitlements";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import type { SyncSettings } from "@/types";
+import type { SyncServerCheck, SyncSettings } from "@/types";
 
 interface AccountPageProps {
   isOpen: boolean;
@@ -129,17 +129,18 @@ export function AccountPage({
   // Self-hosted server state. Loaded once when the dialog opens and persisted
   // via `save_sync_settings` so the rest of the app picks up the new URL/token
   // from `SettingsManager`.
-  const [serverUrl, setServerUrl] = useState(
-    "https://don-sync-worker.ppop.workers.dev",
-  );
+  const [serverUrl, setServerUrl] = useState("");
   const [token, setToken] = useState("");
+  const [savedUrl, setSavedUrl] = useState<string | null>(null);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [settingsLoading, setSettingsLoading] = useState(true);
   const [showToken, setShowToken] = useState(false);
   const [isSavingSelfHosted, setIsSavingSelfHosted] = useState(false);
   const [isTestingConnection, setIsTestingConnection] = useState(false);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("unknown");
 
-  const hasConfig = Boolean(serverUrl && token);
+  const hasConfig = Boolean(savedUrl);
   // Signed out, a server takes its shared token. Signed in, the account signs
   // in to its own server instead (`AccountSyncServer`); the backend refuses a
   // shared token then (`save_sync_settings`), so one device never syncs one
@@ -176,19 +177,20 @@ export function AccountPage({
   };
 
   const loadSelfHostedSettings = useCallback(async () => {
+    setSettingsLoading(true);
+    setSettingsError(null);
     try {
       const settings = await invoke<SyncSettings>("get_sync_settings");
-      setServerUrl(
-        settings.sync_server_url ?? "https://don-sync-worker.ppop.workers.dev",
-      );
+      setServerUrl(settings.sync_server_url ?? "");
+      setSavedUrl(settings.sync_server_url ?? null);
       setToken(settings.sync_token ?? "");
-      setConnectionStatus(
-        settings.sync_server_url && settings.sync_token ? "unknown" : "unknown",
-      );
+      setConnectionStatus("unknown");
     } catch (error) {
-      console.error("Failed to load sync settings:", error);
+      setSettingsError(translateBackendError(t, error));
+    } finally {
+      setSettingsLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (isOpen) {
@@ -204,11 +206,17 @@ export function AccountPage({
     setIsTestingConnection(true);
     setConnectionStatus("testing");
     try {
-      const healthUrl = `${serverUrl.replace(/\/$/, "")}/health`;
-      const response = await fetch(healthUrl);
-      if (response.ok) {
+      const check = await invoke<SyncServerCheck>(
+        "check_sync_server_connection",
+        { serverUrl },
+      );
+      if (
+        check.server_reachable &&
+        check.storage_ready !== false &&
+        check.storage_reachable !== false
+      ) {
         setConnectionStatus("connected");
-        showSuccessToast(t("sync.config.connectionSuccess"));
+        showSuccessToast(t("connections.reachableOnly"));
       } else {
         setConnectionStatus("error");
         showErrorToast(t("sync.config.serverError"));
@@ -228,11 +236,8 @@ export function AccountPage({
         syncServerUrl: serverUrl || null,
         syncToken: token || null,
       });
-      try {
-        await invoke("restart_sync_service");
-      } catch (e) {
-        console.error("Failed to restart sync service:", e);
-      }
+      setSavedUrl(serverUrl);
+      await invoke("restart_sync_service");
       showSuccessToast(t("sync.config.settingsSaved"));
     } catch (error) {
       console.error("Failed to save sync settings:", error);
@@ -252,14 +257,11 @@ export function AccountPage({
         syncServerUrl: null,
         syncToken: null,
       });
-      try {
-        await invoke("restart_sync_service");
-      } catch (e) {
-        console.error("Failed to restart sync service:", e);
-      }
       setServerUrl("");
+      setSavedUrl(null);
       setToken("");
       setConnectionStatus("unknown");
+      await invoke("restart_sync_service");
       showSuccessToast(t("sync.config.disconnected"));
     } catch (error) {
       console.error("Failed to disconnect:", error);
@@ -331,7 +333,7 @@ export function AccountPage({
   const connectionLabel = {
     unknown: t("account.selfHosted.statusUnknown"),
     testing: t("appFeedback.checking"),
-    connected: t("sync.status.connected"),
+    connected: t("connections.reachable"),
     error: t("sync.status.error"),
   };
 
@@ -340,21 +342,93 @@ export function AccountPage({
       <DialogContent className="flex max-h-[calc(100vh-5rem)] max-w-3xl flex-col">
         <div className="min-h-0 flex-1 overflow-y-auto">
           <div className={cn(subPage && "mx-auto w-full max-w-4xl")}>
+            <div className="mb-5 space-y-4">
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {t("connections.title")}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {t("connections.description")}
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-3">
+                <SettingsPanel className="border">
+                  <p className={SECTION_LABEL_CLASS}>
+                    {t("connections.local")}
+                  </p>
+                  <p className="mt-2 text-sm font-semibold">
+                    {t("connections.available")}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("connections.localDescription")}
+                  </p>
+                </SettingsPanel>
+                <SettingsPanel className="border">
+                  <p className={SECTION_LABEL_CLASS}>
+                    {t("connections.identity")}
+                  </p>
+                  <p className="mt-2 truncate text-sm font-semibold">
+                    {isCloudLoading
+                      ? t("appFeedback.checking")
+                      : isLoggedIn
+                        ? user?.email
+                        : t("connections.noAccount")}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("connections.identityDescription")}
+                  </p>
+                </SettingsPanel>
+                <SettingsPanel className="border">
+                  <p className={SECTION_LABEL_CLASS}>{t("connections.sync")}</p>
+                  <p className="mt-2 text-sm font-semibold">
+                    {settingsLoading
+                      ? t("appFeedback.checking")
+                      : settingsError
+                        ? t("connections.unknown")
+                        : isLoggedIn
+                          ? t("connections.accountSync")
+                          : hasConfig
+                            ? t("connections.sharedSync")
+                            : t("connections.off")}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {t("connections.syncDescription")}
+                  </p>
+                </SettingsPanel>
+              </div>
+              {settingsError && (
+                <div
+                  role="alert"
+                  className="flex items-center gap-3 rounded-lg border border-destructive/30 p-3 text-sm"
+                >
+                  <span className="min-w-0 flex-1 break-words text-destructive-text">
+                    {settingsError}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void loadSelfHostedSettings()}
+                  >
+                    {t("common.buttons.retry")}
+                  </Button>
+                </div>
+              )}
+            </div>
             <AnimatedTabs value={activeTab} onValueChange={setActiveTab}>
               <AnimatedTabsList>
                 <AnimatedTabsTrigger value="account">
                   {t("account.tabs.account")}
                 </AnimatedTabsTrigger>
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    void openUrl(
-                      "https://don-sync-worker.ppop.workers.dev/admin",
-                    )
-                  }
-                >
-                  {t("about.website")}
-                </Button>
+                {savedUrl && (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      void openUrl(`${savedUrl.replace(/\/$/, "")}/admin`)
+                    }
+                  >
+                    {t("about.website")}
+                  </Button>
+                )}
                 {showTeamUsage && (
                   <AnimatedTabsTrigger value="team-usage">
                     {t("account.tabs.teamUsage")}
@@ -597,7 +671,11 @@ export function AccountPage({
                     paid={getEntitlements(user).cloudBackup}
                     teamSeat={Boolean(user.teamId)}
                   />
-                ) : selfHostedDisabled ? null : (
+                ) : selfHostedDisabled || settingsLoading ? (
+                  <p className="p-4 text-sm text-muted-foreground">
+                    {t("appFeedback.checking")}
+                  </p>
+                ) : settingsError ? null : (
                   <SettingsPanel className="flex flex-col gap-4">
                     <div className="flex items-start gap-3">
                       <FeatureIcon active={connectionStatus === "connected"}>
@@ -608,10 +686,13 @@ export function AccountPage({
                           {t("account.selfHosted.title")}
                         </p>
                         <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
-                          {t("account.selfHosted.description")}
+                          {t("connections.sharedDescription")}
                         </p>
                       </div>
                     </div>
+                    <p className="rounded-lg border bg-background/50 p-3 text-xs text-muted-foreground">
+                      {t("connections.probeScope")}
+                    </p>
 
                     <SoftFields>
                       <div className="grid gap-4 @xl:grid-cols-2">

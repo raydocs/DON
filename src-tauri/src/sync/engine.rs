@@ -527,26 +527,17 @@ impl SyncProgressTracker {
 
 /// Check if sync is configured (cloud or self-hosted)
 pub fn is_sync_configured() -> bool {
-  // Isolated desktop tests may opt into their local fixture, never DON's
-  // default server. The local capability unlock is not a configured account.
-  if cfg!(debug_assertions) && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some() {
-    return SettingsManager::instance()
-      .load_settings()
-      .is_ok_and(|settings| settings.sync_server_url.is_some());
-  }
-  // Cloud backup is a plan capability. Gating on the capability — not just
-  // "is paid" — keeps this correct if a plan without cloud backup is ever
-  // added.
   if crate::cloud_auth::CLOUD_AUTH.can_use_cloud_backup_sync() {
     return true;
   }
-  let manager = SettingsManager::instance();
-  if let Ok(settings) = manager.load_settings() {
-    if settings.sync_server_url.is_some() {
-      return true;
-    }
-  }
-  !crate::settings_manager::DEFAULT_DON_SYNC_URL.is_empty()
+  SettingsManager::instance()
+    .load_settings()
+    .is_ok_and(|settings| {
+      settings
+        .sync_server_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+    })
 }
 
 #[derive(Clone)]
@@ -582,7 +573,7 @@ impl SyncEngine {
 
   pub async fn create_from_settings(app_handle: &tauri::AppHandle) -> Result<Self, String> {
     if !is_sync_configured() {
-      return Err("Sync is not configured".to_string());
+      return Err(crate::backend_error("SYNC_NOT_CONFIGURED"));
     }
     if let Some(server) = super::account_server::configured().await {
       let token = crate::cloud_auth::CLOUD_AUTH
@@ -592,11 +583,7 @@ impl SyncEngine {
       engine.read_only = crate::team_roles::is_read_only();
       return Ok(engine);
     }
-    if crate::cloud_auth::CloudAuthManager::load_access_token()
-      .ok()
-      .flatten()
-      .is_some()
-    {
+    if crate::cloud_auth::CLOUD_AUTH.can_use_cloud_backup().await {
       let token = crate::cloud_auth::CLOUD_AUTH
         .get_or_refresh_sync_token()
         .await?
@@ -606,17 +593,20 @@ impl SyncEngine {
       return Ok(engine);
     }
     let manager = SettingsManager::instance();
-    let settings = manager.load_settings().unwrap_or_default();
+    let settings = manager
+      .load_settings()
+      .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?;
     let server_url = settings
       .sync_server_url
-      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string());
+      .filter(|url| !url.trim().is_empty())
+      .ok_or_else(|| crate::backend_error("SYNC_NOT_CONFIGURED"))?;
 
     let token = manager
       .get_sync_token(app_handle)
       .await
-      .ok()
-      .flatten()
-      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
+      .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?
+      .filter(|token| !token.trim().is_empty())
+      .ok_or_else(|| crate::backend_error("SYNC_NOT_CONFIGURED"))?;
 
     Ok(Self::new(server_url, token))
   }

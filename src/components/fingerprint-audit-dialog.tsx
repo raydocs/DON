@@ -8,6 +8,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
@@ -185,7 +186,7 @@ function AuditItemRow({
         <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
           {t("fingerprintAudit.expected")}
         </p>
-        <p className="truncate font-mono text-xs">
+        <p className="break-words whitespace-pre-wrap font-mono text-xs">
           {formatValue(item.expected, t("fingerprintAudit.notAvailable"))}
         </p>
       </div>
@@ -193,7 +194,7 @@ function AuditItemRow({
         <p className="text-[10px] tracking-wide text-muted-foreground uppercase">
           {t("fingerprintAudit.actual")}
         </p>
-        <p className="truncate font-mono text-xs">
+        <p className="break-words whitespace-pre-wrap font-mono text-xs">
           {formatValue(item.actual, t("fingerprintAudit.notAvailable"))}
         </p>
       </div>
@@ -219,23 +220,29 @@ export function FingerprintAuditDialog({
   const [report, setReport] = useState<FingerprintAuditReport | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const requestId = useRef(0);
+  const profileId = profile?.id;
 
   const runAudit = useCallback(async () => {
-    if (!profile) return;
+    if (!profileId) return;
+    const id = ++requestId.current;
     setIsRunning(true);
     setError(null);
+    setReport(null);
     try {
       const next = await invoke<FingerprintAuditReport>(
         "run_fingerprint_audit",
-        { profileId: profile.id },
+        { profileId },
       );
-      setReport(next);
+      if (id === requestId.current) setReport(next);
     } catch (reason) {
-      setError(translateBackendError(t as never, reason));
+      if (id === requestId.current)
+        setError(translateBackendError(t as never, reason));
     } finally {
-      setIsRunning(false);
+      if (id === requestId.current) setIsRunning(false);
     }
-  }, [profile, t]);
+  }, [profileId, t]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -245,6 +252,9 @@ export function FingerprintAuditDialog({
       return;
     }
     void runAudit();
+    return () => {
+      requestId.current += 1;
+    };
   }, [isOpen, runAudit]);
 
   const handleExport = useCallback(async () => {
@@ -273,7 +283,7 @@ export function FingerprintAuditDialog({
       onOpenChange={(open) => !open && onClose()}
       subPage={subPage}
     >
-      <DialogContent className="flex min-h-0 flex-col">
+      <DialogContent className="@container flex h-[min(850px,92vh)] min-h-0 max-w-[min(1000px,calc(100%-2rem))] flex-col">
         <DialogHeader className="shrink-0">
           <DialogTitle className="flex items-center gap-2">
             <LuFingerprint className="size-4" />
@@ -367,17 +377,42 @@ export function FingerprintAuditDialog({
               </div>
 
               <div className="space-y-2">
-                <p className="text-sm font-medium">
-                  {t("fingerprintAudit.details")}
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">
+                    {t("fingerprintAudit.details")}
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    aria-pressed={showAll}
+                    onClick={() => setShowAll(!showAll)}
+                  >
+                    {t(
+                      showAll
+                        ? "isolation.onlyDifferences"
+                        : "isolation.allValues",
+                    )}
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {t("isolation.auditRepair")}
                 </p>
                 <div className="space-y-2">
-                  {report.items.map((item) => (
-                    <AuditItemRow
-                      key={`${item.category}-${item.key}`}
-                      item={item}
-                      t={t}
-                    />
-                  ))}
+                  {report.items
+                    .filter((item) => showAll || item.status !== "match")
+                    .map((item) => (
+                      <AuditItemRow
+                        key={`${item.category}-${item.key}`}
+                        item={item}
+                        t={t}
+                      />
+                    ))}
+                  {!showAll &&
+                    report.items.every((item) => item.status === "match") && (
+                      <p className="rounded-lg border p-4 text-sm text-muted-foreground">
+                        {t("isolation.noDifferences")}
+                      </p>
+                    )}
                 </div>
               </div>
 

@@ -19,11 +19,27 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 tokio::task_local! { static LOCAL_MCP_CALL: bool; }
+tokio::task_local! { static LOCAL_MCP_READ_ONLY: bool; }
+
+fn local_tool_allowed(name: &str) -> bool {
+  !LOCAL_MCP_READ_ONLY
+    .try_with(|read_only| *read_only)
+    .unwrap_or(false)
+    || matches!(
+      name,
+      "list_profiles"
+        | "get_profile_status"
+        | "list_groups"
+        | "list_tags"
+        | "list_profile_statuses"
+    )
+}
 
 #[derive(Clone)]
 struct McpHttpState {
   server: &'static McpServer,
   token: String,
+  read_only: bool,
 }
 
 use crate::browser::ProxySettings;
@@ -332,6 +348,7 @@ pub(crate) enum McpOutcome {
 
 pub struct McpServer {
   inner: Arc<AsyncMutex<McpServerInner>>,
+  http_lifecycle: AsyncMutex<()>,
   /// Whether the tool engine can answer at all: set once it holds the app
   /// handle every tool needs.
   engine_ready: AtomicBool,
@@ -2423,6 +2440,7 @@ impl McpServer {
         shutdown_tx: None,
       })),
       engine_ready: AtomicBool::new(false),
+      http_lifecycle: AsyncMutex::new(()),
       is_running: AtomicBool::new(false),
       port: AtomicU16::new(0),
     }
@@ -2442,6 +2460,10 @@ impl McpServer {
   }
 
   pub async fn start(&self, app_handle: AppHandle) -> Result<u16, String> {
+    let _lifecycle = self.http_lifecycle.lock().await;
+    if !crate::wayfern_terms::WayfernTermsManager::instance().is_terms_accepted() {
+      return Err(crate::backend_error("WAYFERN_TERMS_REQUIRED"));
+    }
     if self.is_running() {
       return Err(crate::backend_error("MCP_SERVER_ALREADY_RUNNING"));
     }
@@ -2484,6 +2506,7 @@ impl McpServer {
     let state = McpHttpState {
       server: Self::instance(),
       token,
+      read_only: settings.mcp_read_only,
     };
     let app = Router::new()
       .route(
@@ -2511,6 +2534,7 @@ impl McpServer {
   }
 
   pub async fn stop(&self) -> Result<(), String> {
+    let _lifecycle = self.http_lifecycle.lock().await;
     if !self.is_running.swap(false, Ordering::SeqCst) {
       return Err(crate::backend_error("MCP_SERVER_NOT_RUNNING"));
     }
@@ -2527,6 +2551,18 @@ impl McpServer {
     req: Request<Body>,
     next: Next,
   ) -> Result<Response, StatusCode> {
+    if let Some(origin) = req.headers().get(header::ORIGIN) {
+      let local_origin = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| url::Url::parse(origin).ok())
+        .is_some_and(|origin| {
+          matches!(origin.host_str(), Some("127.0.0.1" | "localhost" | "[::1]"))
+        });
+      if !local_origin {
+        return Err(StatusCode::FORBIDDEN);
+      }
+    }
     if req.uri().path() == "/health" {
       return Ok(next.run(req).await);
     }
@@ -2574,9 +2610,12 @@ impl McpServer {
     match LOCAL_MCP_CALL
       .scope(
         true,
-        state
-          .server
-          .handle_message_with(session.as_deref(), &body, None),
+        LOCAL_MCP_READ_ONLY.scope(
+          state.read_only,
+          state
+            .server
+            .handle_message_with(session.as_deref(), &body, None),
+        ),
       )
       .await
     {
@@ -3207,63 +3246,16 @@ impl McpServer {
       McpTool {
         name: "update_profile".to_string(),
         description: "Update an existing browser profile's settings".to_string(),
-        input_schema: serde_json::json!({
-          "type": "object",
-          "properties": {
-            "profile_id": {
-              "type": "string",
-              "description": "The UUID of the profile to update"
-            },
-            "name": {
-              "type": "string",
-              "description": "New name for the profile"
-            },
-            "proxy_id": {
-              "type": "string",
-              "description": "Proxy UUID to assign (empty string to remove)"
-            },
-            "launch_hook": {
-              "type": "string",
-              "description": "Launch hook URL to assign (empty string to remove)"
-            },
-            "group_id": {
-              "type": "string",
-              "description": "Group UUID to assign (empty string to remove)"
-            },
-            "tags": {
-              "type": "array",
-              "items": { "type": "string" },
-              "description": "Tags for the profile (replaces existing tags)"
-            },
-            "extension_group_id": {
-              "type": "string",
-              "description": "Extension group UUID to assign (empty string to remove)"
-            },
-            "proxy_bypass_rules": {
-              "type": "array",
-              "items": { "type": "string" },
-              "description": "Proxy bypass rules (replaces existing rules)"
-            },
-            "clear_on_close": {
-              "type": "boolean",
-              "description": "Wipe browsing data (keeping extensions and bookmarks) when the browser exits. Not available for ephemeral or password-protected profiles."
-            },
-            "status_id": {
-              "type": "string",
-              "description": "Status id from list_profile_statuses (empty string to remove)"
-            },
-            "start_urls": {
-              "type": "array",
-              "items": { "type": "string" },
-              "description": "Start pages, replacing the current ones (empty array to remove). At most 20 http(s) URLs."
-            },
-            "dns_server": {
-              "type": "string",
-              "description": "DNS server the profile resolves names with, through its own proxy or VPN: https://host/path (DNS over HTTPS), tls://host[:port] (DNS over TLS), tcp://host[:port] (plain DNS) or a bare host[:port]. A bare address of a well-known public resolver such as 1.1.1.1 uses its DNS over HTTPS endpoint. If the server does not answer, connections fail instead of falling back to the proxy's resolver. Empty string to let the proxy resolve names again. Takes effect at the next launch."
-            }
-          },
-          "required": ["profile_id"]
-        }),
+        input_schema: {
+          let mut schema = serde_json::to_value(
+            <crate::profile::update::UpdateProfileRequest as utoipa::PartialSchema>::schema(),
+          ).expect("profile update schema serializes");
+          schema["properties"]["profile_id"] = serde_json::json!({
+            "type": "string", "description": "The UUID of the profile to update"
+          });
+          schema["required"] = serde_json::json!(["profile_id"]);
+          schema
+        },
       },
       McpTool {
         name: "delete_profile".to_string(),
@@ -5213,6 +5205,7 @@ impl McpServer {
     let tools: Vec<serde_json::Value> = self
       .get_tools()
       .into_iter()
+      .filter(|tool| local_tool_allowed(&tool.name))
       .filter(|tool| toolsets.is_none_or(|selection| selection.includes_tool(&tool.name)))
       .map(|tool| {
         let output_schema = crate::mcp_views::output_schema_for(&tool.name);
@@ -5250,6 +5243,14 @@ impl McpServer {
       .get("arguments")
       .cloned()
       .unwrap_or(serde_json::json!({}));
+
+    if !local_tool_allowed(tool_name) {
+      return Err(McpError {
+        code: -32000,
+        message: "Local MCP is in inspection-only mode. Change permissions in DON Integrations to allow mutations.".to_string(),
+        data: None,
+      });
+    }
 
     // Log only the tool name and the profile_id arg: arbitrary URLs / JS /
     // selectors can be sensitive.
@@ -6401,149 +6402,41 @@ impl McpServer {
     };
     let pm = ProfileManager::instance();
 
-    // Agents often send every optional field; an empty name means "unchanged".
-    if let Some(new_name) = arguments
-      .get("name")
-      .and_then(|v| v.as_str())
-      .filter(|name| !name.trim().is_empty())
-    {
-      pm.rename_profile(&app_handle, profile_id, new_name)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to rename profile: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(proxy_id) = arguments.get("proxy_id").and_then(|v| v.as_str()) {
-      // An empty id detaches the proxy; the manager normalizes it.
-      pm.update_profile_proxy(app_handle.clone(), profile_id, Some(proxy_id.to_string()))
-        .await
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update proxy: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(launch_hook) = arguments.get("launch_hook").and_then(|v| v.as_str()) {
-      let normalized = if launch_hook.is_empty() {
-        None
-      } else {
-        Some(launch_hook.to_string())
-      };
-      pm.update_profile_launch_hook(&app_handle, profile_id, normalized)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update launch hook: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(group_id) = arguments.get("group_id").and_then(|v| v.as_str()) {
-      let gid = if group_id.is_empty() {
-        None
-      } else {
-        Some(group_id.to_string())
-      };
-      pm.assign_profiles_to_group(&app_handle, vec![profile_id.to_string()], gid)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update group: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(tags) = arguments.get("tags").and_then(|v| v.as_array()) {
-      let tag_list: Vec<String> = tags
-        .iter()
-        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-        .collect();
-      pm.update_profile_tags(&app_handle, profile_id, tag_list)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update tags: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(ext_group_id) = arguments.get("extension_group_id").and_then(|v| v.as_str()) {
-      let eid = if ext_group_id.is_empty() {
-        None
-      } else {
-        Some(ext_group_id.to_string())
-      };
-      pm.update_profile_extension_group(profile_id, eid)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update extension group: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(rules) = arguments
-      .get("proxy_bypass_rules")
-      .and_then(|v| v.as_array())
-    {
-      let rule_list: Vec<String> = rules
-        .iter()
-        .filter_map(|item| item.as_str().map(|s| s.to_string()))
-        .collect();
-      pm.update_profile_proxy_bypass_rules(&app_handle, profile_id, rule_list)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update proxy bypass rules: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(clear_on_close) = arguments.get("clear_on_close").and_then(|v| v.as_bool()) {
-      pm.update_profile_clear_on_close(&app_handle, profile_id, clear_on_close)
-        .map_err(|e| McpError {
-          code: -32000,
-          message: format!("Failed to update clear-on-close: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(urls) = arguments.get("start_urls").and_then(|v| v.as_array()) {
-      let urls = urls
-        .iter()
-        .filter_map(|v| v.as_str().map(str::to_string))
-        .collect();
-      pm.update_profile_start_urls(profile_id, urls)
-        .map_err(|e| McpError {
-          code: -32602,
-          message: format!("Failed to update start pages: {e}"),
-          data: None,
-        })?;
-    }
-
-    if let Some(status_id) = arguments.get("status_id").and_then(|v| v.as_str()) {
-      let status_id = Some(status_id.to_string()).filter(|id| !id.is_empty());
-      if status_id
-        .as_deref()
-        .is_some_and(|id| !crate::profile_statuses::exists(id))
-      {
+    let mut fields = arguments.clone();
+    fields
+      .as_object_mut()
+      .ok_or_else(|| McpError {
+        code: -32602,
+        message: "Expected an update object".into(),
+        data: None,
+      })?
+      .remove("profile_id");
+    let request: crate::profile::update::UpdateProfileRequest = serde_json::from_value(fields)
+      .map_err(|e| McpError {
+        code: -32602,
+        message: format!("Invalid profile update: {e}"),
+        data: None,
+      })?;
+    if let Some(mode) = &request.sync_mode {
+      if request.has_metadata_changes() {
         return Err(McpError {
           code: -32602,
-          message: format!("Unknown status id: {}", status_id.unwrap_or_default()),
+          message: "Send sync_mode separately from profile metadata".into(),
           data: None,
         });
       }
-      pm.set_profiles_status(&[profile_id.to_string()], status_id)
+      crate::sync::set_profile_sync_mode(app_handle, profile_id.to_string(), mode.clone())
+        .await
         .map_err(|e| McpError {
           code: -32000,
-          message: format!("Failed to update status: {e}"),
+          message: e,
           data: None,
         })?;
-    }
-
-    if let Some(dns_server) = arguments.get("dns_server").and_then(|v| v.as_str()) {
-      pm.update_profile_dns_server(profile_id, Some(dns_server.to_string()))
+    } else {
+      pm.update_profile(profile_id, request)
         .map_err(|e| McpError {
           code: -32602,
-          message: format!("Failed to update DNS server: {e}"),
+          message: e.to_string(),
           data: None,
         })?;
     }
@@ -8345,7 +8238,9 @@ impl McpServer {
   }
 
   async fn handle_list_extensions(&self) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8362,7 +8257,9 @@ impl McpServer {
   }
 
   async fn handle_list_extension_groups(&self) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8382,7 +8279,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8426,7 +8325,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8483,7 +8384,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8511,7 +8414,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8554,7 +8459,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8577,7 +8484,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8620,7 +8529,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8655,7 +8566,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -8693,7 +8606,9 @@ impl McpServer {
     &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
-    if !CLOUD_AUTH.has_active_paid_subscription().await {
+    if !LOCAL_MCP_CALL.try_with(|local| *local).unwrap_or(false)
+      && !CLOUD_AUTH.has_active_paid_subscription().await
+    {
       return Err(McpError {
         code: -32000,
         message: "Extension management requires an active Pro subscription".to_string(),
@@ -13349,14 +13264,17 @@ mod tests {
   async fn test_extension_tool_results_have_content_envelope() {
     let server = McpServer::new();
     for name in ["list_extensions", "list_extension_groups"] {
-      let result = server
-        .dispatch_tool_call(
-          McpCaller {
-            session: None,
-            toolsets: None,
-          },
-          name,
-          &serde_json::json!({}),
+      let result = LOCAL_MCP_CALL
+        .scope(
+          true,
+          server.dispatch_tool_call(
+            McpCaller {
+              session: None,
+              toolsets: None,
+            },
+            name,
+            &serde_json::json!({}),
+          ),
         )
         .await
         .unwrap();

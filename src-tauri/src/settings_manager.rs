@@ -160,6 +160,8 @@ pub struct AppSettings {
   #[serde(default)]
   pub mcp_enabled: bool, // Enable MCP (Model Context Protocol) server
   #[serde(default)]
+  pub mcp_read_only: bool,
+  #[serde(default)]
   pub mcp_port: Option<u16>,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub mcp_token: Option<String>,
@@ -294,6 +296,7 @@ impl Default for AppSettings {
       sync_server_url: None,
       account_sync_server_url: None,
       mcp_enabled: false,
+      mcp_read_only: true,
       mcp_port: None,
       mcp_token: None,
       mcp_remote_enabled: false,
@@ -377,19 +380,17 @@ impl SettingsManager {
       return Ok(AppSettings::default());
     }
 
-    let content = fs::read_to_string(&settings_file)?;
+    let content = fs::read(&settings_file)?;
 
-    // Parse the settings file - serde will use default values for missing fields
-    match serde_json::from_str::<AppSettings>(&content) {
-      Ok(settings) => Ok(settings),
-      Err(e) => {
-        log::warn!("Settings file unparsable; using defaults err=\"{e}\"");
-        Ok(AppSettings::default())
-      }
-    }
+    serde_json::from_slice::<AppSettings>(&content)
+      .map_err(|_| crate::backend_error("DATA_RECOVERY_REQUIRED").into())
   }
 
   pub fn save_settings(&self, settings: &AppSettings) -> Result<(), Box<dyn std::error::Error>> {
+    // Normal writes must never replace an unreadable original with defaults.
+    if self.get_settings_file().exists() {
+      self.load_settings()?;
+    }
     let settings_dir = self.get_settings_dir();
     create_dir_all(&settings_dir)?;
 
@@ -652,7 +653,7 @@ pub async fn get_app_settings(app_handle: tauri::AppHandle) -> Result<AppSetting
   let manager = SettingsManager::instance();
   let mut settings = manager
     .load_settings()
-    .map_err(|e| format!("Failed to load settings: {e}"))?;
+    .map_err(|e| crate::wrap_backend_error(e, "Load settings"))?;
 
   // Always load tokens for display purposes if they exist
   settings.api_token = manager
@@ -676,6 +677,9 @@ pub async fn save_app_settings(
   mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
   let manager = SettingsManager::instance();
+  manager
+    .load_settings()
+    .map_err(|e| crate::wrap_backend_error(e, "Load settings"))?;
 
   // The remote MCP credential is minted by `rotate_mcp_remote_credential` and
   // by nothing else. A settings read hands the frontend the plaintext (for the
@@ -914,9 +918,6 @@ pub async fn save_table_sorting_settings(sorting: TableSortingSettings) -> Resul
     .map_err(|e| format!("Failed to save table sorting settings: {e}"))
 }
 
-pub const DEFAULT_DON_SYNC_URL: &str = "https://don-sync-worker.ppop.workers.dev";
-pub const DEFAULT_DON_SYNC_TOKEN: &str = "don-secret-sync-token";
-
 #[tauri::command]
 pub async fn get_sync_settings(app_handle: tauri::AppHandle) -> Result<SyncSettings, String> {
   let manager = SettingsManager::instance();
@@ -929,14 +930,9 @@ pub async fn get_sync_settings(app_handle: tauri::AppHandle) -> Result<SyncSetti
     .await
     .map_err(|e| format!("Failed to load sync token: {e}"))?;
 
-  let server_url = sync_settings
-    .sync_server_url
-    .unwrap_or_else(|| DEFAULT_DON_SYNC_URL.to_string());
-  let sync_token = token.or_else(|| Some(DEFAULT_DON_SYNC_TOKEN.to_string()));
-
   Ok(SyncSettings {
-    sync_server_url: Some(server_url),
-    sync_token,
+    sync_server_url: sync_settings.sync_server_url,
+    sync_token: token,
   })
 }
 
@@ -946,22 +942,53 @@ pub async fn save_sync_settings(
   sync_server_url: Option<String>,
   sync_token: Option<String>,
 ) -> Result<SyncSettings, String> {
+  static CONNECTION_WRITE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+  let _guard = CONNECTION_WRITE.lock().await;
   let manager = SettingsManager::instance();
+  let sync_server_url = sync_server_url.filter(|url| !url.trim().is_empty());
+  let sync_token = sync_token.filter(|token| !token.trim().is_empty());
+  let sync_server_url = match (sync_server_url, &sync_token) {
+    (Some(url), Some(_)) => Some(
+      crate::sync::account_server::normalize_server_url(&url)
+        .ok_or_else(|| crate::backend_error("SYNC_SERVER_URL_INVALID"))?,
+    ),
+    (None, None) => None,
+    _ => return Err(crate::backend_error("SYNC_NOT_CONFIGURED")),
+  };
+  if sync_server_url.is_some() && crate::cloud_auth::CLOUD_AUTH.is_logged_in().await {
+    return Err(crate::backend_error("SELF_HOSTED_REQUIRES_LOGOUT"));
+  }
 
+  let previous_url = manager
+    .load_settings()
+    .map_err(|e| crate::wrap_backend_error(e.to_string(), "Load sync settings"))?
+    .sync_server_url;
+  let previous_token = manager
+    .get_sync_token(&app_handle)
+    .await
+    .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?;
+  crate::sync::stop_pipeline();
+  // A crash between the two files must leave sync OFF, never an old server
+  // paired with a new secret. Restore the old pair on a recoverable failure.
   manager
-    .save_sync_server_url(sync_server_url.clone())
-    .map_err(|e| format!("Failed to save sync server URL: {e}"))?;
-
-  if let Some(ref token) = sync_token {
-    manager
-      .store_sync_token(&app_handle, token)
-      .await
-      .map_err(|e| format!("Failed to store sync token: {e}"))?;
-  } else {
-    manager
-      .remove_sync_token(&app_handle)
-      .await
-      .map_err(|e| format!("Failed to remove sync token: {e}"))?;
+    .save_sync_server_url(None)
+    .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?;
+  let stored = match sync_token.as_deref() {
+    Some(token) => manager.store_sync_token(&app_handle, token).await,
+    None => manager.remove_sync_token(&app_handle).await,
+  };
+  let result = stored
+    .and_then(|()| manager.save_sync_server_url(sync_server_url.clone()))
+    .map_err(|error| error.to_string());
+  if let Err(error) = result {
+    let restored = match previous_token.as_deref() {
+      Some(token) => manager.store_sync_token(&app_handle, token).await,
+      None => manager.remove_sync_token(&app_handle).await,
+    };
+    if restored.is_ok() {
+      let _ = manager.save_sync_server_url(previous_url);
+    }
+    return Err(crate::backend_error_with_detail("INTERNAL_ERROR", error));
   }
 
   Ok(SyncSettings {
@@ -1462,6 +1489,7 @@ mod tests {
       sync_server_url: None,
       account_sync_server_url: None,
       mcp_enabled: false,
+      mcp_read_only: true,
       mcp_port: None,
       mcp_token: None,
       mcp_remote_enabled: false,
@@ -1633,18 +1661,17 @@ mod tests {
 
     let result = manager.load_settings();
     assert!(
-      result.is_ok(),
-      "Should handle corrupted settings file gracefully"
+      result
+        .unwrap_err()
+        .to_string()
+        .contains("DATA_RECOVERY_REQUIRED"),
+      "Damaged settings must be visible, not converted to empty defaults"
     );
-
-    let settings = result.unwrap();
-    assert!(
-      !settings.set_as_default_browser,
-      "Should return default settings for corrupted file"
-    );
+    assert!(manager.save_settings(&AppSettings::default()).is_err());
     assert_eq!(
-      settings.theme, "system",
-      "Should return default theme for corrupted file"
+      fs::read_to_string(settings_file).unwrap(),
+      "{ invalid json }",
+      "An ordinary settings save must preserve the damaged original"
     );
   }
 

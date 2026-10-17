@@ -136,6 +136,9 @@ impl SyncSubscription {
     app_handle: &tauri::AppHandle,
     work_tx: mpsc::UnboundedSender<SyncWorkItem>,
   ) -> Result<Option<Self>, String> {
+    if !super::is_sync_configured() {
+      return Ok(None);
+    }
     if let Some(server) = super::account_server::configured().await {
       let token = crate::cloud_auth::CLOUD_AUTH
         .server_sync_token(&server)
@@ -150,11 +153,7 @@ impl SyncSubscription {
 
     // A real account can select cloud sync; DON's local unlocked identity is
     // not an authenticated cloud session.
-    if crate::cloud_auth::CloudAuthManager::load_access_token()
-      .ok()
-      .flatten()
-      .is_some()
-    {
+    if crate::cloud_auth::CLOUD_AUTH.can_use_cloud_backup().await {
       let url = crate::cloud_auth::CLOUD_SYNC_URL.to_string();
       let token = crate::cloud_auth::CLOUD_AUTH
         .get_or_refresh_sync_token()
@@ -167,18 +166,23 @@ impl SyncSubscription {
 
     // Fall back to self-hosted settings
     let manager = SettingsManager::instance();
-    let settings = manager.load_settings().unwrap_or_default();
-
-    let server_url = settings
+    let settings = manager
+      .load_settings()
+      .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?;
+    let Some(server_url) = settings
       .sync_server_url
-      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_URL.to_string());
-
-    let token = manager
+      .filter(|url| !url.trim().is_empty())
+    else {
+      return Ok(None);
+    };
+    let Some(token) = manager
       .get_sync_token(app_handle)
       .await
-      .ok()
-      .flatten()
-      .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
+      .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?
+      .filter(|token| !token.trim().is_empty())
+    else {
+      return Ok(None);
+    };
 
     Ok(Some(Self::new(
       server_url,
@@ -318,15 +322,10 @@ impl SyncSubscription {
           .await
           .map(Some)
       }
-      TokenSource::SelfHosted => {
-        let token = SettingsManager::instance()
-          .get_sync_token(app_handle)
-          .await
-          .ok()
-          .flatten()
-          .unwrap_or_else(|| crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string());
-        Ok(Some(token))
-      }
+      TokenSource::SelfHosted => SettingsManager::instance()
+        .get_sync_token(app_handle)
+        .await
+        .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e)),
     }
   }
 

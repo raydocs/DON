@@ -18,6 +18,7 @@ import { CookieBotPage, type CookieBotTab } from "@/components/cookie-bot-page";
 import { CookieCopyDialog } from "@/components/cookie-copy-dialog";
 import { CookieManagementDialog } from "@/components/cookie-management-dialog";
 import { CreateProfileDialog } from "@/components/create-profile-dialog";
+import { DataRecoveryNotice } from "@/components/data-recovery-notice";
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
 import { DeviceCodeVerifyDialog } from "@/components/device-code-verify-dialog";
 import { ExtensionGroupAssignmentDialog } from "@/components/extension-group-assignment-dialog";
@@ -2411,6 +2412,7 @@ export default function Home() {
             agentRequests={agentConsole.openRequests.length}
           />
           <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            <DataRecoveryNotice />
             {currentPage === "profiles" && (
               <div
                 data-table-id="profiles"

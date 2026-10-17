@@ -13,7 +13,7 @@ const UNLOCKED: Entitlements = {
   cookieBot: false,
   remoteInteractive: false,
   remoteControl: false,
-  scheduledAutomation: true,
+  scheduledAutomation: false,
   profileLimit: Number.MAX_SAFE_INTEGER,
   requestsPerHour: 1_000_000,
   remoteBrowserHours: 0,
@@ -33,6 +33,7 @@ export function getEntitlements(
     cookieBot: Boolean(server?.active && server.cookieBot),
     remoteInteractive: Boolean(server?.active && server.remoteInteractive),
     remoteControl: Boolean(server?.active && server.remoteControl),
+    scheduledAutomation: Boolean(server?.active && server.scheduledAutomation),
     remoteBrowserHours: server?.remoteBrowserHours ?? 0,
   };
 }
@@ -42,9 +43,9 @@ export function effectivePlanOf(user: CloudUser | null | undefined): string {
 }
 
 export function canUseScheduledAutomation(
-  _user: CloudUser | null | undefined,
+  user: CloudUser | null | undefined,
 ): boolean {
-  return true;
+  return getEntitlements(user).scheduledAutomation;
 }
 
 /**

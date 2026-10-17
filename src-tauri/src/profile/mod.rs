@@ -6,6 +6,7 @@ pub mod patch;
 pub mod portable;
 pub mod trash;
 pub mod types;
+pub mod update;
 
 pub use manager::ProfileManager;
 pub use types::BrowserProfile;

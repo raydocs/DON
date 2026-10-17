@@ -1551,6 +1551,196 @@ test("soft table and creation surfaces stay quiet and readable in every theme", 
     { seedDownloadedBrowser: true },
   );
 });
+test("Claude readiness repairs flags without replacing identity and explains unverified runtime", async () => {
+  await withApp("ui-isolation", async (app) => {
+    await app.session.command("POST", "/window/rect", {
+      width: 1280,
+      height: 940,
+    });
+    await app.clickSelector(
+      `[aria-label="${en.claudeWorkflow.headerTooltip}"]`,
+    );
+    await app.waitForText(en.isolation.emptyTitle);
+    await app.capture("isolation-empty");
+    await dismissSurface(app);
+    const fingerprint = JSON.stringify({
+      devicePixelRatio: 2.75,
+      timezone: "Europe/Paris",
+    });
+    const profile = await createWayfernUiFixture(app, "Claude local fixture", {
+      os: "android",
+      device_preset: "pixel-9",
+      expected_device_pixel_ratio: 2.75,
+      fingerprint,
+      geoip: false,
+      webrtc_mode: "real",
+      randomize_fingerprint_on_launch: true,
+    });
+    await app.invoke("update_profile_tags", {
+      profileId: profile.id,
+      tags: ["claude"],
+    });
+    await app.waitForText(profile.name);
+    await app.clickSelector(
+      `[aria-label="${en.claudeWorkflow.headerTooltip}"]`,
+    );
+    await app.waitForText(en.isolation.issues.RANDOMIZE_ON);
+    await app.capture("isolation-readiness");
+    await app.clickText(en.isolation.fixFlags, { roles: ["button"] });
+    await app.waitFor(
+      async () =>
+        !(await app.bodyText()).includes(en.isolation.issues.RANDOMIZE_ON),
+    );
+    const updated = (await app.invoke("list_browser_profiles")).find(
+      (p) => p.id === profile.id,
+    );
+    assert.equal(updated.wayfern_config.fingerprint, fingerprint);
+    assert.equal(updated.wayfern_config.expected_device_pixel_ratio, 2.75);
+    assert.equal(updated.wayfern_config.device_preset, "pixel-9");
+    assert.equal(updated.wayfern_config.webrtc_mode, "proxy");
+    assert.equal(updated.wayfern_config.geoip, true);
+    await app.capture("isolation-repaired");
+    await stubCommand(app, "run_fingerprint_audit", {
+      profile_id: profile.id,
+      profile_name: profile.name,
+      generated_at: Math.floor(Date.now() / 1000),
+      target: "Explicit local UI fixture — not a live browser measurement",
+      summary: { total: 3, matches: 1, mismatches: 1, unknown: 1 },
+      items: [
+        {
+          category: "screen",
+          key: "devicePixelRatio",
+          expected: 2.75,
+          actual: 1,
+          status: "mismatch",
+        },
+        {
+          category: "navigator",
+          key: "hardwareConcurrency",
+          expected: 8,
+          actual: 8,
+          status: "match",
+        },
+        {
+          category: "timezone",
+          key: "timezone",
+          expected: "Europe/Paris",
+          actual: null,
+          status: "unknown",
+        },
+      ],
+      observations: [],
+      oopif: {
+        status: "unknown",
+        frame_count: 0,
+        child_device_pixel_ratio: null,
+        child_screen_width: null,
+        children: [],
+      },
+    });
+    await app.clickText(en.fingerprintAudit.run, { roles: ["button"] });
+    await app.waitForText(en.fingerprintAudit.statusMismatch);
+    assert.ok(
+      !(
+        await app.execute(
+          "return [...document.querySelectorAll('[role=\"dialog\"]')].at(-1).innerText",
+        )
+      ).includes(en.fingerprint.hardwareConcurrency),
+    );
+    await app.capture("fingerprint-differences-fixture");
+    await app.clickText(en.isolation.allValues, { roles: ["button"] });
+    await app.waitForText(en.fingerprint.hardwareConcurrency);
+    await app.capture("fingerprint-all-values-fixture");
+    await app.pressShortcut({ key: "Escape" });
+    await app.waitForText(en.isolation.repairTitle);
+    await app.invoke("update_profile_note", {
+      profileId: profile.id,
+      note: "residential: fixture-home-A",
+    });
+    const second = await createWayfernUiFixture(app, "Claude second fixture", {
+      fingerprint,
+    });
+    await app.invoke("update_profile_note", {
+      profileId: second.id,
+      note: "residential: fixture-home-A",
+    });
+    const expired = await createWayfernUiFixture(
+      app,
+      "Claude expired fixture",
+      { fingerprint },
+    );
+    const observed = Math.floor(Date.now() / 1000);
+    await stubCommand(app, "get_profile_exit_observations", [
+      {
+        profile_id: profile.id,
+        proxy_id: null,
+        ip: "192.0.2.31",
+        observed_at: observed,
+        fresh: true,
+      },
+      {
+        profile_id: second.id,
+        proxy_id: null,
+        ip: "192.0.2.32",
+        observed_at: observed,
+        fresh: true,
+      },
+      {
+        profile_id: expired.id,
+        proxy_id: null,
+        ip: "192.0.2.31",
+        observed_at: observed - 1900,
+        fresh: false,
+      },
+    ]);
+    await dismissSurface(app);
+    await app.clickSelector(
+      `[aria-label="${en.claudeWorkflow.headerTooltip}"]`,
+    );
+    await app.clickText(en.isolation.usage, { roles: ["tab"] });
+    await app.waitForText("fixture-home-A");
+    await app.waitForText("192.0.2.31");
+    await app.capture("residential-usage");
+    await app.clickText(en.residential.filter.label, { roles: ["button"] });
+    await app.waitForText(second.name);
+    assert.ok(
+      !(
+        await app.execute(
+          "return document.querySelector('[role=\"dialog\"]').innerText",
+        )
+      ).includes("192.0.2.31"),
+    );
+    await app.capture("residential-duplicate-labels");
+    await app.clickText(en.residential.filter.ip, { roles: ["button"] });
+    await app.waitForText(en.residential.empty);
+    assert.ok(
+      !(
+        await app.execute(
+          "return document.querySelector('[role=\"dialog\"]').innerText",
+        )
+      ).includes("fixture-home-A"),
+    );
+    await app.capture("residential-no-duplicate-exits");
+    await restoreStubs(app);
+    await app.clickText(en.isolation.create, { roles: ["tab"] });
+    await app.waitForText(en.isolation.createTitle);
+    await app.capture("isolation-create");
+    await app.session.command("POST", "/window/rect", {
+      width: 740,
+      height: 900,
+    });
+    await app.capture("isolation-create-narrow");
+    await dismissSurface(app);
+    await app.clickSelector('[aria-label="Account"]');
+    await app.waitForText(en.connections.title);
+    assert.equal(await app.invoke("cloud_get_user"), null);
+    const sync = await app.invoke("get_sync_settings");
+    assert.equal(sync.sync_server_url, null);
+    assert.equal(sync.sync_token, null);
+    await app.capture("identity-offline");
+  });
+});
+
 test("DON integrations retain Local API and authenticated local MCP without exposing remote control", async () => {
   await withApp("ui-integrations", async (app) => {
     const modifier =
@@ -6009,6 +6199,7 @@ test("a signed-in paid account picks its own sync server on the account page", a
           id: "ui-account-sync-server",
           email: "solo@example.test",
           plan: "solo",
+          entitlements: { active: true, cloudBackup: true },
           planPeriod: "monthly",
           subscriptionStatus: "active",
           profileLimit: 20,

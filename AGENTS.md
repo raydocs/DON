@@ -35,7 +35,8 @@ donutbrowser/
 │   │   ├── lib.rs                    # Tauri command registration (100+ commands)
 │   │   ├── browser_runner.rs         # Profile launch/kill orchestration
 │   │   ├── browser.rs               # Browser trait & launch logic
-│   │   ├── profile/                  # Profile CRUD (manager.rs, types.rs)
+│   │   ├── profile/                  # Profile CRUD and shared atomic updates (manager.rs, update.rs, types.rs)
+│   │   ├── data_recovery.rs          # Damaged JSON diagnostics and original-preserving recovery
 │   │   ├── proxy_manager.rs         # Proxy lifecycle & connection testing
 │   │   ├── proxy_server.rs          # Local proxy binary (donut-proxy)
 │   │   ├── proxy_storage.rs         # Proxy config persistence (JSON files)

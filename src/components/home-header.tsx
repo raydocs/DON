@@ -447,6 +447,7 @@ const HomeHeader = ({
               <Button
                 size="sm"
                 variant="outline"
+                aria-label={t("claudeWorkflow.headerTooltip")}
                 onClick={() => {
                   onClaudeWorkflowOpen();
                 }}

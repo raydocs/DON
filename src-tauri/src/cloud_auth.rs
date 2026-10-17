@@ -26,6 +26,7 @@ const DEFAULT_RETRY_AFTER: Duration = Duration::from_secs(60);
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(60 * 60);
 
 static ACCESS_TOKEN_REFRESH: Streak = Streak::new(module_path!(), "Access token refresh");
+static SYNC_TOKEN_FETCH: Streak = Streak::new(module_path!(), "Cloud sync token fetch");
 static SERVER_SYNC_TOKEN_FETCH: Streak = Streak::new(module_path!(), "Own server sync token fetch");
 
 /// Tokens for the customer's own sync server, by address. In memory only:
@@ -1077,7 +1078,7 @@ impl CloudAuthManager {
 
   pub async fn fetch_profile(&self) -> Result<CloudUser, String> {
     if Self::load_access_token().ok().flatten().is_none() {
-      return Ok(Self::default_don_user());
+      return Err(crate::backend_error("ACCOUNT_SYNC_SIGN_IN_REQUIRED"));
     }
 
     let user = self
@@ -1117,14 +1118,50 @@ impl CloudAuthManager {
   }
 
   pub async fn get_or_refresh_sync_token(&self) -> Result<Option<String>, String> {
+    if !self.is_logged_in().await {
+      return Ok(None);
+    }
     if let Ok(Some(token)) = Self::load_cloud_sync_token() {
       if !Self::is_jwt_expiring_soon(&token) {
         return Ok(Some(token));
       }
     }
-    Ok(Some(
-      crate::settings_manager::DEFAULT_DON_SYNC_TOKEN.to_string(),
-    ))
+    // The cloud token is unbound. A self-hosted server token has a different
+    // audience and must not be substituted for this contract.
+    let token = self
+      .api_call_with_retry(|access_token| {
+        let url = format!("{CLOUD_API_URL}/api/auth/sync-token");
+        let client = self.client.clone();
+        async move {
+          let response = client
+            .post(url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .send()
+            .await
+            .map_err(|_| crate::backend_error("ACCOUNT_SYNC_UNAVAILABLE"))?;
+          if !response.status().is_success() {
+            return Err(crate::backend_error("ACCOUNT_SYNC_UNAVAILABLE"));
+          }
+          let result: SyncTokenResponse = response
+            .json()
+            .await
+            .map_err(|_| crate::backend_error("ACCOUNT_SYNC_UNAVAILABLE"))?;
+          Ok(result.sync_token)
+        }
+      })
+      .await;
+    let token = match token {
+      Ok(token) => {
+        SYNC_TOKEN_FETCH.succeeded();
+        token
+      }
+      Err(error) => {
+        SYNC_TOKEN_FETCH.failed(&error);
+        return Err(error);
+      }
+    };
+    Self::store_cloud_sync_token(&token)?;
+    Ok(Some(token))
   }
 
   /// A token for the customer's own donut-sync at `server`, which the Donut
@@ -1244,65 +1281,24 @@ impl CloudAuthManager {
   }
 
   pub async fn is_logged_in(&self) -> bool {
-    let is_e2e =
-      cfg!(debug_assertions) && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some();
-    if is_e2e {
-      return self.state.lock().await.is_some();
-    }
-    true
+    self.state.lock().await.is_some()
   }
 
-  pub fn default_don_user() -> CloudUser {
-    CloudUser {
-      id: "don-cloudflare-owner".to_string(),
-      email: "DON Cloud (Cloudflare Serverless)".to_string(),
-      plan: "pro".to_string(),
-      plan_period: Some("lifetime".to_string()),
-      subscription_status: "active".to_string(),
-      profile_limit: 999_999,
-      cloud_profiles_used: 0,
-      proxy_bandwidth_limit_mb: 999_999_999,
-      proxy_bandwidth_used_mb: 0,
-      proxy_bandwidth_extra_mb: 0,
-      team_id: Some("don-team".to_string()),
-      team_name: Some("DON Cloud Sync".to_string()),
-      team_role: Some("owner".to_string()),
-      effective_plan: None,
-      device_ordinal: Some(1),
-      device_count: Some(1),
-      is_primary_device: Some(true),
-      entitlements: Some(Self::unlocked_entitlements()),
-    }
-  }
-
-  /// Full local unlock used by the DON fork. Cloud login still works for
-  /// optional remote features, but paid gates never block local use.
-  pub fn unlocked_entitlements() -> Entitlements {
-    Entitlements {
-      active: true,
-      browser_automation: true,
-      cross_os_fingerprints: true,
-      cloud_backup: true,
-      team_collaboration: true,
-      cookie_bot: true,
-      remote_interactive: true,
-      remote_control: false,
-      scheduled_automation: false,
-      profile_limit: i64::MAX,
-      requests_per_hour: 1_000_000,
-      remote_browser_hours: i64::MAX,
-    }
-  }
-
-  /// Resolve this session's entitlements (server-sent or locally derived).
+  /// Cloud capabilities belong to the real session; local DON capabilities
+  /// are resolved independently by their local helpers below.
   pub async fn entitlements(&self) -> Option<Entitlements> {
-    Some(Self::unlocked_entitlements())
+    self
+      .state
+      .lock()
+      .await
+      .as_ref()
+      .map(|auth| auth.user.entitlements())
   }
 
   /// Account is in a paid/active state. Used for the "any active plan" gates
   /// (sync token); per-feature access uses the capability helpers.
   pub async fn has_active_paid_subscription(&self) -> bool {
-    true
+    self.entitlements().await.is_some_and(|e| e.active)
   }
 
   /// Whether this session's plan entitles it to a Wayfern automation token.
@@ -1316,11 +1312,18 @@ impl CloudAuthManager {
 
   /// Non-async version that uses try_lock, defaults to false if lock can't be acquired.
   pub fn has_active_paid_subscription_sync(&self) -> bool {
-    true
+    self.state.try_lock().ok().is_some_and(|state| {
+      state
+        .as_ref()
+        .is_some_and(|auth| auth.user.entitlements().active)
+    })
   }
 
   pub async fn can_use_cookie_bot(&self) -> bool {
-    true
+    self
+      .entitlements()
+      .await
+      .is_some_and(|e| e.active && e.cookie_bot)
   }
 
   pub async fn can_use_browser_automation(&self) -> bool {
@@ -1334,12 +1337,20 @@ impl CloudAuthManager {
 
   /// Cloud profile sync / backup (async).
   pub async fn can_use_cloud_backup(&self) -> bool {
-    true
+    self
+      .entitlements()
+      .await
+      .is_some_and(|e| e.active && e.cloud_backup)
   }
 
   /// Cloud profile sync / backup (non-async, try_lock; false if unavailable).
   pub fn can_use_cloud_backup_sync(&self) -> bool {
-    true
+    self.state.try_lock().ok().is_some_and(|state| {
+      state.as_ref().is_some_and(|auth| {
+        let e = auth.user.entitlements();
+        e.active && e.cloud_backup
+      })
+    })
   }
 
   pub async fn automation_rate_limit(&self) -> Option<(String, u64)> {
@@ -1358,23 +1369,14 @@ impl CloudAuthManager {
   }
 
   pub async fn is_on_team_plan(&self) -> bool {
-    true
+    self
+      .entitlements()
+      .await
+      .is_some_and(|e| e.active && e.team_collaboration)
   }
 
   pub async fn get_user(&self) -> Option<CloudAuthState> {
-    let state = self.state.lock().await;
-    if let Some(ref s) = *state {
-      return Some(s.clone());
-    }
-    let is_e2e =
-      cfg!(debug_assertions) && std::env::var_os("DONUT_E2E_DISABLE_STARTUP_NETWORK").is_some();
-    if is_e2e {
-      return None;
-    }
-    Some(CloudAuthState {
-      user: Self::default_don_user(),
-      logged_in_at: chrono::Utc::now().to_rfc3339(),
-    })
+    self.state.lock().await.clone()
   }
 
   async fn plan_marker(&self) -> Option<(String, bool, bool)> {

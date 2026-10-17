@@ -328,7 +328,8 @@ impl BrowserRunner {
     profile_id: Option<&str>,
   ) -> Result<Option<ProxySettings>, String> {
     let proxy_id = match proxy_id {
-      Some(id) => id,
+      Some(id) if !id.is_empty() => id,
+      Some(_) => return Ok(None),
       None => return Ok(None),
     };
 
@@ -339,10 +340,14 @@ impl BrowserRunner {
     // For cloud-derived proxies, inject profile-specific sid for sticky sessions
     if let Some(pid) = profile_id {
       if PROXY_MANAGER.is_cloud_or_derived(proxy_id) {
-        return Ok(PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid));
+        return crate::launch_gate::require_assigned_proxy(
+          PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid),
+        )
+        .map(Some);
       }
     }
-    Ok(PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+    crate::launch_gate::require_assigned_proxy(PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+      .map(Some)
   }
 
   /// Whether this launch may keep a list of the sites it reaches. Never for a
@@ -2183,6 +2188,39 @@ static BROWSER_RUNNER: std::sync::LazyLock<BrowserRunner> =
 mod tests {
   use super::*;
   use tempfile::TempDir;
+
+  #[tokio::test]
+  async fn launch_resolver_rejects_a_missing_proxy_even_with_a_vpn() {
+    let profile = BrowserProfile {
+      proxy_id: Some(format!("missing-{}", uuid::Uuid::new_v4())),
+      vpn_id: Some("must-not-fall-back-to-vpn".into()),
+      ..Default::default()
+    };
+    let error = BrowserRunner::instance()
+      .resolve_launch_proxy(&profile)
+      .await
+      .unwrap_err();
+    let parsed: serde_json::Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(parsed["code"], "PROFILE_ROUTE_UNAVAILABLE");
+  }
+
+  #[tokio::test]
+  async fn launch_resolver_leaves_direct_and_vpn_only_profiles_without_a_proxy() {
+    for proxy_id in [None, Some(String::new())] {
+      for vpn_id in [None, Some("vpn-only".into())] {
+        let profile = BrowserProfile {
+          proxy_id: proxy_id.clone(),
+          vpn_id,
+          ..Default::default()
+        };
+        assert!(BrowserRunner::instance()
+          .resolve_launch_proxy(&profile)
+          .await
+          .unwrap()
+          .is_none());
+      }
+    }
+  }
 
   fn profile_with_timezone(timezone: &str) -> BrowserProfile {
     BrowserProfile {

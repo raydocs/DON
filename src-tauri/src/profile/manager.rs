@@ -1,4 +1,4 @@
-use crate::browser::{create_browser, BrowserType};
+use crate::browser::BrowserType;
 use crate::cloud_auth::CLOUD_AUTH;
 use crate::downloaded_browsers_registry::DownloadedBrowsersRegistry;
 use crate::events;
@@ -221,7 +221,7 @@ impl ProfileManager {
     crate::app_dirs::binaries_dir()
   }
 
-  fn profile_lock(&self, profile_id: uuid::Uuid) -> Arc<Mutex<()>> {
+  pub(crate) fn profile_lock(&self, profile_id: uuid::Uuid) -> Arc<Mutex<()>> {
     let mut locks = self
       .profile_locks
       .lock()
@@ -726,8 +726,10 @@ impl ProfileManager {
           .ok()
           .and_then(|content| serde_json::from_str::<BrowserProfile>(&content).ok())
         {
-          Some(previous) => tags_changed(&previous.tags, &profile.tags),
-          None => true,
+          Some(previous) if previous.id == profile.id => {
+            tags_changed(&previous.tags, &profile.tags)
+          }
+          _ => return Err(crate::backend_error("DATA_RECOVERY_REQUIRED").into()),
         }
       } else {
         !profile.tags.is_empty()
@@ -853,42 +855,13 @@ impl ProfileManager {
     profile_id: &str,
     new_name: &str,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let new_name = new_name.trim();
-    if new_name.is_empty() {
-      return Err(
-        serde_json::json!({ "code": "NAME_CANNOT_BE_EMPTY" })
-          .to_string()
-          .into(),
-      );
-    }
-
-    let existing_profiles = self.list_profiles()?;
-    let profile_uuid = uuid::Uuid::parse_str(profile_id)?;
-    if existing_profiles
-      .iter()
-      .any(|p| p.id != profile_uuid && p.name.to_lowercase() == new_name.to_lowercase())
-    {
-      return Err(
-        serde_json::json!({"code":"PROFILE_NAME_EXISTS", "params":{"name":new_name}})
-          .to_string()
-          .into(),
-      );
-    }
-
-    let profile = self.mutate_profile(profile_id, |latest| {
-      latest.name = new_name.to_string();
-      latest.updated_at = Some(crate::proxy_manager::now_secs());
-      Ok(())
-    })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.rename", &["name"]);
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        name: Some(new_name.to_string()),
+        ..Default::default()
+      },
+    )
   }
 
   /// Delete a profile the recoverable way: it is moved to the trash and can
@@ -1252,67 +1225,121 @@ impl ProfileManager {
     Ok(())
   }
 
+  /// Validate the entire edit against the latest profile, then publish once.
+  pub fn update_profile(
+    &self,
+    profile_id: &str,
+    request: super::update::UpdateProfileRequest,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    if request.sync_mode.is_some() {
+      return Err("Cannot edit sync_mode together with profile metadata".into());
+    }
+    let profile_uuid =
+      uuid::Uuid::parse_str(profile_id).map_err(|_| crate::backend_error("INVALID_PROFILE_ID"))?;
+    if let Some(name) = &request.name {
+      let name = name.trim();
+      if name.is_empty() {
+        return Err(crate::backend_error("NAME_CANNOT_BE_EMPTY").into());
+      }
+      // Listing profiles repairs legacy metadata. Validation must be read-only:
+      // even a rejected request against a legacy profile must publish nothing.
+      for entry in fs::read_dir(self.get_profiles_dir())? {
+        let entry = entry?;
+        let path = entry.path().join("metadata.json");
+        let Ok(bytes) = fs::read(&path) else { continue };
+        let Ok(other) = serde_json::from_slice::<BrowserProfile>(&bytes) else {
+          continue;
+        };
+        if other.id != profile_uuid && other.name.to_lowercase() == name.to_lowercase() {
+          return Err(
+            serde_json::json!({"code": "PROFILE_NAME_EXISTS", "params": {"name": name}})
+              .to_string()
+              .into(),
+          );
+        }
+      }
+    }
+    let routes_changed = request.proxy_id.is_some() || request.vpn_id.is_some();
+    let patch = super::patch::ProfilePatch {
+      group_id: request.group_id.clone(),
+      extension_group_id: request.extension_group_id.clone(),
+      note: request.note.clone(),
+      status_id: request.status_id.clone(),
+      dns_server: request.dns_server.clone(),
+      dns_blocklist: request.dns_blocklist.clone(),
+      launch_hook: request.launch_hook.clone(),
+      proxy_bypass_rules: request.proxy_bypass_rules.clone(),
+      start_urls: request.start_urls.clone(),
+      clear_on_close: request.clear_on_close,
+      ..Default::default()
+    }
+    .validated()?;
+    let mut changed = false;
+    let profile = self.mutate_profile(profile_id, |latest| {
+      let before = serde_json::to_value(&*latest).map_err(|e| e.to_string())?;
+      request.apply_to(latest, &patch, &self.get_binaries_dir())?;
+      changed = before != serde_json::to_value(&*latest).map_err(|e| e.to_string())?;
+      if changed {
+        repair_host_os(latest);
+        latest.updated_at = Some(crate::proxy_manager::now_secs());
+      }
+      Ok(())
+    })?;
+    if changed {
+      crate::sync::queue_profile_sync_if_eligible(&profile);
+      report_team_edit(
+        &profile,
+        if request.name.is_some() {
+          "profile.rename"
+        } else {
+          "profile.update"
+        },
+        &request.fields(),
+      );
+      if profile.is_sync_enabled() {
+        Self::sync_patched_groups(&patch);
+        let proxy_id = profile.proxy_id.clone();
+        let vpn_id = profile.vpn_id.clone();
+        if routes_changed {
+          tauri::async_runtime::spawn(async move {
+            if let Some(id) = proxy_id {
+              let _ = crate::sync::enable_proxy_sync_if_needed(&id).await;
+              if let Some(scheduler) = crate::sync::get_global_scheduler() {
+                scheduler.queue_proxy_sync(id).await;
+              }
+            }
+            if let Some(id) = vpn_id {
+              let _ = crate::sync::enable_vpn_sync_if_needed(&id).await;
+              if let Some(scheduler) = crate::sync::get_global_scheduler() {
+                scheduler.queue_vpn_sync(id).await;
+              }
+            }
+          });
+        }
+      }
+      if routes_changed {
+        crate::cookie_bot::report_profile_state(&profile);
+        crate::fingerprint_consistency::prewarm_profile_exit(&profile);
+      }
+      let _ = events::emit("profile-updated", &profile);
+      let _ = events::emit_empty("profiles-changed");
+    }
+    Ok(profile)
+  }
+
   pub fn update_profile_version(
     &self,
     _app_handle: &tauri::AppHandle,
     profile_id: &str,
     version: &str,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    // Find the profile by ID
-    let profile_uuid =
-      uuid::Uuid::parse_str(profile_id).map_err(|_| format!("Invalid profile ID: {profile_id}"))?;
-    let profiles = self.list_profiles()?;
-    let mut profile = profiles
-      .into_iter()
-      .find(|p| p.id == profile_uuid)
-      .ok_or_else(|| format!("Profile with ID '{profile_id}' not found"))?;
-
-    // Check if the browser is currently running
-    if profile.process_id.is_some() {
-      return Err(
-        "Cannot update version while browser is running. Please stop the browser first.".into(),
-      );
-    }
-
-    // Verify the new version is downloaded
-    let browser_type = BrowserType::from_str(&profile.browser)
-      .map_err(|_| format!("Invalid browser type: {}", profile.browser))?;
-    let browser = create_browser(browser_type.clone());
-    let binaries_dir = self.get_binaries_dir();
-
-    if !browser.is_version_downloaded(version, &binaries_dir) {
-      return Err(format!("Browser version {version} is not downloaded").into());
-    }
-
-    profile = self.mutate_profile(profile_id, |latest| {
-      if latest.process_id.is_some() {
-        return Err(
-          "Cannot update version while browser is running. Please stop the browser first."
-            .to_string(),
-        );
-      }
-      latest.version = version.to_string();
-      latest.release_type = "stable".to_string();
-      if !crate::wayfern_manager::supports_identity_api(version) {
-        if let Some(config) = latest
-          .wayfern_config
-          .as_mut()
-          .filter(|config| config.identity_id.is_some())
-        {
-          config.identity_id = None;
-          config.identity_baseline = None;
-          config.fingerprint = None;
-          config.geo_proxy_signature = None;
-        }
-      }
-      Ok(())
-    })?;
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        version: Some(version.to_string()),
+        ..Default::default()
+      },
+    )
   }
 
   pub fn assign_profiles_to_group(
@@ -1321,6 +1348,16 @@ impl ProfileManager {
     profile_ids: Vec<String>,
     group_id: Option<String>,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    if let [id] = profile_ids.as_slice() {
+      self.update_profile(
+        id,
+        super::update::UpdateProfileRequest {
+          group_id: Some(group_id),
+          ..Default::default()
+        },
+      )?;
+      return Ok(());
+    }
     for profile_id in profile_ids {
       let profile = self.mutate_profile(&profile_id, |latest| {
         if latest.process_id.is_some() {
@@ -1466,21 +1503,13 @@ impl ProfileManager {
     profile_id: &str,
     launch_hook: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let normalized = Self::normalize_launch_hook(launch_hook)?;
-    let profile = self.mutate_profile(profile_id, move |latest| {
-      latest.launch_hook = normalized;
-      latest.updated_at = Some(crate::proxy_manager::now_secs());
-      Ok(())
-    })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["launch_hook"]);
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        launch_hook: Some(launch_hook),
+        ..Default::default()
+      },
+    )
   }
 
   pub fn update_profile_proxy_bypass_rules(
@@ -1489,20 +1518,13 @@ impl ProfileManager {
     profile_id: &str,
     rules: Vec<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let profile = self.mutate_profile(profile_id, move |latest| {
-      latest.proxy_bypass_rules = rules;
-      latest.updated_at = Some(crate::proxy_manager::now_secs());
-      Ok(())
-    })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["proxy_bypass_rules"]);
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        proxy_bypass_rules: Some(rules),
+        ..Default::default()
+      },
+    )
   }
 
   pub fn update_profile_dns_blocklist(
@@ -1510,20 +1532,13 @@ impl ProfileManager {
     profile_id: &str,
     dns_blocklist: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let profile = self.mutate_profile(profile_id, move |latest| {
-      latest.dns_blocklist = dns_blocklist;
-      latest.updated_at = Some(crate::proxy_manager::now_secs());
-      Ok(())
-    })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["dns_blocklist"]);
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        dns_blocklist: Some(dns_blocklist),
+        ..Default::default()
+      },
+    )
   }
 
   /// Takes effect at the next launch: a running browser keeps the worker it
@@ -1533,25 +1548,13 @@ impl ProfileManager {
     profile_id: &str,
     dns_server: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let dns_server = crate::profile_dns::normalize_dns_server(dns_server)?;
-    let mut profile = self.find_profile(profile_id)?;
-    if profile.dns_server == dns_server {
-      return Ok(profile);
-    }
-
-    profile.dns_server = dns_server;
-    profile.updated_at = Some(crate::proxy_manager::now_secs());
-
-    self.save_profile(&profile)?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["dns_server"]);
-
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
-    }
-
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        dns_server: Some(dns_server),
+        ..Default::default()
+      },
+    )
   }
 
   /// Takes effect at the next launch, like every launch setting.
@@ -1560,20 +1563,13 @@ impl ProfileManager {
     profile_id: &str,
     start_urls: Vec<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    let start_urls = checked_start_urls(start_urls)?;
-    let mut profile = self.find_profile(profile_id)?;
-    if profile.start_urls == start_urls {
-      return Ok(profile);
-    }
-    profile.start_urls = start_urls;
-    profile.updated_at = Some(crate::proxy_manager::now_secs());
-    self.save_profile(&profile)?;
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["start_urls"]);
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
-    }
-    Ok(profile)
+    self.update_profile(
+      profile_id,
+      super::update::UpdateProfileRequest {
+        start_urls: Some(start_urls),
+        ..Default::default()
+      },
+    )
   }
 
   /// Change many profiles at once. Every value is checked and every profile
@@ -1808,11 +1804,8 @@ impl ProfileManager {
       tags: source.tags,
       note: source.note,
       window_color: source.window_color,
-      sync_mode: if source.sync_mode == SyncMode::Disabled {
-        SyncMode::Regular
-      } else {
-        source.sync_mode
-      },
+      // A new copy includes browser storage; uploading it needs a new opt-in.
+      sync_mode: SyncMode::Disabled,
       encryption_salt: None,
       last_sync: None,
       host_os: Some(get_host_os()),
@@ -1858,10 +1851,19 @@ impl ProfileManager {
       keep_source_claim(cfg, source_native_os);
     }
 
-    self.save_profile(&new_profile)?;
-
-    // Auto-queue cloud sync for cloned profile
-    crate::sync::queue_profile_sync_if_eligible(&new_profile);
+    // Only this new destination contains copied source metadata. Existing
+    // mismatched user metadata must still go through the recovery workflow.
+    let copied_metadata = dest_dir.join("metadata.json");
+    let publish = (|| -> Result<(), Box<dyn std::error::Error>> {
+      if copied_metadata.exists() {
+        fs::remove_file(copied_metadata)?;
+      }
+      self.save_profile(&new_profile)
+    })();
+    if let Err(error) = publish {
+      let _ = fs::remove_dir_all(&dest_dir);
+      return Err(error);
+    }
 
     if let Err(e) = events::emit_empty("profiles-changed") {
       log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
@@ -1939,43 +1941,15 @@ impl ProfileManager {
     profile_id: &str,
     proxy_id: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
-    let profile = self
-      .mutate_profile(profile_id, |latest| {
-        latest.proxy_id = proxy_id.clone();
-        latest.vpn_id = None;
-        latest.updated_at = Some(crate::proxy_manager::now_secs());
-        Ok(())
-      })
-      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-        format!("Failed to save profile: {e}").into()
-      })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["proxy"]);
-
-    // The cookie bot refuses a run on a profile with no exit node, using the
-    // copy of that fact the desktop last declared. Detaching a proxy has to
-    // move that copy, or tonight's run egresses from the remote host's own
-    // address instead of the user's exit.
-    crate::cookie_bot::report_profile_state(&profile);
-    crate::fingerprint_consistency::prewarm_profile_exit(&profile);
-
-    // Auto-enable sync for new proxy if profile has sync enabled
-    if profile.is_sync_enabled() {
-      if let Some(ref new_proxy_id) = proxy_id {
-        let _ = crate::sync::enable_proxy_sync_if_needed(new_proxy_id).await;
-        if let Some(scheduler) = crate::sync::get_global_scheduler() {
-          scheduler.queue_proxy_sync(new_proxy_id.clone()).await;
-        }
-      }
-    }
-
-    // Emit profile update event so frontend UIs can refresh immediately (e.g. proxy manager)
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
-    }
-
-    Ok(profile)
+    self
+      .update_profile(
+        profile_id,
+        super::update::UpdateProfileRequest {
+          proxy_id: Some(proxy_id),
+          ..Default::default()
+        },
+      )
+      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
   }
 
   pub async fn update_profile_vpn(
@@ -1984,39 +1958,15 @@ impl ProfileManager {
     profile_id: &str,
     vpn_id: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error + Send + Sync>> {
-    let profile = self
-      .mutate_profile(profile_id, |latest| {
-        latest.vpn_id = vpn_id.clone();
-        latest.proxy_id = None;
-        latest.updated_at = Some(crate::proxy_manager::now_secs());
-        Ok(())
-      })
-      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-        format!("Failed to save profile: {e}").into()
-      })?;
-
-    crate::sync::queue_profile_sync_if_eligible(&profile);
-    report_team_edit(&profile, "profile.update", &["vpn"]);
-
-    // Same reason as the proxy path: a VPN is the profile's exit node too, and
-    // the server only knows what this machine last told it.
-    crate::cookie_bot::report_profile_state(&profile);
-
-    // Auto-enable sync for the new VPN if profile has sync enabled.
-    if profile.is_sync_enabled() {
-      if let Some(ref new_vpn_id) = vpn_id {
-        let _ = crate::sync::enable_vpn_sync_if_needed(new_vpn_id).await;
-        if let Some(scheduler) = crate::sync::get_global_scheduler() {
-          scheduler.queue_vpn_sync(new_vpn_id.clone()).await;
-        }
-      }
-    }
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
-    }
-
-    Ok(profile)
+    self
+      .update_profile(
+        profile_id,
+        super::update::UpdateProfileRequest {
+          vpn_id: Some(vpn_id),
+          ..Default::default()
+        },
+      )
+      .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })
   }
 
   pub fn update_profile_extension_group(
@@ -2024,33 +1974,22 @@ impl ProfileManager {
     profile_id: &str,
     extension_group_id: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    // Also called by the extension manager's initialization migration while
+    // its lock is held; validation belongs to that caller, not this helper.
     let profile = self.mutate_profile(profile_id, |latest| {
       latest.extension_group_id = extension_group_id.clone();
       latest.updated_at = Some(crate::proxy_manager::now_secs());
       Ok(())
     })?;
-
     crate::sync::queue_profile_sync_if_eligible(&profile);
     report_team_edit(&profile, "profile.update", &["extension_group"]);
-
-    // Auto-enable sync for the new extension group if profile has sync
-    // enabled. The helper is sync internally; we fire-and-forget through
-    // the async runtime so any I/O doesn't block this caller.
     if profile.is_sync_enabled() {
-      if let Some(new_group_id) = extension_group_id {
-        tauri::async_runtime::spawn(async move {
-          let _ = crate::sync::enable_extension_group_sync_if_needed(&new_group_id).await;
-          if let Some(scheduler) = crate::sync::get_global_scheduler() {
-            scheduler.queue_extension_group_sync(new_group_id).await;
-          }
-        });
-      }
+      Self::sync_patched_groups(&super::patch::ProfilePatch {
+        extension_group_id: Some(extension_group_id),
+        ..Default::default()
+      });
     }
-
-    if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
-    }
-
+    let _ = events::emit("profile-updated", &profile);
     Ok(profile)
   }
 
