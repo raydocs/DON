@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 concurrency:
   group: macos-preview-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -36,6 +40,7 @@ jobs:
     timeout-minutes: 90
     env:
       TARGET: ${{ matrix.target }}
+      ARCH: ${{ matrix.arch }}
       APPLE_SIGNING_IDENTITY: "-"
 
     steps:
@@ -68,6 +73,11 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.target }}
 
+      - name: Verify the native toolchain and architecture checker
+        run: |
+          test "$(rustc -vV | sed -n 's/^host: //p')" = "$TARGET"
+          lipo "$(rustup which rustc)" -verify_arch "$ARCH"
+
       - name: Rust cache
         uses: swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 #v2.9.2
         with:
@@ -79,14 +89,14 @@ jobs:
 
       # The existing build hook builds donut-proxy, verifies/downloads Xray,
       # and exports the frontend. No release action or signing secrets are used.
+      # Both runners are native, so share the hook's target/release directory
+      # instead of compiling dependencies again in target/<triple>/release.
       - name: Build the preview app and DMG
-        run: pnpm tauri build --target "$TARGET" --bundles app,dmg --ci
+        run: pnpm tauri build --bundles app,dmg --ci
 
       - name: Verify the mounted installer and collect downloads
-        env:
-          ARCH: ${{ matrix.arch }}
         run: |
-          DMG_DIR="src-tauri/target/$TARGET/release/bundle/dmg"
+          DMG_DIR="src-tauri/target/release/bundle/dmg"
           test "$(find "$DMG_DIR" -name '*.dmg' | wc -l | tr -d ' ')" = 1
           DMG=$(find "$DMG_DIR" -name '*.dmg')
           hdiutil verify "$DMG"
@@ -101,7 +111,7 @@ jobs:
           EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP/Contents/Info.plist")
           for BIN in "$EXECUTABLE" donut-proxy xray; do
             test -x "$APP/Contents/MacOS/$BIN"
-            lipo -verify_arch "$ARCH" "$APP/Contents/MacOS/$BIN"
+            lipo "$APP/Contents/MacOS/$BIN" -verify_arch "$ARCH"
           done
           test -s "$APP/Contents/Resources/licenses/Xray-core-LICENSE.txt"
           DONUTBROWSER_DATA_ROOT="$RUNNER_TEMP/don-preview-data" \
@@ -128,3 +138,12 @@ jobs:
           path: macos-preview/
           if-no-files-found: error
           retention-days: 7
+
+      - name: Keep an unverified DMG for failure diagnosis
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 #v7.0.2
+        with:
+          name: Don-macOS-${{ matrix.arch }}-${{ env.SOURCE_SHA }}-unverified
+          path: src-tauri/target/release/bundle/dmg/*.dmg
+          if-no-files-found: ignore
+          retention-days: 1
