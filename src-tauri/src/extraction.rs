@@ -752,7 +752,7 @@ impl Extractor {
       // Use enclosed_name to prevent path traversal; do not modify names otherwise
       let enclosed = entry
         .enclosed_name()
-        .ok_or_else(|| format!("ZIP contains an invalid entry path: {}", entry.name()))?;
+        .ok_or_else(|| format!("ZIP contains an invalid entry path at index {i}"))?;
 
       let outpath = dest_dir.join(enclosed);
 

@@ -556,7 +556,7 @@ impl ProfileImporter {
       // enclosed_name prevents path traversal via ../ entries.
       let enclosed = entry
         .enclosed_name()
-        .ok_or_else(|| format!("ZIP contains an invalid entry path: {}", entry.name()))?;
+        .ok_or_else(|| format!("ZIP contains an invalid entry path at index {i}"))?;
       let outpath = dest.join(enclosed);
 
       if entry.is_dir() {

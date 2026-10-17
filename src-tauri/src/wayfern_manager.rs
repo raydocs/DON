@@ -13,7 +13,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn select_new_wayfern_process(
   candidates: &[(u32, Option<u16>)],
   existing: &std::collections::HashSet<u32>,
@@ -25,7 +25,7 @@ fn select_new_wayfern_process(
     .map(|(pid, _)| *pid)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn parse_lsof_listener_pids(output: &str) -> Vec<u32> {
   let mut pids = Vec::new();
   for line in output.lines() {

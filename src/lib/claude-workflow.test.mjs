@@ -25,6 +25,7 @@ const {
   pickAvailableProxy,
   planAutoClaudeProfile,
 } = await import("./claude-workflow.ts");
+const { getCurrentOS } = await import("./wayfern-defaults.ts");
 
 const DAY_SECONDS = 24 * 60 * 60;
 
@@ -61,7 +62,10 @@ test("readiness compares simulated DPR to its device target and flag repair pres
       (i) => i.code === "DPR_MISMATCH",
     ),
   );
-  const native = { ...profile, wayfern_config: { ...config, os: "linux" } };
+  const native = {
+    ...profile,
+    wayfern_config: { ...config, os: getCurrentOS() },
+  };
   assert.ok(
     assessClaudeProfile(native, [native], [], 1).issues.some(
       (i) => i.code === "DPR_MISMATCH",
