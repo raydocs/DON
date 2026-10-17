@@ -1,6 +1,6 @@
 {
   "com.donutbrowser.DonutBrowser": {
-    "finish-args-own-name-com.donutbrowser.SingleInstance": "tauri-plugin-single-instance derives its session bus name from the Tauri identifier com.donutbrowser, which is not under the Flatpak app ID",
+    "finish-args-own-name-com.donbrowser.SingleInstance": "tauri-plugin-single-instance derives its session bus name from DON's Tauri identifier com.donbrowser, which is not under the legacy Flatpak app ID",
     "appstream-screenshots-not-mirrored-in-ostree": "Only the Flathub build pipeline mirrors screenshots; CI builds keep the upstream URL",
     "appstream-external-screenshot-url": "Only the Flathub build pipeline mirrors screenshots; CI builds keep the upstream URL"
   }

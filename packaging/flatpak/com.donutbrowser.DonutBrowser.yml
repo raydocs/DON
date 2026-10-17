@@ -15,7 +15,7 @@ runtime: org.gnome.Platform
 runtime-version: "51"
 sdk: org.gnome.Sdk
 command: donutbrowser
-rename-desktop-file: Donut.desktop
+rename-desktop-file: Don.desktop
 rename-icon: donutbrowser
 
 finish-args:
@@ -41,7 +41,7 @@ finish-args:
   - --talk-name=org.freedesktop.Notifications
   # tauri-plugin-single-instance hands the second launch (a clicked link) to the
   # first one over this name, which is derived from the Tauri identifier.
-  - --own-name=com.donutbrowser.SingleInstance
+  - --own-name=com.donbrowser.SingleInstance
 
 cleanup:
   - /include
@@ -155,8 +155,8 @@ modules:
       - mkdir deb && tar -xf data.tar.* -C deb
       - install -Dm755 -t /app/bin deb/usr/bin/donutbrowser deb/usr/bin/donut-proxy deb/usr/bin/xray
       # Tauri resolves its resource directory to <prefix>/lib/<productName>.
-      - mkdir -p /app/lib && cp -r deb/usr/lib/Donut /app/lib/Donut
-      - install -Dm644 -t /app/share/applications deb/usr/share/applications/Donut.desktop
+      - mkdir -p /app/lib && cp -r deb/usr/lib/Don /app/lib/Don
+      - install -Dm644 -t /app/share/applications deb/usr/share/applications/Don.desktop
       - |
         for size in 32x32 128x128 512x512; do
           install -Dm644 "deb/usr/share/icons/hicolor/$size/apps/donutbrowser.png" \
