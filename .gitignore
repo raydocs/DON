@@ -12,6 +12,7 @@
 # testing
 /coverage
 /e2e/app/target/
+/e2e/app/Cargo.lock
 /e2e/.driver/
 
 # next.js
@@ -35,7 +36,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# nodecar
+# nested build output
 **/dist
 **/node_modules
 
@@ -49,9 +50,6 @@ yarn-error.log*
 *.tsbuildinfo
 
 !**/.gitkeep
-
-# nodecar
-nodecar/nodecar-bin
 
 # sync test harness cache
 .cache/
@@ -71,7 +69,8 @@ HANDOFF.md
 .claude/stop-failure-events.jsonl
 .claude/quota-blocked.json
 session-recover.yaml
+# Claude Code session-recovery state
 
-# Amp portals
-.amp/portals/*
-
+# Amp portals and review artifacts
+.amp/portals/
+.amp/in/

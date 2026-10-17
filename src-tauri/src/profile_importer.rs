@@ -738,8 +738,9 @@ impl ProfileImporter {
       .map(|p| p.name.to_lowercase())
       .collect();
 
+    let started = std::time::Instant::now();
     let total = items.len();
-    let mut results = Vec::with_capacity(total);
+    let mut results = Vec::new();
     let mut imported_count = 0usize;
     let mut skipped_count = 0usize;
     let mut failed_count = 0usize;
@@ -821,18 +822,30 @@ impl ProfileImporter {
           emit_import_progress(total, completed, index, &final_name, "failed");
           // The name was reserved but the import failed — free it again.
           taken_names.remove(&final_name.to_lowercase());
+          let error = error_to_code_string(e);
+          // The text can quote the profile name and the source paths.
+          let logged =
+            crate::log_redaction::text(&error.replace(&format!("'{final_name}'"), "'<name>'"));
+          log::warn!(
+            "Profile import item failed index={index} source_browser={} err=\"{logged}\"",
+            item.browser_type
+          );
           results.push(ProfileImportItemResult {
             name: final_name,
             source_path: item.source_path,
             status: "failed".to_string(),
             profile_id: None,
-            error: Some(error_to_code_string(e)),
+            error: Some(error),
             report: None,
           });
         }
       }
     }
 
+    log::info!(
+      "Profile import finished items={total} imported={imported_count} skipped={skipped_count} failed={failed_count} elapsed_ms={}",
+      started.elapsed().as_millis()
+    );
     Ok(ProfileImportBatchResult {
       imported_count,
       skipped_count,
@@ -885,10 +898,10 @@ impl ProfileImporter {
 
     let profile_id = uuid::Uuid::new_v4();
     let profiles_dir = self.profile_manager.get_profiles_dir();
-    let new_profile_uuid_dir = profiles_dir.join(profile_id.to_string());
-    let new_profile_data_dir = new_profile_uuid_dir.join("profile");
+    let new_profile_dir = profiles_dir.join(profile_id.to_string());
+    let new_profile_data_dir = new_profile_dir.join("profile");
 
-    create_dir_all(&new_profile_uuid_dir)?;
+    create_dir_all(&new_profile_dir)?;
     create_dir_all(&new_profile_data_dir)?;
 
     // Profile dirs can be multiple GB and the migration hits SQLite and the
@@ -912,7 +925,7 @@ impl ProfileImporter {
         // every other error path here, or the half-copied — possibly multi-GB
         // — directory is orphaned with no metadata pointing at it, so nothing
         // ever reclaims it.
-        let _ = fs::remove_dir_all(&new_profile_uuid_dir);
+        let _ = fs::remove_dir_all(&new_profile_dir);
         return Err(
           serde_json::json!({
             "code": "INTERNAL_ERROR",
@@ -926,7 +939,7 @@ impl ProfileImporter {
     let report = match migrate_result {
       Ok(report) => report,
       Err(e) => {
-        let _ = fs::remove_dir_all(&new_profile_uuid_dir);
+        let _ = fs::remove_dir_all(&new_profile_dir);
         // Structured codes (an unimportable source, a running browser) pass
         // through so the frontend can translate them; anything else is
         // internal.
@@ -943,13 +956,24 @@ impl ProfileImporter {
     let version = match self.get_default_version_for_browser(mapped) {
       Ok(version) => version,
       Err(e) => {
-        let _ = fs::remove_dir_all(&new_profile_uuid_dir);
+        let _ = fs::remove_dir_all(&new_profile_dir);
         return Err(e);
       }
     };
 
     let final_wayfern_config = if mapped == "wayfern" {
       let mut config = wayfern_config.unwrap_or_default();
+      config.sanitize_launch_args().await;
+
+      // A caller-supplied device is a set of explicit field choices, not a
+      let supplied_device = if crate::wayfern_manager::supports_wayfern_152(&version) {
+        config
+          .fingerprint
+          .take()
+          .and_then(|json| crate::wayfern_manager::WayfernManager::fingerprint_object(&json))
+      } else {
+        None
+      };
 
       if let Some(ref proxy_id_val) = proxy_id {
         if let Some(proxy_settings) = PROXY_MANAGER.get_proxy_settings_by_id(proxy_id_val) {
@@ -976,9 +1000,9 @@ impl ProfileImporter {
         }
       }
 
-      if config.fingerprint.is_none() {
+      if config.fingerprint.is_none() && config.identity_id.is_none() {
         let temp_profile = BrowserProfile {
-          id: uuid::Uuid::new_v4(),
+          id: profile_id,
           name: new_profile_name.to_string(),
           browser: mapped.to_string(),
           version: version.clone(),
@@ -998,11 +1022,15 @@ impl ProfileImporter {
           last_sync: None,
           host_os: None,
           ephemeral: false,
+          temporary: false,
           extension_group_id: None,
           proxy_bypass_rules: Vec::new(),
           created_by_id: None,
           created_by_email: None,
           dns_blocklist: None,
+          dns_server: None,
+          status_id: None,
+          start_urls: Vec::new(),
           password_protected: false,
           clear_on_close: false,
           created_at: None,
@@ -1016,9 +1044,18 @@ impl ProfileImporter {
         {
           // geo_proxy_signature is intentionally left unset here: the first
           // launch's signature-mismatch refresh verifies the location either way.
-          Ok((fp, _geolocation_applied)) => config.fingerprint = Some(fp),
+          Ok(generated) => {
+            config.identity_id = generated.identity_id;
+            config.location = generated.location;
+            config.identity_baseline = None;
+            config.fingerprint = if config.identity_id.is_some() {
+              None
+            } else {
+              Some(generated.fingerprint)
+            };
+          }
           Err(e) => {
-            let _ = fs::remove_dir_all(&new_profile_uuid_dir);
+            let _ = fs::remove_dir_all(&new_profile_dir);
             return Err(
               serde_json::json!({
                 "code": "INTERNAL_ERROR",
@@ -1028,6 +1065,17 @@ impl ProfileImporter {
               .into(),
             );
           }
+        }
+      }
+
+      if let Some(object) = supplied_device {
+        let overrides =
+          crate::wayfern_manager::WayfernManager::overrides_from_explicit_fingerprint(&object);
+        if !overrides.is_empty() {
+          config.identity_overrides = serde_json::to_string(&overrides).ok();
+        }
+        if let Some(location) = crate::wayfern_manager::WayfernManager::location_of(&object) {
+          config.location = Some(location);
         }
       }
 
@@ -1058,11 +1106,15 @@ impl ProfileImporter {
       last_sync: None,
       host_os: Some(get_host_os()),
       ephemeral: false,
+      temporary: false,
       extension_group_id: None,
       proxy_bypass_rules: Vec::new(),
       created_by_id: None,
       created_by_email: None,
       dns_blocklist: None,
+      dns_server: None,
+      status_id: None,
+      start_urls: Vec::new(),
       password_protected: false,
       clear_on_close: false,
       created_at: Some(
@@ -1081,20 +1133,16 @@ impl ProfileImporter {
       // the exact symptom the old layout bug produced, so it is worth a loud
       // line in the log rather than a silent success.
       log::warn!(
-        "Imported profile '{}' from '{}' carried no readable data (warnings: {:?})",
-        new_profile_name,
-        source_path.display(),
+        "Profile imported with no readable data profile={profile_id} source_browser={browser_type} warnings={:?}",
         report.warnings
       );
     } else {
       log::info!(
-        "Imported profile '{}' from '{}': {} cookies, {} passwords, {} history entries ({} unrecoverable secrets, warnings: {:?})",
-        new_profile_name,
-        source_path.display(),
+        "Profile imported profile={profile_id} source_browser={browser_type} cookies={} passwords={} history={} unrecoverable={} warnings={:?}",
         report.cookies_migrated,
-        report.passwords_migrated,
+        report.logins_migrated,
         report.history_entries,
-        report.cookies_unrecoverable + report.passwords_unrecoverable,
+        report.cookies_unrecoverable + report.logins_unrecoverable,
         report.warnings
       );
     }
@@ -1109,6 +1157,8 @@ impl ProfileImporter {
     let downloaded_versions = self
       .downloaded_browsers_registry
       .get_downloaded_versions(browser_type);
+    let mut downloaded_versions = downloaded_versions;
+    downloaded_versions.sort_by(|a, b| crate::api_client::compare_versions(b, a));
 
     if let Some(version) = downloaded_versions.first() {
       return Ok(version.clone());
@@ -1137,7 +1187,15 @@ impl ProfileImporter {
       let source_path = entry.path();
       let dest_path = destination.join(entry.file_name());
 
-      if source_path.is_dir() {
+      // Symlinks are not followed, as in `profile_import::copy`: Chromium
+      // leaves `SingletonLock` pointing at nothing after a crash, which made
+      // every clone fail, and a link to a folder would copy content from
+      // outside the profile.
+      let file_type = entry.file_type()?;
+      if file_type.is_symlink() {
+        continue;
+      }
+      if file_type.is_dir() {
         Self::copy_directory_recursive(&source_path, &dest_path)?;
       } else {
         fs::copy(&source_path, &dest_path)?;
@@ -1200,9 +1258,8 @@ pub async fn import_browser_profiles(
     .map_err(error_to_code_string)
 }
 
-lazy_static::lazy_static! {
-  static ref PROFILE_IMPORTER: ProfileImporter = ProfileImporter::new();
-}
+static PROFILE_IMPORTER: std::sync::LazyLock<ProfileImporter> =
+  std::sync::LazyLock::new(ProfileImporter::new);
 
 #[cfg(test)]
 mod tests {
@@ -1303,6 +1360,29 @@ mod tests {
 
     assert_eq!(content1, "content1", "file1 content should match");
     assert_eq!(content2, "content2", "file2 content should match");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_copy_skips_symlinks_such_as_a_stale_singleton_lock() {
+    let temp_dir = TempDir::new().expect("Failed to create temp directory");
+    let source_dir = temp_dir.path().join("source");
+    let outside = temp_dir.path().join("outside");
+    fs::create_dir_all(&source_dir).unwrap();
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(source_dir.join("Preferences"), "{}").unwrap();
+    fs::write(outside.join("secret.txt"), "not part of the profile").unwrap();
+    // What Chromium leaves after a crash, and a link out of the profile.
+    std::os::unix::fs::symlink("host-12345", source_dir.join("SingletonLock")).unwrap();
+    std::os::unix::fs::symlink(&outside, source_dir.join("linked")).unwrap();
+
+    let dest_dir = temp_dir.path().join("dest");
+    ProfileImporter::copy_directory_recursive(&source_dir, &dest_dir)
+      .expect("a dangling lock link must not stop the copy");
+
+    assert!(dest_dir.join("Preferences").exists());
+    assert!(fs::symlink_metadata(dest_dir.join("SingletonLock")).is_err());
+    assert!(!dest_dir.join("linked").exists());
   }
 
   #[test]

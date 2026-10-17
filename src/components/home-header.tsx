@@ -4,13 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GoPlus } from "react-icons/go";
-import {
-  LuChevronLeft,
-  LuChevronRight,
-  LuCircleHelp,
-  LuSearch,
-  LuX,
-} from "react-icons/lu";
+import { LuCircleHelp, LuSearch, LuX } from "react-icons/lu";
 import { useWindowDecorations } from "@/hooks/use-window-decorations";
 import { getCurrentOS } from "@/lib/browser-utils";
 import {
@@ -20,9 +14,11 @@ import {
 } from "@/lib/profile-search";
 import { cn } from "@/lib/utils";
 import type { GroupWithCount } from "@/types";
+import { UNGROUPED_DROP_ID, useProfileGroupDrag } from "./profile-group-drag";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { ScrollStrip } from "./ui/scroll-strip";
 import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 
 const HOLD_MS = 150;
@@ -46,6 +42,7 @@ const ALL_FILTER_ID = "__all__";
 interface Props {
   onCreateProfileDialogOpen: (open: boolean) => void;
   onClaudeWorkflowOpen?: () => void;
+  canCreateProfiles?: boolean;
   searchQuery: string;
   onSearchQueryChange: (query: string) => void;
   groups: GroupWithCount[];
@@ -155,6 +152,7 @@ const SearchSyntaxHelp = () => {
 const HomeHeader = ({
   onCreateProfileDialogOpen,
   onClaudeWorkflowOpen,
+  canCreateProfiles = true,
   searchQuery,
   onSearchQueryChange,
   groups,
@@ -164,6 +162,7 @@ const HomeHeader = ({
   pageTitle,
 }: Props) => {
   const { t } = useTranslation();
+  const profileDrag = useProfileGroupDrag();
   const [platform, setPlatform] = useState<string>("macos");
 
   useEffect(() => {
@@ -263,28 +262,6 @@ const HomeHeader = ({
     [clearHold],
   );
 
-  // Horizontal scroll fades for the group filter strip — when the user
-  // has more groups than fit, the right edge fades to hint at overflow.
-  const groupsScrollRef = useRef<HTMLDivElement | null>(null);
-  const [groupsFadeLeft, setGroupsFadeLeft] = useState(false);
-  const [groupsFadeRight, setGroupsFadeRight] = useState(false);
-  useEffect(() => {
-    const el = groupsScrollRef.current;
-    if (!el) return;
-    const update = () => {
-      setGroupsFadeLeft(el.scrollLeft > 1);
-      setGroupsFadeRight(el.scrollWidth - el.clientWidth - el.scrollLeft > 1);
-    };
-    update();
-    el.addEventListener("scroll", update, { passive: true });
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    return () => {
-      el.removeEventListener("scroll", update);
-      ro.disconnect();
-    };
-  }, []);
-
   const isWindows = platform === "windows";
 
   return (
@@ -321,18 +298,10 @@ const HomeHeader = ({
           : undefined
       }
     >
-      {isMacOS && (
-        <div
-          aria-hidden="true"
-          className="mr-1 flex shrink-0 items-center gap-[7px]"
-        >
-          {/* Reserve space for the macOS native traffic lights — the OS draws
-              the colored buttons here through the transparent titlebar. */}
-          <div className="size-[11px] rounded-full" />
-          <div className="size-[11px] rounded-full" />
-          <div className="size-[11px] rounded-full" />
-        </div>
-      )}
+      {/* The OS draws the traffic lights here through the transparent
+          titlebar, 15px from the left edge (lib.rs). On macOS 26 they end at
+          75px; this keeps the header's content a 13px gap clear of them. */}
+      {isMacOS && <div aria-hidden="true" className="w-15 shrink-0" />}
 
       {pageTitle ? (
         <span className="ml-2 text-xs font-semibold text-card-foreground">
@@ -341,122 +310,128 @@ const HomeHeader = ({
       ) : null}
 
       {showProfileToolbar && (
-        <div className="relative flex min-w-0 flex-1 items-center">
-          {groupsFadeLeft && (
-            <button
-              type="button"
-              aria-label={t("header.scrollGroupsLeft")}
-              onClick={() => {
-                const el = groupsScrollRef.current;
-                if (el)
-                  el.scrollBy({
-                    left: -el.clientWidth * 0.6,
-                    behavior: "smooth",
-                  });
-              }}
-              className="absolute top-1/2 left-0 z-10 grid size-5 -translate-y-1/2 place-items-center rounded-full bg-card/90 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+        <ScrollStrip
+          data-slot="profile-group-strip"
+          className="ml-2 flex-1"
+          stripClassName="gap-3"
+          activeKey={selectedGroupId}
+          instant={Boolean(profileDrag?.active)}
+          scrollLeftLabel={t("header.scrollGroupsLeft")}
+          scrollRightLabel={t("header.scrollGroupsRight")}
+        >
+          {/* "All" filter — shows every profile regardless of group. */}
+          {(() => {
+            const active = selectedGroupId === ALL_FILTER_ID;
+            return (
+              <button
+                key="__all__"
+                type="button"
+                aria-current={active ? "true" : undefined}
+                onClick={() => {
+                  onGroupSelect(ALL_FILTER_ID);
+                }}
+                className={cn(
+                  "flex h-7 shrink-0 items-center gap-1.5 px-1 text-xs transition-colors duration-100",
+                  active
+                    ? "font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <span>{t("groups.all")}</span>
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {totalProfiles}
+                </span>
+              </button>
+            );
+          })()}
+          {profileDrag && profileDrag.movingIds.size > 0 && (
+            <span
+              data-profile-group-drop={UNGROUPED_DROP_ID}
+              data-drop-state={
+                profileDrag.targetId === UNGROUPED_DROP_ID
+                  ? "target"
+                  : profileDrag.canDrop(UNGROUPED_DROP_ID)
+                    ? "available"
+                    : "unavailable"
+              }
+              title={t("profileMotion.dragTarget", {
+                group: t("groups.noGroup"),
+              })}
+              className={cn(
+                "flex h-7 shrink-0 items-center rounded-sm px-2 text-xs text-muted-foreground transition-colors duration-100",
+                profileDrag.targetId === UNGROUPED_DROP_ID &&
+                  "bg-accent font-medium text-accent-foreground",
+                !profileDrag.canDrop(UNGROUPED_DROP_ID) && "opacity-40",
+              )}
             >
-              <LuChevronLeft className="size-3" />
-            </button>
+              {t("groups.noGroup")}
+            </span>
           )}
-          <div
-            ref={groupsScrollRef}
-            className="ml-2 flex scrollbar-none items-center gap-3 overflow-x-auto scroll-smooth [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
-            style={{
-              paddingLeft: groupsFadeLeft ? 22 : 0,
-              paddingRight: groupsFadeRight ? 22 : 0,
-            }}
-          >
-            {/* "All" filter — shows every profile regardless of group. */}
-            {(() => {
-              const active = selectedGroupId === ALL_FILTER_ID;
-              return (
-                <button
-                  key="__all__"
-                  type="button"
-                  onClick={() => {
-                    onGroupSelect(ALL_FILTER_ID);
-                  }}
-                  className={cn(
-                    "flex h-7 shrink-0 items-center gap-1.5 px-1 text-xs transition-colors duration-100",
-                    active
-                      ? "font-medium text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span>{t("groups.all")}</span>
-                  <span className="text-[11px] text-muted-foreground tabular-nums">
-                    {totalProfiles}
-                  </span>
-                </button>
-              );
-            })()}
-            {groups.map((group) => {
-              const active = selectedGroupId === group.id;
-              return (
-                <button
-                  key={group.id}
-                  type="button"
-                  title={group.name}
-                  onClick={() => {
-                    onGroupSelect(active ? ALL_FILTER_ID : group.id);
-                  }}
-                  className={cn(
-                    "flex h-7 shrink-0 items-center gap-1.5 px-1 text-xs transition-colors duration-100",
-                    active
-                      ? "font-medium text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  <span className="max-w-40 truncate">{group.name}</span>
-                  <span className="text-[11px] text-muted-foreground tabular-nums">
-                    {group.count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-          {groupsFadeRight && (
-            <button
-              type="button"
-              aria-label={t("header.scrollGroupsRight")}
-              onClick={() => {
-                const el = groupsScrollRef.current;
-                if (el)
-                  el.scrollBy({
-                    left: el.clientWidth * 0.6,
-                    behavior: "smooth",
-                  });
-              }}
-              className="absolute top-1/2 right-0 z-10 grid size-5 -translate-y-1/2 place-items-center rounded-full bg-card/90 text-muted-foreground shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
-            >
-              <LuChevronRight className="size-3" />
-            </button>
-          )}
-        </div>
+          {groups.map((group) => {
+            const active = selectedGroupId === group.id;
+            const dropTarget = profileDrag?.targetId === group.id;
+            return (
+              <button
+                key={group.id}
+                type="button"
+                title={group.name}
+                data-profile-group-drop={group.id}
+                data-drop-state={
+                  profileDrag?.active
+                    ? dropTarget
+                      ? "target"
+                      : profileDrag.canDrop(group.id)
+                        ? "available"
+                        : "unavailable"
+                    : undefined
+                }
+                aria-current={active ? "true" : undefined}
+                onClick={() => {
+                  onGroupSelect(active ? ALL_FILTER_ID : group.id);
+                }}
+                className={cn(
+                  "flex h-7 shrink-0 items-center gap-1.5 rounded-sm px-1 text-xs transition-colors duration-100",
+                  dropTarget && "bg-accent text-accent-foreground",
+                  profileDrag?.active &&
+                    !profileDrag.canDrop(group.id) &&
+                    "opacity-40",
+                  active
+                    ? "font-medium text-foreground"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <span className="max-w-40 truncate">{group.name}</span>
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {group.count}
+                </span>
+              </button>
+            );
+          })}
+        </ScrollStrip>
       )}
 
       {!showProfileToolbar && <div className="flex-1" />}
 
       {showProfileToolbar && (
         <div className="relative shrink-0">
+          <LuSearch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             type="text"
+            variant="soft"
             placeholder={t("header.searchPlaceholder")}
             value={searchQuery}
             onChange={(e) => {
               onSearchQueryChange(e.target.value);
             }}
-            className="h-7 w-36 pr-7 pl-8 text-xs min-[860px]:w-52"
+            className="h-7 w-36 pr-7 pl-8 text-xs md:text-xs min-[860px]:w-52"
           />
-          <LuSearch className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 transform text-muted-foreground" />
           {searchQuery ? (
             <button
               type="button"
               onClick={() => {
                 onSearchQueryChange("");
               }}
-              className="absolute top-1/2 right-1.5 -translate-y-1/2 transform rounded-sm p-0.5 transition-colors hover:bg-accent hover:text-accent-foreground"
+              className="absolute top-1/2 right-1.5 -translate-y-1/2 rounded-sm p-0.5 transition-colors hover:bg-foreground/10"
               aria-label={t("header.clearSearch")}
             >
               <LuX className="size-3.5 text-muted-foreground hover:text-foreground" />
@@ -481,17 +456,13 @@ const HomeHeader = ({
               </Button>
             </span>
           </TooltipTrigger>
-          <TooltipContent>
-            {t("claudeWorkflow.headerTooltip", {
-              defaultValue: "Claude isolation workflow & health scan",
-            })}
-          </TooltipContent>
+          <TooltipContent>{t("claudeWorkflow.headerTooltip")}</TooltipContent>
         </Tooltip>
       )}
 
       {showProfileToolbar && <SearchSyntaxHelp />}
 
-      {showProfileToolbar && (
+      {showProfileToolbar && canCreateProfiles && (
         <Tooltip>
           <TooltipTrigger asChild>
             <span className="shrink-0">

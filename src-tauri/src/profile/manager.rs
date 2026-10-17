@@ -12,7 +12,14 @@ use std::sync::{Arc, Mutex, Weak};
 use sysinfo::{Pid, ProcessRefreshKind, RefreshKind, System};
 use url::Url;
 
+static METADATA_WRITES: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
+  let _serialized = METADATA_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+  atomic_write_locked(path, data)
+}
+
+fn atomic_write_locked(path: &Path, data: &[u8]) -> std::io::Result<()> {
   let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
     Some(ext) => format!("{ext}.tmp"),
     None => "tmp".to_string(),
@@ -67,9 +74,131 @@ where
   Ok(profile)
 }
 
+/// Whether a metadata.json still holds `expected`, compared as this version
+/// reads it. A file an older version wrote lacks every field added since, so
+/// its raw JSON never equals the profile it parses to, and a raw compare
+/// reports a change on every call.
+fn holds_profile(content: &str, expected: &BrowserProfile) -> Result<bool, serde_json::Error> {
+  let stored: BrowserProfile = serde_json::from_str(content)?;
+  Ok(serde_json::to_value(&stored)? == serde_json::to_value(expected)?)
+}
+
+/// `list_profiles` runs every few seconds, so a broken profile warns once per run.
+fn warn_skipped_profile(dir: &Path, why: &str, err: &dyn std::fmt::Display) {
+  static WARNED: std::sync::Mutex<Option<std::collections::HashSet<PathBuf>>> =
+    std::sync::Mutex::new(None);
+  let first = WARNED
+    .lock()
+    .map(|mut warned| {
+      warned
+        .get_or_insert_with(Default::default)
+        .insert(dir.to_path_buf())
+    })
+    .unwrap_or(true);
+  let profile = dir.file_name().unwrap_or_default().to_string_lossy();
+  let level = if first {
+    log::Level::Warn
+  } else {
+    log::Level::Debug
+  };
+  log::log!(
+    level,
+    "Profile skipped: {why} metadata.json profile={profile} err=\"{err}\""
+  );
+}
+
+/// Collapse an empty proxy/VPN id to `None`.
+///
+/// REST and MCP clients send `""` to detach a proxy or VPN, since omitting the
+/// field means "leave unchanged". Stored as `Some("")` it resolves to no
+/// upstream while every `proxy_id.is_some()` check still reads the profile as
+/// routed, so the launch gate probes a direct exit and can refuse the launch of
+/// a profile that has no proxy at all.
+fn normalize_network_id(id: Option<String>) -> Option<String> {
+  id.filter(|id| !id.is_empty())
+}
+
 pub struct ProfileManager {
   wayfern_manager: &'static crate::wayfern_manager::WayfernManager,
   profile_locks: Mutex<HashMap<uuid::Uuid, Weak<Mutex<()>>>>,
+}
+
+/// A clone is created on this machine, but its fingerprint keeps the OS its
+/// source claimed. An unset `os` means the source's native OS, which the
+/// clone's own native OS, this machine, would otherwise replace.
+fn keep_source_claim(config: &mut WayfernConfig, source_native_os: String) {
+  if config.os.is_none() && source_native_os != get_host_os() {
+    config.os = Some(source_native_os);
+  }
+}
+
+fn merge_submitted_wayfern_config(
+  stored: Option<&WayfernConfig>,
+  mut config: WayfernConfig,
+) -> WayfernConfig {
+  let mut keeps_identity_view = false;
+  if let Some(stored) = stored {
+    if config.identity_id.is_none()
+      && (config.fingerprint.is_some() || config.identity_overrides.is_some())
+    {
+      config.identity_id = stored.identity_id.clone();
+    }
+    keeps_identity_view = config.identity_id.is_some()
+      && stored.identity_id == config.identity_id
+      && stored.fingerprint.is_some()
+      && config.fingerprint.is_some();
+    if keeps_identity_view {
+      if config.identity_baseline.is_none() {
+        config.identity_baseline = stored.identity_baseline.clone();
+      }
+      if config.identity_overrides.is_none() {
+        config.identity_overrides = stored.identity_overrides.clone();
+      }
+      if config.location.is_none() {
+        config.location = stored.location.clone();
+      }
+    } else if config.identity_id.is_some() {
+      if config.location.is_none() {
+        config.location = stored.location.clone();
+      }
+      if config.identity_overrides.is_none() {
+        config.identity_overrides = stored.identity_overrides.clone();
+      }
+      if let Some(fingerprint) = config.fingerprint.take() {
+        if let Some(object) =
+          crate::wayfern_manager::WayfernManager::fingerprint_object(&fingerprint)
+        {
+          let overrides =
+            crate::wayfern_manager::WayfernManager::overrides_from_explicit_fingerprint(&object);
+          config.identity_overrides = if overrides.is_empty() {
+            None
+          } else {
+            serde_json::to_string(&overrides).ok()
+          };
+          if config.location.is_none() {
+            config.location = crate::wayfern_manager::WayfernManager::location_of(&object);
+          }
+        }
+      }
+    }
+  }
+  if !keeps_identity_view {
+    config.identity_baseline = None;
+  }
+  config
+}
+
+/// Note a person's change to a team profile in the team activity log.
+/// Profiles that do not sync stay out of it: they are not the team's.
+fn report_team_edit(profile: &BrowserProfile, action: &str, fields: &[&str]) {
+  if profile.is_sync_enabled() {
+    crate::team_activity::record(
+      action,
+      &profile.id.to_string(),
+      Some(&profile.name),
+      crate::team_activity::fields(fields),
+    );
+  }
 }
 
 impl ProfileManager {
@@ -222,10 +351,11 @@ impl ProfileManager {
     release_type: &str,
     proxy_id: Option<String>,
     vpn_id: Option<String>,
-    wayfern_config: Option<WayfernConfig>,
+    mut wayfern_config: Option<WayfernConfig>,
     group_id: Option<String>,
     ephemeral: bool,
     dns_blocklist: Option<String>,
+    dns_server: Option<String>,
     launch_hook: Option<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
     if name.trim().is_empty() {
@@ -235,6 +365,13 @@ impl ProfileManager {
           .into(),
       );
     }
+    let dns_server = crate::profile_dns::normalize_dns_server(dns_server)?;
+
+    // Normalize before the mutual-exclusion check, not per caller: REST, MCP,
+    // the importer and the Tauri commands all funnel through here, and a client
+    // saying "neither" with two empty strings must not read as "both".
+    let proxy_id = normalize_network_id(proxy_id);
+    let vpn_id = normalize_network_id(vpn_id);
 
     if proxy_id.is_some() && vpn_id.is_some() {
       return Err("Cannot set both proxy_id and vpn_id".into());
@@ -242,15 +379,17 @@ impl ProfileManager {
 
     let launch_hook = Self::normalize_launch_hook(launch_hook)?;
 
+    if let Some(config) = wayfern_config.as_mut() {
+      config.launch_args = config.checked_launch_args().await?;
+    }
+
     // Sync cloud proxy credentials if the profile uses a cloud or cloud-derived proxy
     if let Some(ref pid) = proxy_id {
       if PROXY_MANAGER.is_cloud_or_derived(pid) || pid == crate::proxy_manager::CLOUD_PROXY_ID {
-        log::info!("Syncing cloud proxy credentials before profile creation");
+        log::debug!("Syncing cloud proxy credentials before profile creation proxy={pid}");
         CLOUD_AUTH.sync_cloud_proxy().await;
       }
     }
-
-    log::info!("Attempting to create profile: {name}");
 
     if browser == "camoufox" {
       return Err(
@@ -266,11 +405,21 @@ impl ProfileManager {
       .iter()
       .any(|p| p.name.to_lowercase() == name.to_lowercase())
     {
-      return Err(format!("Profile with name '{name}' already exists").into());
+      return Err(
+        serde_json::json!({ "code": "PROFILE_NAME_EXISTS", "params": { "name": name } })
+          .to_string()
+          .into(),
+      );
     }
 
     // Generate a new UUID for this profile
     let profile_id = uuid::Uuid::new_v4();
+    let started = std::time::Instant::now();
+    let mut fingerprint_source = if browser == "wayfern" {
+      "provided"
+    } else {
+      "none"
+    };
     let profiles_dir = self.get_profiles_dir();
     let profile_uuid_dir = profiles_dir.join(profile_id.to_string());
     let profile_data_dir = profile_uuid_dir.join("profile");
@@ -284,10 +433,7 @@ impl ProfileManager {
 
     // For Wayfern profiles, generate fingerprint during creation
     let final_wayfern_config = if browser == "wayfern" {
-      let mut config = wayfern_config.unwrap_or_else(|| {
-        log::info!("Creating default Wayfern config for profile: {name}");
-        crate::wayfern_manager::WayfernConfig::default()
-      });
+      let mut config = wayfern_config.unwrap_or_default();
 
       // Always ensure executable_path is set to the user's binary location
       // Pass upstream proxy information to config for fingerprint generation
@@ -313,12 +459,6 @@ impl ProfileManager {
             )
           };
           config.proxy = Some(proxy_url);
-          log::info!(
-            "Using upstream proxy for Wayfern fingerprint generation: {}://{}:{}",
-            proxy_settings.proxy_type.to_lowercase(),
-            proxy_settings.host,
-            proxy_settings.port
-          );
         }
       }
 
@@ -327,18 +467,34 @@ impl ProfileManager {
       // behavior; for generated ones this comes from the geolocation lookup.
       let mut geolocation_applied = true;
 
-      // Generate fingerprint if not already provided
-      if config.fingerprint.is_none() {
-        log::info!("Generating fingerprint for Wayfern profile: {name}");
+      // A caller-supplied device is a set of explicit field choices, not a
+      let supplied_device = if crate::wayfern_manager::supports_wayfern_152(version) {
+        config
+          .fingerprint
+          .take()
+          .and_then(|json| crate::wayfern_manager::WayfernManager::fingerprint_object(&json))
+      } else {
+        None
+      };
 
-        // Create a temporary profile for fingerprint generation
+      // Generate a device if the profile has neither a legacy payload nor an
+      // identity.
+      if config.fingerprint.is_none() && config.identity_id.is_none() {
+        // A stand-in for fingerprint generation. It carries the new profile's
+        // id so the generation's log lines name the profile being created.
         let temp_profile = BrowserProfile {
-          id: uuid::Uuid::new_v4(),
+          id: profile_id,
           name: name.to_string(),
           browser: browser.to_string(),
           version: version.to_string(),
           proxy_id: proxy_id.clone(),
-          vpn_id: None,
+          // Carried, not None. Fingerprint generation reads this to decide
+          // whether the profile routes its traffic at all; hardcoding None made
+          // a VPN profile look direct, so its geolocation probe went out from
+          // the user's real address and that location was baked into the
+          // fingerprint, which the launch-time gate then rejects as a mismatch
+          // the profile should never have had.
+          vpn_id: vpn_id.clone(),
           launch_hook: launch_hook.clone(),
           process_id: None,
           last_launch: None,
@@ -353,11 +509,15 @@ impl ProfileManager {
           last_sync: None,
           host_os: None,
           ephemeral: false,
+          temporary: false,
           extension_group_id: None,
           proxy_bypass_rules: Vec::new(),
           created_by_id: None,
           created_by_email: None,
           dns_blocklist: None,
+          dns_server: None,
+          status_id: None,
+          start_urls: Vec::new(),
           password_protected: false,
           clear_on_close: false,
           created_at: None,
@@ -369,19 +529,50 @@ impl ProfileManager {
           .generate_fingerprint_config(app_handle, &temp_profile, &config)
           .await
         {
-          Ok((generated_fingerprint, geo_applied)) => {
-            config.fingerprint = Some(generated_fingerprint);
-            geolocation_applied = geo_applied;
-            log::info!("Successfully generated fingerprint for Wayfern profile: {name}");
+          Ok(generated) => {
+            // An identity-backed profile stores the id and the location and
+            // never the device; a legacy browser stores the whole payload.
+            config.identity_id = generated.identity_id;
+            config.location = generated.location;
+            config.identity_baseline = None;
+            config.fingerprint = if config.identity_id.is_some() {
+              None
+            } else {
+              Some(generated.fingerprint)
+            };
+            geolocation_applied = generated.geolocation_applied;
+            fingerprint_source = "generated";
           }
           Err(e) => {
-            return Err(
-              format!("Failed to generate fingerprint for Wayfern profile '{name}': {e}").into(),
+            // Coded, not wrapped: re-`format!`ing the error here left a string
+            // no layer above could classify, so a refusal answered 400 with no
+            // trace of which rule refused.
+            let coded = crate::wayfern_manager::wayfern_failure(
+              &e.to_string(),
+              "WAYFERN_FINGERPRINT_GENERATION_FAILED",
+              config.os.as_deref(),
             );
+            let _ = std::fs::remove_dir_all(&profile_uuid_dir);
+            log::error!(
+              "Profile creation failed step=fingerprint profile={profile_id} elapsed_ms={} err=\"{coded}\"",
+              started.elapsed().as_millis()
+            );
+            return Err(coded.into());
           }
         }
-      } else {
-        log::info!("Using provided fingerprint for Wayfern profile: {name}");
+      }
+
+      if let Some(object) = supplied_device {
+        let overrides =
+          crate::wayfern_manager::WayfernManager::overrides_from_explicit_fingerprint(&object);
+        if !overrides.is_empty() {
+          config.identity_overrides = serde_json::to_string(&overrides).ok();
+        }
+        // A location the caller named wins over the one resolved for the exit;
+        // whatever it leaves out keeps the resolved value.
+        if let Some(location) = crate::wayfern_manager::WayfernManager::location_of(&object) {
+          config.location = Some(location);
+        }
       }
 
       // Record which proxy/geoip the fingerprint's location data was computed
@@ -403,7 +594,7 @@ impl ProfileManager {
       } else {
         if !matches!(config.geoip.as_ref(), Some(serde_json::Value::Bool(false))) {
           log::warn!(
-            "Geolocation could not be applied for Wayfern profile {name}; leaving geo signature unset so the next launch refreshes location through the profile's proxy"
+            "Geolocation not applied to new fingerprint; next launch refreshes it profile={profile_id}"
           );
         }
         None
@@ -440,6 +631,7 @@ impl ProfileManager {
       last_sync: None,
       host_os: Some(get_host_os()),
       ephemeral,
+      temporary: false,
       // Every new profile gets the built-in extension set (Session Key for
       // Claude) unless the reserved group hasn't been created yet.
       extension_group_id: crate::extension_manager::ExtensionManager::new()
@@ -448,6 +640,9 @@ impl ProfileManager {
       created_by_id: None,
       created_by_email: None,
       dns_blocklist,
+      dns_server,
+      status_id: None,
+      start_urls: Vec::new(),
       password_protected: false,
       clear_on_close: false,
       created_at: Some(
@@ -470,16 +665,47 @@ impl ProfileManager {
       return Err(format!("Failed to create profile file for '{name}'").into());
     }
 
-    log::info!("Profile '{name}' created successfully with ID: {profile_id}");
+    log::info!(
+      "Profile created profile={profile_id} browser={} version={} proxy={} vpn={} group={} ephemeral={ephemeral} fingerprint={fingerprint_source} elapsed_ms={}",
+      crate::log_redaction::Plain(browser),
+      crate::log_redaction::Plain(version),
+      proxy_id.as_deref().unwrap_or("-"),
+      vpn_id.as_deref().unwrap_or("-"),
+      group_id.as_deref().unwrap_or("-"),
+      started.elapsed().as_millis()
+    );
 
     crate::fingerprint_consistency::prewarm_profile_exit(&profile);
 
     // Emit profile creation event
     if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
     }
 
     Ok(profile)
+  }
+
+  pub fn save_profile_unchanged(
+    &self,
+    expected: &BrowserProfile,
+    profile: &BrowserProfile,
+  ) -> Result<bool, Box<dyn std::error::Error>> {
+    let profile_file = self
+      .get_profiles_dir()
+      .join(profile.id.to_string())
+      .join("metadata.json");
+    let json = serde_json::to_string_pretty(profile)?;
+    let _serialized = METADATA_WRITES.lock().unwrap_or_else(|e| e.into_inner());
+    let current = fs::read_to_string(&profile_file)?;
+    if !holds_profile(&current, expected)? {
+      return Ok(false);
+    }
+    atomic_write_locked(&profile_file, json.as_bytes())?;
+    drop(_serialized);
+    let _ = crate::tag_manager::TAG_MANAGER.lock().map(|tm| {
+      let _ = tm.rebuild_from_profiles(&self.list_profiles().unwrap_or_default());
+    });
+    Ok(true)
   }
 
   pub fn save_profile(&self, profile: &BrowserProfile) -> Result<(), Box<dyn std::error::Error>> {
@@ -577,20 +803,14 @@ impl ProfileManager {
           let content = match fs::read_to_string(&metadata_file) {
             Ok(c) => c,
             Err(e) => {
-              log::warn!(
-                "Skipping profile at {}: failed to read metadata.json: {e}",
-                path.display()
-              );
+              warn_skipped_profile(&path, "unreadable", &e);
               continue;
             }
           };
           let mut profile: BrowserProfile = match serde_json::from_str(&content) {
             Ok(p) => p,
             Err(e) => {
-              log::warn!(
-                "Skipping profile at {}: invalid metadata.json: {e}",
-                path.display()
-              );
+              warn_skipped_profile(&path, "invalid", &e);
               continue;
             }
           };
@@ -633,7 +853,8 @@ impl ProfileManager {
     profile_id: &str,
     new_name: &str,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
-    if new_name.trim().is_empty() {
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
       return Err(
         serde_json::json!({ "code": "NAME_CANNOT_BE_EMPTY" })
           .to_string()
@@ -641,13 +862,17 @@ impl ProfileManager {
       );
     }
 
-    // Check if new name already exists (case insensitive)
     let existing_profiles = self.list_profiles()?;
+    let profile_uuid = uuid::Uuid::parse_str(profile_id)?;
     if existing_profiles
       .iter()
-      .any(|p| p.name.to_lowercase() == new_name.to_lowercase())
+      .any(|p| p.id != profile_uuid && p.name.to_lowercase() == new_name.to_lowercase())
     {
-      return Err(format!("Profile with name '{new_name}' already exists").into());
+      return Err(
+        serde_json::json!({"code":"PROFILE_NAME_EXISTS", "params":{"name":new_name}})
+          .to_string()
+          .into(),
+      );
     }
 
     let profile = self.mutate_profile(profile_id, |latest| {
@@ -657,6 +882,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.rename", &["name"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -665,119 +891,353 @@ impl ProfileManager {
     Ok(profile)
   }
 
+  /// Delete a profile the recoverable way: it is moved to the trash and can
+  /// be restored until it expires. Ephemeral profiles have nothing to keep
+  /// and are destroyed outright.
   pub fn delete_profile(
     &self,
     app_handle: &tauri::AppHandle,
     profile_id: &str,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    log::info!("Attempting to delete profile with ID: {profile_id}");
+    self.remove_profile(app_handle, profile_id, false, true)
+  }
 
-    // Find the profile by ID
+  /// Destroy a profile and its data for good, bypassing the trash.
+  /// Mark a freshly created profile as belonging to one automation run.
+  ///
+  /// Set after creation rather than threaded through every creation signature:
+  /// only the REST and MCP paths can ask for it, and both already hold the
+  /// profile they just made. Implies `ephemeral`, because a disposable profile
+  /// must not leave a data directory on real disk either.
+  pub fn mark_profile_temporary(
+    &self,
+    profile_id: &str,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    let mut profile = self.find_profile(profile_id)?;
+    profile.temporary = true;
+    profile.ephemeral = true;
+    self.save_profile(&profile)?;
+    Ok(profile)
+  }
+
+  /// Which temporary profiles a startup sweep should destroy.
+  ///
+  /// A temporary profile is destroyed when its browser stops, so one still
+  /// here at startup either outlived a crash or is being used by a browser
+  /// this app did not start. `is_running` decides between the two, and is a
+  /// parameter so the rule can be tested without a process table.
+  pub fn temporary_profiles_to_sweep(
+    profiles: &[BrowserProfile],
+    is_running: impl Fn(u32) -> bool,
+  ) -> Vec<String> {
+    profiles
+      .iter()
+      .filter(|profile| profile.temporary)
+      .filter(|profile| !profile.process_id.is_some_and(&is_running))
+      .map(|profile| profile.id.to_string())
+      .collect()
+  }
+
+  /// Destroy every temporary profile that no live browser is using.
+  ///
+  /// Runs at startup: a crash, a kill -9 or a power cut leaves a temporary
+  /// profile behind, and nothing else would ever remove it. Returns how many
+  /// were destroyed.
+  pub fn sweep_temporary_profiles(&self, app_handle: &tauri::AppHandle) -> usize {
+    let Ok(profiles) = self.list_profiles() else {
+      return 0;
+    };
+    let stale =
+      Self::temporary_profiles_to_sweep(&profiles, crate::proxy_storage::is_process_running);
+    let mut swept = 0;
+    for profile_id in stale {
+      match self.delete_profile_permanently(app_handle, &profile_id) {
+        Ok(()) => {
+          swept += 1;
+          log::info!("Swept temporary profile left by an earlier run profile={profile_id}");
+        }
+        Err(e) => log::warn!("Temporary profile sweep failed profile={profile_id} err=\"{e}\""),
+      }
+    }
+    swept
+  }
+
+  pub fn delete_profile_permanently(
+    &self,
+    app_handle: &tauri::AppHandle,
+    profile_id: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    self.remove_profile(app_handle, profile_id, true, true)
+  }
+
+  fn find_profile(&self, profile_id: &str) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
     let profile_uuid =
       uuid::Uuid::parse_str(profile_id).map_err(|_| format!("Invalid profile ID: {profile_id}"))?;
-    let profiles = self.list_profiles()?;
-    let profile = profiles
+    self
+      .list_profiles()?
       .into_iter()
       .find(|p| p.id == profile_uuid)
-      .ok_or_else(|| format!("Profile with ID '{profile_id}' not found"))?;
+      .ok_or_else(|| format!("Profile with ID '{profile_id}' not found").into())
+  }
 
-    // Check if browser is running (cross-OS profiles can't be running locally)
-    if profile.process_id.is_some() && !profile.is_cross_os() {
-      return Err(
-        "Cannot delete profile while browser is running. Please stop the browser first.".into(),
-      );
+  /// The one removal path. `permanent` destroys the directory; otherwise it
+  /// moves to the trash. Either way the cloud sees a delete (tombstone) and
+  /// any team lock is released, so a trashed profile is indistinguishable
+  /// from a deleted one for every other device.
+  fn remove_profile(
+    &self,
+    app_handle: &tauri::AppHandle,
+    profile_id: &str,
+    permanent: bool,
+    emit_events: bool,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let started = std::time::Instant::now();
+    let removed = self.find_profile(profile_id).ok();
+    let outcome = self.remove_profile_unlogged(app_handle, profile_id, permanent, emit_events)?;
+    if let Some(profile) = &removed {
+      report_team_edit(profile, "profile.delete", &[]);
+    }
+    log::info!(
+      "Profile deleted profile={profile_id} {outcome} elapsed_ms={}",
+      started.elapsed().as_millis()
+    );
+    Ok(())
+  }
+
+  /// Returns `key=value` facts about what the removal did, for the log line.
+  /// Failures log here: some returned errors carry the profile name.
+  fn remove_profile_unlogged(
+    &self,
+    app_handle: &tauri::AppHandle,
+    profile_id: &str,
+    permanent: bool,
+    emit_events: bool,
+  ) -> Result<String, Box<dyn std::error::Error>> {
+    let profile = self.find_profile(profile_id)?;
+
+    if crate::profile::trash::is_running_locally(&profile) {
+      return Err(crate::backend_error("PROFILE_RUNNING").into());
     }
 
-    // Launch-gate acknowledgements are keyed by profile id and are not synced,
-    // so nothing else would ever clean them up.
-    crate::launch_gate_prefs::forget_profile(profile_id);
+    // An ephemeral profile keeps its data in RAM; there is nothing to trash.
+    // "Delete at once" (a retention of 0 days) turns the trash off: the
+    // profile is erased where it lies and never passes through the trash.
+    let retention_days = crate::profile::trash::retention_days();
+    let permanent = permanent || profile.ephemeral || retention_days == 0;
+    let now = crate::proxy_manager::now_secs();
 
-    // Deleting the profile never touched its ephemeral directory, so a
-    // decrypted or in-memory copy outlived the profile it belonged to with
-    // nothing left that knew to reap it. The running-browser guard above only
-    // rejects a live process_id, and the keep-decrypted path deliberately
-    // clears process_id while leaving the plaintext tree populated. No-ops
-    // when the profile has no ephemeral directory.
-    crate::ephemeral_dirs::remove_ephemeral_dir(profile_id);
+    // A decrypted or in-memory copy must not outlive the profile it belonged
+    // to. The running-browser guard above only rejects a live process, and
+    // the keep-decrypted path deliberately clears process_id while leaving
+    // the plaintext tree populated. No-ops when there is no ephemeral dir.
+    crate::profile::password::discard_copy(&profile.id);
 
-    // Per-domain traffic history lives outside the profile directory, so it
-    // survives the delete otherwise. It is already zero-overwritten on removal.
-    crate::traffic_stats::delete_traffic_stats(profile_id);
-
-    // Remember sync mode before deleting local files
     let was_sync_enabled = profile.is_sync_enabled();
-
     let profiles_dir = self.get_profiles_dir();
     let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
 
-    // Delete the entire UUID directory (contains both metadata.json and profile data)
-    if profile_uuid_dir.exists() {
-      log::info!("Deleting profile directory: {}", profile_uuid_dir.display());
-      fs::remove_dir_all(&profile_uuid_dir)?;
-      log::info!("Profile directory deleted successfully");
+    if permanent {
+      self.forget_profile_side_state(profile_id);
+      if profile_uuid_dir.exists() {
+        crate::fs_secure::secure_remove_dir_all(&profile_uuid_dir, true).inspect_err(|e| {
+          log::error!("Profile erase failed profile={profile_id} err=\"{e}\"");
+        })?;
+      }
+      if profile_uuid_dir.exists() {
+        log::error!("Profile erase incomplete: directory still exists profile={profile_id}");
+        return Err(format!("Failed to completely delete profile '{}'", profile.name).into());
+      }
+    } else {
+      let _guard = crate::profile::trash::mutation_lock();
+      crate::profile::trash::trash_profile(
+        &profiles_dir,
+        &crate::profile::trash::trash_dir(),
+        &profile,
+        now,
+        retention_days,
+      )
+      .inspect_err(|e| log::error!("Profile trash failed profile={profile_id} err=\"{e}\""))?;
     }
 
-    // Verify deletion was successful
-    if profile_uuid_dir.exists() {
-      return Err(format!("Failed to completely delete profile '{}'", profile.name).into());
-    }
-
-    log::info!(
-      "Profile '{}' (ID: {}) deleted successfully",
-      profile.name,
-      profile_id
+    let outcome = format!(
+      "mode={} ephemeral={} sync_delete={}",
+      if permanent { "erased" } else { "trashed" },
+      profile.ephemeral,
+      if was_sync_enabled { "queued" } else { "none" }
     );
 
-    // If sync was enabled, also delete from S3
+    // The browser is not running, so the team lock is normally released
+    // already; this only drops a lock a crash left behind.
+    let lock_profile = profile.clone();
+    tauri::async_runtime::spawn(async move {
+      crate::team_lock::release_team_lock_if_needed(&lock_profile).await;
+    });
+
+    // From the cloud's point of view a trashed profile is deleted. The delete
+    // stays owed until it lands, so one that cannot reach the server is
+    // retried when sync next starts instead of the profile downloading back.
     if was_sync_enabled {
+      crate::sync::pending_deletes::record(profile_id, now);
       let profile_id_owned = profile_id.to_string();
       let app_handle_clone = app_handle.clone();
-      tauri::async_runtime::spawn(async move {
+      let task = tauri::async_runtime::spawn(async move {
         match crate::sync::SyncEngine::create_from_settings(&app_handle_clone).await {
           Ok(engine) => {
             if let Err(e) = engine.delete_profile(&profile_id_owned).await {
               log::warn!(
-                "Failed to delete profile {} from sync: {}",
-                profile_id_owned,
-                e
+                "Remote profile delete failed; retried when sync next starts profile={profile_id_owned} err=\"{e}\""
               );
             } else {
-              log::info!("Profile {} deleted from S3 sync storage", profile_id_owned);
+              crate::sync::pending_deletes::forget(&profile_id_owned);
+              log::info!("Remote profile deleted profile={profile_id_owned}");
             }
           }
           Err(e) => {
-            log::debug!("Sync not configured, skipping remote deletion: {}", e);
+            log::debug!(
+              "Remote profile delete skipped: sync not configured profile={profile_id_owned} err=\"{e}\""
+            );
           }
         }
       });
+      crate::sync::pending_deletes::track(profile_id, task);
     }
 
+    if emit_events {
+      self.after_profiles_removed(!permanent);
+    }
+    Ok(outcome)
+  }
+
+  fn forget_profile_side_state(&self, profile_id: &str) {
+    crate::launch_gate_prefs::forget_profile(profile_id);
+    crate::traffic_stats::delete_traffic_stats(profile_id);
+    crate::profile_totp::forget_profile(profile_id);
+  }
+
+  fn after_profiles_removed(&self, trashed: bool) {
     self.rebuild_tag_suggestions();
-
-    // Always perform cleanup after profile deletion to remove unused binaries
     if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
-      log::warn!("Warning: Failed to cleanup unused binaries after profile deletion: {e}");
+      log::warn!("Unused binary cleanup after profile delete failed err=\"{e}\"");
     }
 
-    // Emit profile deletion event
     if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    if trashed {
+      if let Err(e) = events::emit_empty("trash-changed") {
+        log::warn!("Event emit failed event=trash-changed err=\"{e}\"");
+      }
+    }
+  }
+
+  /// Move a trashed profile back into the live list under its original id.
+  ///
+  /// The profile comes back with sync off, next to the sync mode it had. The
+  /// caller (the Tauri command) turns sync back on once the tombstone the
+  /// delete wrote is gone from the cloud.
+  pub fn restore_trashed_profile(
+    &self,
+    profile_id: &str,
+  ) -> Result<(BrowserProfile, SyncMode), Box<dyn std::error::Error>> {
+    let _guard = crate::profile::trash::mutation_lock();
+    let live = self.list_profiles()?;
+    let groups: std::collections::HashSet<String> = crate::group_manager::GROUP_MANAGER
+      .lock()
+      .map(|gm| {
+        gm.get_all_groups()
+          .unwrap_or_default()
+          .into_iter()
+          .map(|g| g.id)
+          .collect()
+      })
+      .unwrap_or_default();
+
+    let (profile, sync_mode) = crate::profile::trash::restore_profile(
+      &self.get_profiles_dir(),
+      &crate::profile::trash::trash_dir(),
+      profile_id,
+      &live,
+      &|group_id| groups.contains(group_id),
+      crate::proxy_manager::now_secs(),
+    )?;
+    // The normal save path, so tag suggestions pick the profile up again.
+    self.save_profile(&profile)?;
+    if sync_mode != SyncMode::Disabled {
+      crate::team_activity::record("profile.restore", profile_id, Some(&profile.name), None);
     }
 
+    log::info!("Profile restored from trash profile={profile_id}");
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    if let Err(e) = events::emit_empty("trash-changed") {
+      log::warn!("Event emit failed event=trash-changed err=\"{e}\"");
+    }
+    Ok((profile, sync_mode))
+  }
+
+  pub fn purge_trashed_profile(&self, profile_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = crate::profile::trash::mutation_lock();
+    crate::profile::trash::purge_entry(&crate::profile::trash::trash_dir(), profile_id)?;
+    self.after_trash_purged(std::slice::from_ref(&profile_id.to_string()));
     Ok(())
+  }
+
+  /// Destroy every trashed profile. Returns how many were removed.
+  pub fn empty_trash(&self) -> Result<usize, Box<dyn std::error::Error>> {
+    let _guard = crate::profile::trash::mutation_lock();
+    let purged = crate::profile::trash::purge_all(&crate::profile::trash::trash_dir())?;
+    self.after_trash_purged(&purged);
+    Ok(purged.len())
+  }
+
+  /// Destroy every trashed profile whose retention has run out. Returns how
+  /// many were removed.
+  pub fn purge_expired_trash(&self) -> usize {
+    let _guard = crate::profile::trash::mutation_lock();
+    let purged = crate::profile::trash::purge_expired(
+      &crate::profile::trash::trash_dir(),
+      crate::proxy_manager::now_secs(),
+      crate::profile::trash::retention_days(),
+    );
+    self.after_trash_purged(&purged);
+    purged.len()
+  }
+
+  fn after_trash_purged(&self, purged_ids: &[String]) {
+    if purged_ids.is_empty() {
+      return;
+    }
+    for id in purged_ids {
+      self.forget_profile_side_state(id);
+    }
+    if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
+      log::warn!("Unused binary cleanup after trash purge failed err=\"{e}\"");
+    }
+    if let Err(e) = events::emit_empty("trash-changed") {
+      log::warn!("Event emit failed event=trash-changed err=\"{e}\"");
+    }
   }
 
   /// Delete a profile from the local filesystem only, without triggering remote sync deletion.
   /// Used when a profile was deleted on another device and the local copy should be cleaned up.
+  /// The copy is erased the same way a local permanent delete erases it.
   pub fn delete_profile_local_only(
     &self,
     profile_id: &str,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    match uuid::Uuid::parse_str(profile_id) {
+      Ok(uuid) => crate::profile::password::discard_copy(&uuid),
+      Err(_) => {
+        crate::ephemeral_dirs::remove_ephemeral_dir(profile_id);
+      }
+    }
+    self.forget_profile_side_state(profile_id);
     let profiles_dir = self.get_profiles_dir();
     let profile_dir = profiles_dir.join(profile_id);
     if profile_dir.exists() {
-      fs::remove_dir_all(&profile_dir)?;
-      log::info!("Deleted local profile {} (tombstoned remotely)", profile_id);
+      crate::fs_secure::secure_remove_dir_all(&profile_dir, true)?;
+      log::info!("Profile erased: deleted on another device profile={profile_id}");
     }
 
     self.rebuild_tag_suggestions();
@@ -785,7 +1245,7 @@ impl ProfileManager {
     if let Err(e) = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance()
       .cleanup_unused_binaries()
     {
-      log::warn!("Failed to cleanup binaries after tombstone deletion: {e}");
+      log::warn!("Unused binary cleanup after remote delete failed err=\"{e}\"");
     }
 
     let _ = crate::events::emit_empty("profiles-changed");
@@ -833,6 +1293,18 @@ impl ProfileManager {
       }
       latest.version = version.to_string();
       latest.release_type = "stable".to_string();
+      if !crate::wayfern_manager::supports_identity_api(version) {
+        if let Some(config) = latest
+          .wayfern_config
+          .as_mut()
+          .filter(|config| config.identity_id.is_some())
+        {
+          config.identity_id = None;
+          config.identity_baseline = None;
+          config.fingerprint = None;
+          config.geo_proxy_signature = None;
+        }
+      }
       Ok(())
     })?;
 
@@ -863,6 +1335,7 @@ impl ProfileManager {
       })?;
 
       crate::sync::queue_profile_sync_if_eligible(&profile);
+      report_team_edit(&profile, "profile.update", &["group"]);
 
       // Auto-enable sync for new group if profile has sync enabled
       if profile.is_sync_enabled() {
@@ -880,7 +1353,7 @@ impl ProfileManager {
 
     // Emit profile group assignment event
     if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
     }
 
     Ok(())
@@ -893,7 +1366,7 @@ impl ProfileManager {
     tags: Vec<String>,
   ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
     let mut seen = std::collections::HashSet::new();
-    let mut deduped: Vec<String> = Vec::with_capacity(tags.len());
+    let mut deduped: Vec<String> = Vec::new();
     for t in tags.into_iter() {
       if seen.insert(t.clone()) {
         deduped.push(t);
@@ -906,6 +1379,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["tags"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -928,6 +1402,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["note"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -952,6 +1427,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["clear_on_close"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -998,9 +1474,10 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["launch_hook"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
+      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
     }
 
     Ok(profile)
@@ -1019,6 +1496,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["proxy_bypass_rules"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -1039,6 +1517,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["dns_blocklist"]);
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -1047,76 +1526,207 @@ impl ProfileManager {
     Ok(profile)
   }
 
+  /// Takes effect at the next launch: a running browser keeps the worker it
+  /// started with.
+  pub fn update_profile_dns_server(
+    &self,
+    profile_id: &str,
+    dns_server: Option<String>,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    let dns_server = crate::profile_dns::normalize_dns_server(dns_server)?;
+    let mut profile = self.find_profile(profile_id)?;
+    if profile.dns_server == dns_server {
+      return Ok(profile);
+    }
+
+    profile.dns_server = dns_server;
+    profile.updated_at = Some(crate::proxy_manager::now_secs());
+
+    self.save_profile(&profile)?;
+
+    crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["dns_server"]);
+
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+
+    Ok(profile)
+  }
+
+  /// Takes effect at the next launch, like every launch setting.
+  pub fn update_profile_start_urls(
+    &self,
+    profile_id: &str,
+    start_urls: Vec<String>,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    let start_urls = checked_start_urls(start_urls)?;
+    let mut profile = self.find_profile(profile_id)?;
+    if profile.start_urls == start_urls {
+      return Ok(profile);
+    }
+    profile.start_urls = start_urls;
+    profile.updated_at = Some(crate::proxy_manager::now_secs());
+    self.save_profile(&profile)?;
+    crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["start_urls"]);
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    Ok(profile)
+  }
+
+  /// Change many profiles at once. Every value is checked and every profile
+  /// found before any of them changes, and a running profile refuses the
+  /// whole batch: its browser would keep the old settings and the next save
+  /// from the running session could undo the edit. Returns how many changed.
+  pub fn apply_patch(
+    &self,
+    profile_ids: &[String],
+    patch: super::patch::ProfilePatch,
+  ) -> Result<usize, Box<dyn std::error::Error>> {
+    let patch = patch.validated()?;
+    let mut profiles = Vec::with_capacity(profile_ids.len());
+    for profile_id in profile_ids {
+      let profile = self.find_profile(profile_id)?;
+      if crate::profile::trash::is_running_locally(&profile) {
+        return Err(crate::backend_error("PROFILE_RUNNING").into());
+      }
+      profiles.push(profile);
+    }
+
+    let mut changed = 0;
+    let mut any_synced = false;
+    for mut profile in profiles {
+      if !patch.apply_to(&mut profile) {
+        continue;
+      }
+      profile.updated_at = Some(crate::proxy_manager::now_secs());
+      self.save_profile(&profile)?;
+      crate::sync::queue_profile_sync_if_eligible(&profile);
+      report_team_edit(&profile, "profile.bulk_update", &[]);
+      any_synced |= profile.is_sync_enabled();
+      changed += 1;
+    }
+
+    if any_synced {
+      Self::sync_patched_groups(&patch);
+    }
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    log::info!(
+      "Profiles edited in bulk selected={} changed={changed}",
+      profile_ids.len()
+    );
+    Ok(changed)
+  }
+
+  /// A synced profile needs the groups a patch points it at in the cloud too.
+  fn sync_patched_groups(patch: &super::patch::ProfilePatch) {
+    let (group_id, extension_group_id) = patch.group_ids();
+    if let Some(group_id) = group_id.map(str::to_string) {
+      tauri::async_runtime::spawn(async move {
+        let _ = crate::sync::enable_group_sync_if_needed(&group_id).await;
+        if let Some(scheduler) = crate::sync::get_global_scheduler() {
+          scheduler.queue_group_sync(group_id).await;
+        }
+      });
+    }
+    if let Some(group_id) = extension_group_id.map(str::to_string) {
+      tauri::async_runtime::spawn(async move {
+        let _ = crate::sync::enable_extension_group_sync_if_needed(&group_id).await;
+        if let Some(scheduler) = crate::sync::get_global_scheduler() {
+          scheduler.queue_extension_group_sync(group_id).await;
+        }
+      });
+    }
+  }
+
+  /// Set what profile creation takes no value for on a profile just made
+  /// from a template.
+  pub fn finish_new_profile(
+    &self,
+    mut profile: BrowserProfile,
+    patch: &super::patch::ProfilePatch,
+  ) -> Result<BrowserProfile, Box<dyn std::error::Error>> {
+    if !patch.apply_to(&mut profile) {
+      return Ok(profile);
+    }
+    profile.updated_at = Some(crate::proxy_manager::now_secs());
+    self.save_profile(&profile)?;
+    crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.create", &[]);
+    if profile.is_sync_enabled() {
+      Self::sync_patched_groups(patch);
+    }
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    Ok(profile)
+  }
+
+  /// Give the listed profiles one status, or none. A running profile can
+  /// take a status: it is a label, not a launch setting.
+  pub fn set_profiles_status(
+    &self,
+    profile_ids: &[String],
+    status_id: Option<String>,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut changed = Vec::new();
+    for profile_id in profile_ids {
+      let profile = self.find_profile(profile_id)?;
+      if profile.status_id != status_id {
+        changed.push(profile);
+      }
+    }
+    for mut profile in changed {
+      profile.status_id = status_id.clone();
+      profile.updated_at = Some(crate::proxy_manager::now_secs());
+      self.save_profile(&profile)?;
+      crate::sync::queue_profile_sync_if_eligible(&profile);
+      report_team_edit(&profile, "profile.update", &["status"]);
+    }
+    if let Err(e) = events::emit_empty("profiles-changed") {
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
+    }
+    Ok(())
+  }
+
+  /// Take a deleted status off every profile that pointed at it.
+  pub fn clear_status_references(&self, status_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let ids: Vec<String> = self
+      .list_profiles()?
+      .into_iter()
+      .filter(|p| p.status_id.as_deref() == Some(status_id))
+      .map(|p| p.id.to_string())
+      .collect();
+    if ids.is_empty() {
+      return Ok(());
+    }
+    self.set_profiles_status(&ids, None)
+  }
+
+  /// Trash several profiles at once. Every profile is checked before any of
+  /// them moves, so one running browser blocks the whole batch instead of
+  /// leaving it half done.
   pub fn delete_multiple_profiles(
     &self,
     app_handle: &tauri::AppHandle,
     profile_ids: Vec<String>,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let profiles = self.list_profiles()?;
-    let mut sync_enabled_ids: Vec<String> = Vec::new();
-
-    for profile_id in profile_ids {
-      let profile_uuid = uuid::Uuid::parse_str(&profile_id)
-        .map_err(|_| format!("Invalid profile ID: {profile_id}"))?;
-      let profile = profiles
-        .iter()
-        .find(|p| p.id == profile_uuid)
-        .ok_or_else(|| format!("Profile with ID '{profile_id}' not found"))?;
-
-      // Check if browser is running (cross-OS profiles can't be running locally)
-      if profile.process_id.is_some() && !profile.is_cross_os() {
-        return Err(
-          format!(
-            "Cannot delete profile '{}' while browser is running. Please stop the browser first.",
-            profile.name
-          )
-          .into(),
-        );
-      }
-
-      // Track sync-enabled profiles for remote deletion
-      if profile.is_sync_enabled() {
-        sync_enabled_ids.push(profile_id.clone());
-      }
-
-      crate::launch_gate_prefs::forget_profile(&profile_id);
-      crate::ephemeral_dirs::remove_ephemeral_dir(&profile_id);
-      crate::traffic_stats::delete_traffic_stats(&profile_id);
-
-      // Delete the profile
-      let profiles_dir = self.get_profiles_dir();
-      let profile_uuid_dir = profiles_dir.join(profile.id.to_string());
-
-      if profile_uuid_dir.exists() {
-        std::fs::remove_dir_all(&profile_uuid_dir)?;
+    for profile_id in &profile_ids {
+      let profile = self.find_profile(profile_id)?;
+      if crate::profile::trash::is_running_locally(&profile) {
+        return Err(crate::backend_error("PROFILE_RUNNING").into());
       }
     }
 
-    self.rebuild_tag_suggestions();
-
-    if let Err(e) = DownloadedBrowsersRegistry::instance().cleanup_unused_binaries() {
-      log::warn!("Warning: Failed to cleanup unused binaries after bulk profile deletion: {e}");
+    for profile_id in &profile_ids {
+      self.remove_profile(app_handle, profile_id, false, false)?;
     }
 
-    // Delete sync-enabled profiles from S3
-    if !sync_enabled_ids.is_empty() {
-      let app_handle_clone = app_handle.clone();
-      tauri::async_runtime::spawn(async move {
-        if let Ok(engine) = crate::sync::SyncEngine::create_from_settings(&app_handle_clone).await {
-          for profile_id in sync_enabled_ids {
-            if let Err(e) = engine.delete_profile(&profile_id).await {
-              log::warn!("Failed to delete profile {} from sync: {}", profile_id, e);
-            }
-          }
-        }
-      });
-    }
-
-    // Emit profile deletion event
-    if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
-    }
-
+    self.after_profiles_removed(true);
     Ok(())
   }
 
@@ -1160,6 +1770,7 @@ impl ProfileManager {
     }
 
     let new_id = uuid::Uuid::new_v4();
+    let source_native_os = source.native_os();
     let clone_name = match custom_name {
       Some(name) if !name.trim().is_empty() => name.trim().to_string(),
       _ => self.generate_clone_name(&source.name)?,
@@ -1170,7 +1781,13 @@ impl ProfileManager {
     let dest_dir = profiles_dir.join(new_id.to_string());
 
     if source_dir.exists() {
-      crate::profile_importer::ProfileImporter::copy_directory_recursive(&source_dir, &dest_dir)?;
+      if let Err(error) =
+        crate::profile_importer::ProfileImporter::copy_directory_recursive(&source_dir, &dest_dir)
+      {
+        // A half-copied folder would otherwise stay behind with no profile.
+        let _ = fs::remove_dir_all(&dest_dir);
+        return Err(error);
+      }
     } else {
       fs::create_dir_all(&dest_dir)?;
     }
@@ -1200,11 +1817,15 @@ impl ProfileManager {
       last_sync: None,
       host_os: Some(get_host_os()),
       ephemeral: false,
+      temporary: false,
       extension_group_id: source.extension_group_id,
       proxy_bypass_rules: source.proxy_bypass_rules,
       created_by_id: None,
       created_by_email: None,
       dns_blocklist: source.dns_blocklist,
+      dns_server: source.dns_server,
+      status_id: source.status_id,
+      start_urls: source.start_urls,
       password_protected: false,
       clear_on_close: false,
       created_at: Some(
@@ -1216,7 +1837,7 @@ impl ProfileManager {
       updated_at: Some(crate::proxy_manager::now_secs()),
     };
 
-    // Donut: a clone must NOT be linkable to its source. The source
+    // A clone must NOT be linkable to its source. The source
     // wayfern_config embeds the persisted fingerprint JSON (including the
     // canvas_noise_seed), so copying it verbatim makes the clone emit
     // BYTE-IDENTICAL canvas/WebGL/audio readback hashes and identical device
@@ -1229,6 +1850,12 @@ impl ProfileManager {
     // isolation between a clone and its source.
     if let Some(cfg) = new_profile.wayfern_config.as_mut() {
       cfg.fingerprint = None;
+      // The identity is a stronger link than the payload: the same UUID rebuilds
+      // the SAME device on any version, so a clone that kept it would stay
+      // byte-identical to its source forever, not just until the next upgrade.
+      cfg.identity_id = None;
+      cfg.identity_baseline = None;
+      keep_source_claim(cfg, source_native_os);
     }
 
     self.save_profile(&new_profile)?;
@@ -1237,7 +1864,7 @@ impl ProfileManager {
     crate::sync::queue_profile_sync_if_eligible(&new_profile);
 
     if let Err(e) = events::emit_empty("profiles-changed") {
-      log::warn!("Warning: Failed to emit profiles-changed event: {e}");
+      log::warn!("Event emit failed event=profiles-changed err=\"{e}\"");
     }
 
     Ok(new_profile)
@@ -1247,11 +1874,11 @@ impl ProfileManager {
     &self,
     app_handle: tauri::AppHandle,
     profile_id: &str,
-    config: WayfernConfig,
+    mut config: WayfernConfig,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let profile_uuid = uuid::Uuid::parse_str(profile_id).map_err(
       |_| -> Box<dyn std::error::Error + Send + Sync> {
-        format!("Invalid profile ID: {profile_id}").into()
+        crate::backend_error("INVALID_PROFILE_ID").into()
       },
     )?;
     let profile = self
@@ -1260,7 +1887,7 @@ impl ProfileManager {
       .into_iter()
       .find(|p| p.id == profile_uuid)
       .ok_or_else(|| -> Box<dyn std::error::Error + Send + Sync> {
-        format!("Profile with ID '{profile_id}' not found").into()
+        crate::backend_error("PROFILE_NOT_FOUND").into()
       })?;
 
     // Check if the browser is currently running using the comprehensive status check
@@ -1269,11 +1896,10 @@ impl ProfileManager {
       .await?;
 
     if is_running {
-      return Err(
-        "Cannot update Wayfern configuration while browser is running. Please stop the browser first.".into(),
-      );
+      return Err(crate::backend_error("PROFILE_RUNNING").into());
     }
 
+    config.launch_args = config.checked_launch_args().await?;
     let profile = self
       .mutate_profile(profile_id, move |latest| {
         if latest.process_id.is_some() {
@@ -1282,21 +1908,23 @@ impl ProfileManager {
               .to_string(),
           );
         }
+        let config = merge_submitted_wayfern_config(latest.wayfern_config.as_ref(), config);
+        if serde_json::to_value(&latest.wayfern_config).map_err(|e| e.to_string())?
+          != serde_json::to_value(&config).map_err(|e| e.to_string())?
+        {
+          latest.updated_at = Some(crate::proxy_manager::now_secs());
+        }
         latest.wayfern_config = Some(config);
-        latest.updated_at = Some(crate::proxy_manager::now_secs());
         Ok(())
       })
       .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-        format!("Failed to save profile: {e}").into()
+        crate::backend_error_with_detail("INTERNAL_ERROR", e).into()
       })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["fingerprint"]);
 
-    log::info!(
-      "Wayfern configuration updated for profile '{}' (ID: {}).",
-      profile.name,
-      profile_id
-    );
+    log::info!("Wayfern config updated profile={profile_id}");
 
     if let Err(e) = events::emit("profile-updated", &profile) {
       log::warn!("Warning: Failed to emit profile update event: {e}");
@@ -1323,11 +1951,12 @@ impl ProfileManager {
       })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["proxy"]);
 
     // The cookie bot refuses a run on a profile with no exit node, using the
     // copy of that fact the desktop last declared. Detaching a proxy has to
-    // move that copy, or tonight's run egresses from the leased host's own
-    // datacenter address.
+    // move that copy, or tonight's run egresses from the remote host's own
+    // address instead of the user's exit.
     crate::cookie_bot::report_profile_state(&profile);
     crate::fingerprint_consistency::prewarm_profile_exit(&profile);
 
@@ -1343,7 +1972,7 @@ impl ProfileManager {
 
     // Emit profile update event so frontend UIs can refresh immediately (e.g. proxy manager)
     if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
+      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
     }
 
     Ok(profile)
@@ -1367,6 +1996,7 @@ impl ProfileManager {
       })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["vpn"]);
 
     // Same reason as the proxy path: a VPN is the profile's exit node too, and
     // the server only knows what this machine last told it.
@@ -1383,7 +2013,7 @@ impl ProfileManager {
     }
 
     if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Warning: Failed to emit profile update event: {e}");
+      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
     }
 
     Ok(profile)
@@ -1401,6 +2031,7 @@ impl ProfileManager {
     })?;
 
     crate::sync::queue_profile_sync_if_eligible(&profile);
+    report_team_edit(&profile, "profile.update", &["extension_group"]);
 
     // Auto-enable sync for the new extension group if profile has sync
     // enabled. The helper is sync internally; we fire-and-forget through
@@ -1417,7 +2048,7 @@ impl ProfileManager {
     }
 
     if let Err(e) = events::emit("profile-updated", &profile) {
-      log::warn!("Failed to emit profile update event: {e}");
+      log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
     }
 
     Ok(profile)
@@ -1497,11 +2128,6 @@ impl ProfileManager {
             // Found a matching process
             found_pid = Some(pid.as_u32());
             is_running = true;
-            log::info!(
-              "Found browser process with PID: {} for profile: {}",
-              pid.as_u32(),
-              profile.name
-            );
             break;
           }
         }
@@ -1571,7 +2197,7 @@ impl ProfileManager {
 
       // Emit profile update event to frontend
       if let Err(e) = events::emit("profile-updated", &merged) {
-        log::warn!("Warning: Failed to emit profile update event: {e}");
+        log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
       }
     }
 
@@ -1638,13 +2264,16 @@ impl ProfileManager {
 
             // Emit profile update event to frontend
             if let Err(e) = events::emit("profile-updated", &latest) {
-              log::warn!("Warning: Failed to emit profile update event: {e}");
+              log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
             }
 
             log::info!(
-              "Wayfern process has started for profile '{}' with PID: {:?}",
-              profile.name,
-              wayfern_process.processId
+              "Browser pid recorded profile={} pid={} old_pid={}",
+              latest.id,
+              wayfern_process
+                .processId
+                .map_or_else(|| "-".to_string(), |p| p.to_string()),
+              old_pid.map_or_else(|| "-".to_string(), |p| p.to_string())
             );
           }
         }
@@ -1692,9 +2321,10 @@ impl ProfileManager {
             {
               latest = updated;
             }
+            crate::wayfern_identity_storage::request_conversion_pass();
 
             if let Err(e) = events::emit("profile-updated", &latest) {
-              log::warn!("Warning: Failed to emit profile update event: {e}");
+              log::warn!("Event emit failed event=profile-updated err=\"{e}\"");
             }
           }
         }
@@ -1711,6 +2341,109 @@ mod tests {
   use std::sync::{Arc, Barrier, Mutex};
   use tempfile::TempDir;
 
+  const VIEW: &str = r#"{"platform":"Win32","hardwareConcurrency":8,"timezone":"Europe/Berlin"}"#;
+  const EDITED_VIEW: &str =
+    r#"{"platform":"Win32","hardwareConcurrency":16,"timezone":"Europe/Berlin"}"#;
+
+  fn stored_view() -> WayfernConfig {
+    WayfernConfig {
+      identity_id: Some("id-1".to_string()),
+      fingerprint: Some(VIEW.to_string()),
+      identity_baseline: Some(VIEW.to_string()),
+      ..Default::default()
+    }
+  }
+
+  #[test]
+  fn a_submitted_config_keeps_a_stored_identity_view() {
+    let stored = stored_view();
+    let submitted = WayfernConfig {
+      fingerprint: Some(VIEW.to_string()),
+      identity_overrides: Some(r#"{"doNotTrack":"1"}"#.to_string()),
+      ..Default::default()
+    };
+    let merged = merge_submitted_wayfern_config(Some(&stored), submitted);
+    assert_eq!(merged.identity_id.as_deref(), Some("id-1"));
+    assert_eq!(merged.fingerprint.as_deref(), Some(VIEW));
+    assert_eq!(merged.identity_baseline.as_deref(), Some(VIEW));
+    assert_eq!(
+      merged.identity_overrides.as_deref(),
+      Some(r#"{"doNotTrack":"1"}"#)
+    );
+
+    let edited = WayfernConfig {
+      fingerprint: Some(EDITED_VIEW.to_string()),
+      ..Default::default()
+    };
+    let merged = merge_submitted_wayfern_config(Some(&stored), edited);
+    assert_eq!(merged.fingerprint.as_deref(), Some(EDITED_VIEW));
+    assert_eq!(merged.identity_baseline.as_deref(), Some(VIEW));
+    assert!(merged.identity_overrides.is_none());
+  }
+
+  #[test]
+  fn a_submitted_fingerprint_for_a_plain_identity_becomes_overrides() {
+    let stored = WayfernConfig {
+      identity_id: Some("id-1".to_string()),
+      location: Some(r#"{"timezone":"Europe/Berlin"}"#.to_string()),
+      ..Default::default()
+    };
+    let submitted = WayfernConfig {
+      fingerprint: Some(EDITED_VIEW.to_string()),
+      ..Default::default()
+    };
+    let merged = merge_submitted_wayfern_config(Some(&stored), submitted);
+    assert_eq!(merged.identity_id.as_deref(), Some("id-1"));
+    assert!(merged.fingerprint.is_none());
+    assert!(merged.identity_baseline.is_none());
+    let overrides =
+      crate::wayfern_manager::WayfernManager::stored_object(merged.identity_overrides.as_deref());
+    assert_eq!(
+      overrides.get("hardwareConcurrency"),
+      Some(&serde_json::json!(16))
+    );
+    assert!(overrides.get("timezone").is_none());
+    assert_eq!(
+      merged.location.as_deref(),
+      Some(r#"{"timezone":"Europe/Berlin"}"#)
+    );
+  }
+
+  #[test]
+  fn a_submitted_payload_without_a_stored_identity_stays_a_payload() {
+    let stored = WayfernConfig {
+      fingerprint: Some(VIEW.to_string()),
+      ..Default::default()
+    };
+    let submitted = WayfernConfig {
+      fingerprint: Some(EDITED_VIEW.to_string()),
+      identity_baseline: Some(VIEW.to_string()),
+      ..Default::default()
+    };
+    let merged = merge_submitted_wayfern_config(Some(&stored), submitted);
+    assert!(merged.identity_id.is_none());
+    assert_eq!(merged.fingerprint.as_deref(), Some(EDITED_VIEW));
+    assert!(merged.identity_baseline.is_none());
+  }
+
+  #[test]
+  fn a_file_an_older_version_wrote_holds_the_profile_it_reads_as() {
+    // No `temporary` and none of the newer Wayfern fields, as v0.30 wrote it.
+    let legacy = r#"{
+      "id": "7b0f7c9e-3f55-4c1b-9d7e-0f2f1f0c5a11",
+      "name": "Old",
+      "browser": "wayfern",
+      "version": "152.0.7977.64",
+      "wayfern_config": { "fingerprint": "{}", "os": "macos", "identity_id": null }
+    }"#;
+    let expected: BrowserProfile = serde_json::from_str(legacy).unwrap();
+    assert!(holds_profile(legacy, &expected).unwrap());
+
+    let mut changed = expected.clone();
+    changed.wayfern_config.as_mut().unwrap().identity_id = Some("id-1".to_string());
+    assert!(!holds_profile(legacy, &changed).unwrap());
+  }
+
   fn create_test_profile_manager() -> (&'static ProfileManager, TempDir) {
     let temp_dir = TempDir::new().unwrap();
 
@@ -1721,6 +2454,76 @@ mod tests {
 
     let profile_manager = ProfileManager::instance();
     (profile_manager, temp_dir)
+  }
+
+  #[test]
+  fn a_clone_keeps_the_os_its_source_claimed() {
+    let host = get_host_os();
+    let other = if host == "windows" {
+      "macos"
+    } else {
+      "windows"
+    };
+
+    let mut from_elsewhere = WayfernConfig::default();
+    keep_source_claim(&mut from_elsewhere, other.to_string());
+    assert_eq!(from_elsewhere.os.as_deref(), Some(other));
+
+    let mut from_here = WayfernConfig::default();
+    keep_source_claim(&mut from_here, host.clone());
+    assert_eq!(
+      from_here.os, None,
+      "a clone made where its source was made is unchanged"
+    );
+
+    let mut explicit = WayfernConfig {
+      os: Some("android".to_string()),
+      ..WayfernConfig::default()
+    };
+    keep_source_claim(&mut explicit, other.to_string());
+    assert_eq!(explicit.os.as_deref(), Some("android"));
+  }
+
+  fn temporary_profile(name: &str, process_id: Option<u32>) -> BrowserProfile {
+    BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: name.to_string(),
+      browser: "wayfern".to_string(),
+      temporary: true,
+      ephemeral: true,
+      process_id,
+      ..BrowserProfile::default()
+    }
+  }
+
+  #[test]
+  fn a_startup_sweep_takes_the_temporary_profiles_nothing_is_running() {
+    let ordinary = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      name: "Kept".to_string(),
+      ..BrowserProfile::default()
+    };
+    let crashed = temporary_profile("Crashed", Some(4242));
+    let never_started = temporary_profile("Never started", None);
+    let live = temporary_profile("Live", Some(4243));
+    let profiles = vec![
+      ordinary.clone(),
+      crashed.clone(),
+      never_started.clone(),
+      live.clone(),
+    ];
+
+    let swept = ProfileManager::temporary_profiles_to_sweep(&profiles, |pid| pid == 4243);
+    assert_eq!(
+      swept,
+      vec![crashed.id.to_string(), never_started.id.to_string()],
+      "a live browser keeps its profile; an ordinary profile is never swept"
+    );
+
+    // Nothing running at all: every temporary profile goes, and only those.
+    let swept = ProfileManager::temporary_profiles_to_sweep(&profiles, |_| false);
+    assert_eq!(swept.len(), 3);
+    assert!(!swept.contains(&ordinary.id.to_string()));
   }
 
   #[test]
@@ -2024,6 +2827,26 @@ mod tests {
   }
 
   #[test]
+  fn empty_network_ids_normalize_to_none() {
+    assert_eq!(normalize_network_id(Some(String::new())), None);
+    assert_eq!(normalize_network_id(None), None);
+    assert_eq!(
+      normalize_network_id(Some("proxy-1".to_string())),
+      Some("proxy-1".to_string())
+    );
+
+    // A client saying "neither" with two empty strings must not trip the
+    // mutual-exclusion check in create_profile_with_group.
+    assert_eq!(
+      (
+        normalize_network_id(Some(String::new())),
+        normalize_network_id(Some(String::new()))
+      ),
+      (None, None)
+    );
+  }
+
+  #[test]
   fn test_normalize_launch_hook_accepts_http_and_https() {
     let http =
       ProfileManager::normalize_launch_hook(Some(" http://localhost:3000/hook ".to_string()))
@@ -2084,6 +2907,72 @@ mod tests {
     let result_none = super::validate_launch_hook(None).unwrap();
     assert!(result_none.is_none());
   }
+
+  #[test]
+  fn start_pages_are_tidied_and_limited_to_web_pages() {
+    assert_eq!(
+      super::checked_start_urls(vec![
+        " https://mail.example/inbox ".to_string(),
+        "".to_string(),
+        "shop.example".to_string(),
+      ])
+      .unwrap(),
+      ["https://mail.example/inbox", "https://shop.example/"]
+    );
+    for bad in [
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "chrome://settings",
+      "https://",
+      "a b.example",
+    ] {
+      let err = super::checked_start_urls(vec![bad.to_string()]).unwrap_err();
+      assert!(err.contains("START_URL_INVALID"), "{bad}: {err}");
+    }
+    let many = (0..21).map(|i| format!("https://{i}.example/")).collect();
+    assert!(super::checked_start_urls(many)
+      .unwrap_err()
+      .contains("START_URLS_TOO_MANY"));
+  }
+}
+
+const MAX_START_URLS: usize = 20;
+const MAX_START_URL_CHARS: usize = 2000;
+
+/// The start pages to store: trimmed, blanks dropped, a bare host given
+/// `https://`, and only http(s) pages, which is all a launch may open.
+pub fn checked_start_urls(urls: Vec<String>) -> Result<Vec<String>, String> {
+  let urls: Vec<String> = urls
+    .into_iter()
+    .map(|url| url.trim().to_string())
+    .filter(|url| !url.is_empty())
+    .collect();
+  if urls.len() > MAX_START_URLS {
+    return Err(crate::backend_error("START_URLS_TOO_MANY"));
+  }
+  urls
+    .into_iter()
+    .map(|raw| {
+      let candidate = if raw.contains("://") {
+        raw.clone()
+      } else {
+        format!("https://{raw}")
+      };
+      match url::Url::parse(&candidate) {
+        Ok(url)
+          if matches!(url.scheme(), "http" | "https")
+            && url.host_str().is_some()
+            && candidate.chars().count() <= MAX_START_URL_CHARS
+            && !candidate.chars().any(char::is_whitespace) =>
+        {
+          Ok(url.to_string())
+        }
+        _ => Err(
+          serde_json::json!({ "code": "START_URL_INVALID", "params": { "url": raw } }).to_string(),
+        ),
+      }
+    })
+    .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2100,6 +2989,7 @@ pub async fn create_browser_profile_with_group(
   group_id: Option<String>,
   ephemeral: bool,
   dns_blocklist: Option<String>,
+  dns_server: Option<String>,
   launch_hook: Option<String>,
 ) -> Result<BrowserProfile, String> {
   let profile_manager = ProfileManager::instance();
@@ -2116,6 +3006,7 @@ pub async fn create_browser_profile_with_group(
       group_id,
       ephemeral,
       dns_blocklist,
+      dns_server,
       launch_hook,
     )
     .await
@@ -2260,6 +3151,36 @@ pub fn update_profile_dns_blocklist(
 }
 
 #[tauri::command]
+pub fn bulk_update_profiles(
+  profile_ids: Vec<String>,
+  patch: super::patch::ProfilePatch,
+) -> Result<usize, String> {
+  ProfileManager::instance()
+    .apply_patch(&profile_ids, patch)
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to edit profiles"))
+}
+
+#[tauri::command]
+pub fn update_profile_start_urls(
+  profile_id: String,
+  start_urls: Vec<String>,
+) -> Result<BrowserProfile, String> {
+  ProfileManager::instance()
+    .update_profile_start_urls(&profile_id, start_urls)
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to update start pages"))
+}
+
+#[tauri::command]
+pub fn update_profile_dns_server(
+  profile_id: String,
+  dns_server: Option<String>,
+) -> Result<BrowserProfile, String> {
+  ProfileManager::instance()
+    .update_profile_dns_server(&profile_id, dns_server)
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to update DNS server"))
+}
+
+#[tauri::command]
 pub async fn check_browser_status(
   app_handle: tauri::AppHandle,
   profile: BrowserProfile,
@@ -2296,24 +3217,19 @@ pub async fn create_browser_profile_new(
   group_id: Option<String>,
   ephemeral: Option<bool>,
   dns_blocklist: Option<String>,
+  dns_server: Option<String>,
   launch_hook: Option<String>,
+  start_urls: Option<Vec<String>>,
 ) -> Result<BrowserProfile, String> {
-  let fingerprint_os = wayfern_config.as_ref().and_then(|c| c.os.as_deref());
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(fingerprint_os)
-    .await
-  {
-    return Err(serde_json::json!({ "code": "FINGERPRINT_REQUIRES_PRO" }).to_string());
-  }
-
+  // Checked before anything is created, so a bad page leaves nothing behind.
+  let start_urls = start_urls.map(checked_start_urls).transpose()?;
   // A dead/unreachable proxy or VPN (or a 402 from an expired proxy
   // subscription) cancels creation with a translatable error.
   crate::validate_profile_network(proxy_id.as_deref(), vpn_id.as_deref()).await?;
 
   let browser_type =
     BrowserType::from_str(&browser_str).map_err(|e| format!("Invalid browser type: {e}"))?;
-  create_browser_profile_with_group(
+  let profile = create_browser_profile_with_group(
     app_handle,
     name,
     browser_type.as_str().to_string(),
@@ -2325,9 +3241,16 @@ pub async fn create_browser_profile_new(
     group_id,
     ephemeral.unwrap_or(false),
     dns_blocklist,
+    dns_server,
     launch_hook,
   )
-  .await
+  .await?;
+  match start_urls.filter(|urls| !urls.is_empty()) {
+    Some(urls) => ProfileManager::instance()
+      .update_profile_start_urls(&profile.id.to_string(), urls)
+      .map_err(|e| crate::wrap_backend_error(e, "Failed to save start pages")),
+    None => Ok(profile),
+  }
 }
 
 #[tauri::command]
@@ -2336,26 +3259,11 @@ pub async fn update_wayfern_config(
   profile_id: String,
   config: WayfernConfig,
 ) -> Result<(), String> {
-  if config.fingerprint.is_some()
-    && !crate::cloud_auth::CLOUD_AUTH
-      .can_use_cross_os_fingerprints()
-      .await
-  {
-    return Err(serde_json::json!({ "code": "FINGERPRINT_REQUIRES_PRO" }).to_string());
-  }
-
-  if !crate::cloud_auth::CLOUD_AUTH
-    .is_fingerprint_os_allowed(config.os.as_deref())
-    .await
-  {
-    return Err(serde_json::json!({ "code": "FINGERPRINT_REQUIRES_PRO" }).to_string());
-  }
-
   let profile_manager = ProfileManager::instance();
   profile_manager
     .update_wayfern_config(app_handle, &profile_id, config)
     .await
-    .map_err(|e| format!("Failed to update Wayfern config: {e}"))
+    .map_err(|e| crate::wrap_backend_error(e, "Failed to update Wayfern config"))
 }
 
 #[tauri::command]
@@ -2365,13 +3273,34 @@ pub fn clone_profile(profile_id: String, name: Option<String>) -> Result<Browser
     .map_err(|e| format!("Failed to clone profile: {e}"))
 }
 
+/// Move a profile to the trash. `permanent: true` destroys it instead.
+///
+/// Async so the erase, which overwrites every file, runs off the main thread.
 #[tauri::command]
-pub fn delete_profile(app_handle: tauri::AppHandle, profile_id: String) -> Result<(), String> {
-  ProfileManager::instance()
-    .delete_profile(&app_handle, &profile_id)
-    .map_err(|e| format!("Failed to delete profile: {e}"))
+pub async fn delete_profile(
+  app_handle: tauri::AppHandle,
+  profile_id: String,
+  permanent: Option<bool>,
+) -> Result<(), String> {
+  tauri::async_runtime::spawn_blocking(move || {
+    let manager = ProfileManager::instance();
+    let result = if permanent.unwrap_or(false) {
+      manager.delete_profile_permanently(&app_handle, &profile_id)
+    } else {
+      manager.delete_profile(&app_handle, &profile_id)
+    };
+    result.map_err(|e| {
+      let msg = e.to_string();
+      if msg.starts_with('{') {
+        msg
+      } else {
+        format!("Failed to delete profile: {msg}")
+      }
+    })
+  })
+  .await
+  .map_err(|e| format!("Failed to delete profile: {e}"))?
 }
 
-lazy_static::lazy_static! {
-  static ref PROFILE_MANAGER: ProfileManager = ProfileManager::new();
-}
+static PROFILE_MANAGER: std::sync::LazyLock<ProfileManager> =
+  std::sync::LazyLock::new(ProfileManager::new);

@@ -1,22 +1,19 @@
 "use client";
 
+import { type RowSelectionState } from "@tanstack/react-table";
 import {
-  type ColumnDef,
-  flexRender,
+  type LegacyColumnDef as ColumnDef,
   getCoreRowModel,
   getSortedRowModel,
-  type RowSelectionState,
-  type SortingState,
-  useReactTable,
-} from "@tanstack/react-table";
+  useLegacyTable as useReactTable,
+} from "@tanstack/react-table/legacy";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { GoPlus } from "react-icons/go";
 import {
-  LuChevronDown,
-  LuChevronUp,
+  LuBookmark,
   LuFolder,
   LuPencil,
   LuRefreshCw,
@@ -31,8 +28,15 @@ import {
 import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialog";
 import { DeleteGroupDialog } from "@/components/delete-group-dialog";
 import { EditGroupDialog } from "@/components/edit-group-dialog";
+import { GroupBookmarksDialog } from "@/components/group-bookmarks-dialog";
+import {
+  configureEntityColumns,
+  ManagedDataTable,
+  useEntityTableTools,
+} from "@/components/managed-data-table";
+import { ProfileUsageButton } from "@/components/profile-usage-button";
+import { SortableColumnHeader } from "@/components/table-controls";
 import { AnimatedSwitch } from "@/components/ui/animated-switch";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
@@ -43,23 +47,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { FadingScrollArea } from "@/components/ui/fading-scroll-area";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import {
   Tooltip,
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { useProfileReferences } from "@/hooks/use-profile-references";
 import { parseBackendError, translateBackendError } from "@/lib/backend-errors";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
-import { cn } from "@/lib/utils";
 import type { GroupWithCount, ProfileGroup } from "@/types";
 import { RippleButton } from "./ui/ripple";
 
@@ -127,6 +122,8 @@ export function GroupManagementDialog({
   subPage,
 }: GroupManagementDialogProps) {
   const { t } = useTranslation();
+  const { profiles: referencedProfiles, failed: referencesFailed } =
+    useProfileReferences(isOpen);
   const [groups, setGroups] = useState<GroupWithCount[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -135,6 +132,7 @@ export function GroupManagementDialog({
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [bookmarksDialogOpen, setBookmarksDialogOpen] = useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [isBulkDeleting, setIsBulkDeleting] = useState(false);
   const [selectedGroup, setSelectedGroup] = useState<GroupWithCount | null>(
@@ -152,9 +150,6 @@ export function GroupManagementDialog({
   );
 
   // Table state
-  const [sorting, setSorting] = useState<SortingState>([
-    { id: "name", desc: false },
-  ]);
   const [rowSelection, setRowSelection] = useState<RowSelectionState>({});
 
   // Listen for group sync status events
@@ -247,6 +242,11 @@ export function GroupManagementDialog({
     setDeleteDialogOpen(true);
   }, []);
 
+  const handleEditBookmarks = useCallback((group: GroupWithCount) => {
+    setSelectedGroup(group);
+    setBookmarksDialogOpen(true);
+  }, []);
+
   const handleToggleSync = useCallback(
     async (group: GroupWithCount) => {
       setIsTogglingSync((prev) => ({ ...prev, [group.id]: true }));
@@ -322,20 +322,10 @@ export function GroupManagementDialog({
         enableSorting: true,
         sortingFn: "alphanumeric",
         header: ({ column }) => (
-          <Button
-            variant="ghost"
-            onClick={() => {
-              column.toggleSorting(column.getIsSorted() === "asc");
-            }}
-            className="h-auto cursor-pointer justify-start p-0 text-left font-semibold"
-          >
-            {t("common.labels.name")}
-            {column.getIsSorted() === "asc" ? (
-              <LuChevronUp className="ml-2 size-4" />
-            ) : column.getIsSorted() === "desc" ? (
-              <LuChevronDown className="ml-2 size-4" />
-            ) : null}
-          </Button>
+          <SortableColumnHeader
+            column={column}
+            label={t("common.labels.name")}
+          />
         ),
         cell: ({ row }) => {
           const group = row.original;
@@ -371,7 +361,17 @@ export function GroupManagementDialog({
         enableSorting: false,
         header: () => t("groupManagement.profilesCol"),
         cell: ({ row }) => (
-          <Badge variant="secondary">{row.original.count}</Badge>
+          <ProfileUsageButton
+            label={t("appFeedback.assignedProfiles", {
+              name: row.original.name,
+            })}
+            failed={referencesFailed}
+            profiles={
+              referencedProfiles?.filter(
+                (profile) => profile.group_id === row.original.id,
+              ) ?? null
+            }
+          />
         ),
       },
       {
@@ -410,13 +410,37 @@ export function GroupManagementDialog({
       },
       {
         id: "actions",
-        size: 96,
+        size: 132,
         enableSorting: false,
         header: () => t("common.labels.actions"),
         cell: ({ row }) => {
           const group = row.original;
           return (
             <div className="flex gap-1">
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    data-testid="group-bookmarks-button"
+                    aria-label={t("groupBookmarks.editTooltip", {
+                      n: group.bookmark_count ?? 0,
+                    })}
+                    onClick={() => {
+                      handleEditBookmarks(group);
+                    }}
+                  >
+                    <LuBookmark className="size-4" />
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>
+                    {t("groupBookmarks.editTooltip", {
+                      n: group.bookmark_count ?? 0,
+                    })}
+                  </p>
+                </TooltipContent>
+              </Tooltip>
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button
@@ -456,6 +480,8 @@ export function GroupManagementDialog({
     ],
     [
       t,
+      referencedProfiles,
+      referencesFailed,
       groupSyncStatus,
       groupSyncErrors,
       groupInUse,
@@ -463,14 +489,23 @@ export function GroupManagementDialog({
       handleToggleSync,
       handleEditGroup,
       handleDeleteGroup,
+      handleEditBookmarks,
     ],
   );
 
+  const tableTools = useEntityTableTools("groups", groups, setRowSelection);
   const table = useReactTable({
-    data: groups,
-    columns,
-    state: { sorting, rowSelection },
-    onSortingChange: setSorting,
+    data: tableTools.filters.rows,
+    columns: useMemo(() => configureEntityColumns(columns), [columns]),
+    state: {
+      sorting: tableTools.view.preferences.sorting,
+      rowSelection,
+      columnVisibility: tableTools.visibility,
+      columnSizing: tableTools.view.preferences.sizing,
+    },
+    onSortingChange: tableTools.view.setSorting,
+    onColumnSizingChange: tableTools.view.setSizing,
+    columnResizeMode: "onChange",
     onRowSelectionChange: setRowSelection,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
@@ -603,89 +638,12 @@ export function GroupManagementDialog({
             )}
 
             {/* Groups list */}
-            {isLoading ? (
-              <div className="mt-4 text-sm text-muted-foreground">
-                {t("common.buttons.loading")}
-              </div>
-            ) : groups.length === 0 ? (
-              <div className="mt-4 text-sm text-muted-foreground">
-                {t("groups.noGroupsDescription")}
-              </div>
-            ) : (
-              <FadingScrollArea
-                className={cn(
-                  "mt-4 min-h-0 flex-1",
-                  selectedGroupsForBulk.length > 0 && "pb-16",
-                )}
-                style={
-                  {
-                    "--scroll-fade-top-offset": "32px",
-                  } as React.CSSProperties
-                }
-              >
-                <Table
-                  className="w-full table-fixed"
-                  containerClassName="overflow-visible"
-                >
-                  <TableHeader className="sticky top-0 z-10 bg-background [&_tr]:border-0">
-                    {table.getHeaderGroups().map((headerGroup) => (
-                      <TableRow key={headerGroup.id} className="border-0!">
-                        {headerGroup.headers.map((header) => (
-                          <TableHead
-                            key={header.id}
-                            style={{
-                              width:
-                                header.column.id === "name"
-                                  ? undefined
-                                  : `${header.column.getSize()}px`,
-                            }}
-                            className={cn(
-                              header.column.id === "name" && "max-w-0",
-                            )}
-                          >
-                            {header.isPlaceholder
-                              ? null
-                              : flexRender(
-                                  header.column.columnDef.header,
-                                  header.getContext(),
-                                )}
-                          </TableHead>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableHeader>
-                  <TableBody>
-                    {table.getRowModel().rows.map((row) => (
-                      <TableRow
-                        key={row.id}
-                        data-state={row.getIsSelected() && "selected"}
-                        className="border-0! hover:bg-muted"
-                      >
-                        {row.getVisibleCells().map((cell) => (
-                          <TableCell
-                            key={cell.id}
-                            style={{
-                              width:
-                                cell.column.id === "name"
-                                  ? undefined
-                                  : `${cell.column.getSize()}px`,
-                            }}
-                            className={cn(
-                              cell.column.id === "name" && "max-w-0",
-                            )}
-                          >
-                            {flexRender(
-                              cell.column.columnDef.cell,
-                              cell.getContext(),
-                            )}
-                          </TableCell>
-                        ))}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </FadingScrollArea>
-            )}
+            <ManagedDataTable
+              table={table}
+              tools={tableTools}
+              loading={isLoading}
+              emptyText={t("groups.noGroupsDescription")}
+            />
           </div>
 
           {!subPage && (
@@ -706,16 +664,14 @@ export function GroupManagementDialog({
             onClick={() => {
               void handleBulkToggleSync();
             }}
-            size="icon"
           >
             <LuRefreshCw />
           </DataTableActionBarAction>
           <DataTableActionBarAction
             tooltip={t("common.buttons.delete")}
             onClick={() => setBulkDeleteOpen(true)}
-            size="icon"
             variant="destructive"
-            className="border-destructive bg-destructive hover:bg-destructive"
+            className="bg-destructive/12 text-destructive-text hover:bg-destructive/20"
           >
             <LuTrash2 />
           </DataTableActionBarAction>
@@ -752,6 +708,19 @@ export function GroupManagementDialog({
         }}
         group={selectedGroup}
         onGroupUpdated={handleGroupUpdated}
+      />
+
+      <GroupBookmarksDialog
+        isOpen={bookmarksDialogOpen}
+        onClose={() => {
+          setBookmarksDialogOpen(false);
+        }}
+        groupId={selectedGroup?.id ?? null}
+        groupName={selectedGroup?.name ?? ""}
+        onBookmarksSaved={() => {
+          void loadGroups();
+          onGroupManagementComplete();
+        }}
       />
 
       <DeleteGroupDialog

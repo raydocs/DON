@@ -77,9 +77,7 @@ impl VpnStorage {
     };
     let encryption_key = if key_path.exists() {
       if let Ok(key_data) = fs::read(&key_path) {
-        if key_data.len() == 32 {
-          let mut key = [0u8; 32];
-          key.copy_from_slice(&key_data);
+        if let Ok(key) = <[u8; 32]>::try_from(key_data.as_slice()) {
           key
         } else {
           let key: [u8; 32] = rand::rng().random();
@@ -333,6 +331,25 @@ impl VpnStorage {
     }
   }
 
+  /// Refuse a config that declares more peers than a tunnel can carry.
+  ///
+  /// A stored config is re-parsed at connect time into a single-peer tunnel, so
+  /// a file with several `[Peer]` blocks silently routes through whichever peer
+  /// is listed last and surfaces only as an opaque handshake timeout. Every way
+  /// a config gets in (manual create, file import, sync download) refuses one;
+  /// configs already on disk keep connecting exactly as before.
+  pub fn ensure_single_peer(vpn_type: VpnType, content: &str) -> Result<(), VpnError> {
+    let peers = match vpn_type {
+      VpnType::WireGuard => super::config::wireguard_peer_count(content),
+    };
+    if peers > 1 {
+      return Err(VpnError::InvalidWireGuard(format!(
+        "Config declares {peers} [Peer] sections; exactly one peer is supported"
+      )));
+    }
+    Ok(())
+  }
+
   /// Create a VPN config manually from validated data
   pub fn create_config_manual(
     &self,
@@ -345,6 +362,7 @@ impl VpnStorage {
         super::parse_wireguard_config(config_data)?;
       }
     }
+    Self::ensure_single_peer(vpn_type, config_data)?;
 
     let id = Uuid::new_v4().to_string();
     let sync_enabled = crate::sync::is_sync_configured();
@@ -407,6 +425,7 @@ impl VpnStorage {
         super::parse_wireguard_config(content)?;
       }
     }
+    Self::ensure_single_peer(vpn_type, content)?;
 
     let id = Uuid::new_v4().to_string();
     let display_name = name.unwrap_or_else(|| {
@@ -547,5 +566,42 @@ mod tests {
     let (storage, _temp) = create_test_storage();
     let result = storage.load_config("nonexistent");
     assert!(result.is_err());
+  }
+
+  #[test]
+  fn test_ensure_single_peer() {
+    let single = "[Interface]\nPrivateKey = k\n\n[Peer]\nPublicKey = p\n";
+    let multi = "[Interface]\nPrivateKey = k\n\n[Peer]\nPublicKey = p\n\n[Peer]\nPublicKey = q\n";
+
+    assert!(VpnStorage::ensure_single_peer(VpnType::WireGuard, single).is_ok());
+    // A listing hands out an empty config body; it declares no peer to reject.
+    assert!(VpnStorage::ensure_single_peer(VpnType::WireGuard, "").is_ok());
+
+    let err = VpnStorage::ensure_single_peer(VpnType::WireGuard, multi).unwrap_err();
+    assert!(err.to_string().contains("[Peer]"));
+  }
+
+  #[test]
+  fn test_import_config_rejects_multi_peer() {
+    let (storage, _temp) = create_test_storage();
+    let content = concat!(
+      "[Interface]\n",
+      "PrivateKey = YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWE=\n",
+      "Address = 10.0.0.2/24\n",
+      "\n",
+      "[Peer]\n",
+      "PublicKey = YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI=\n",
+      "Endpoint = a.example.com:51820\n",
+      "\n",
+      "[Peer]\n",
+      "PublicKey = Y2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2M=\n",
+      "Endpoint = b.example.com:51820\n",
+    );
+
+    // Every field parses; the file is refused only because a tunnel built from
+    // it would silently use the second peer.
+    assert!(crate::vpn::parse_wireguard_config(content).is_ok());
+    let imported = storage.import_config(content, "two-peers.conf", None);
+    assert!(imported.is_err());
   }
 }

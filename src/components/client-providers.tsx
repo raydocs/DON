@@ -1,5 +1,6 @@
 "use client";
 
+import { invoke } from "@tauri-apps/api/core";
 import { MotionConfig } from "motion/react";
 import { useEffect } from "react";
 import { I18nProvider } from "@/components/i18n-provider";
@@ -8,11 +9,21 @@ import { CustomThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { WindowDragArea } from "@/components/window-drag-area";
+import { InputModalityProvider } from "@/hooks/use-input-modality";
+import { LaunchActivityProvider } from "@/hooks/use-launch-activity";
 import { setupLogging } from "@/lib/logger";
+import { installUiSounds, setUiSoundsEnabled } from "@/lib/ui-sounds";
 
 export function ClientProviders({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     void setupLogging();
+  }, []);
+
+  useEffect(() => {
+    void invoke<{ ui_sounds?: boolean }>("get_app_settings")
+      .then((settings) => setUiSoundsEnabled(settings.ui_sounds ?? true))
+      .catch(() => {});
+    return installUiSounds();
   }, []);
 
   return (
@@ -23,11 +34,15 @@ export function ClientProviders({ children }: { children: React.ReactNode }) {
             cross-fades are kept. The CSS-side media query in globals.css only
             covers CSS transitions — this covers the JS-driven ones. */}
         <MotionConfig reducedMotion="user">
-          <WindowDragArea />
-          <TooltipProvider>
-            <OnboardingProvider>{children}</OnboardingProvider>
-          </TooltipProvider>
-          <Toaster />
+          <InputModalityProvider>
+            <WindowDragArea />
+            <TooltipProvider>
+              <LaunchActivityProvider>
+                <OnboardingProvider>{children}</OnboardingProvider>
+              </LaunchActivityProvider>
+            </TooltipProvider>
+            <Toaster />
+          </InputModalityProvider>
         </MotionConfig>
       </CustomThemeProvider>
     </I18nProvider>

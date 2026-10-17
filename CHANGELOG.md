@@ -63,6 +63,305 @@ First public push of **DON**, the AGPL fork of donutbrowser (upstream v0.28.2). 
 
 ## Upstream changes incorporated through v0.29.5
 
+## v0.34.0 (2026-10-15)
+
+### Features
+
+- own sync server
+- agent takeover, batches
+- IndexedDB transfer
+- restore points
+- group access, notices
+- faster MCP browsing
+- team roles and log
+- scheduled recipes
+- SDK for new routes
+- Local Storage transfer
+- leaner MCP and clients
+- interface sounds
+- profile templates
+- bulk edit profiles
+- 2FA codes per profile
+- profile start pages
+- proxy change-IP link
+- profile statuses
+- per-profile DNS server
+- cross-OS profile sync
+
+### Bug Fixes
+
+- rpm duplicate sidecar
+- stream tar.xz extraction
+- zero cookies before run
+- update rustls
+- read identity devices
+- clippy as_chunks lint
+- drop serde_yaml
+- keep camera file set
+- drop refused overrides
+- bundle fonts
+- keep timer throttling
+- cache CLDR, steady tests
+- clone keeps source OS
+- read any os_crypt format
+
+### Refactoring
+
+- cleanup
+- cleanup
+- proxy lifecycle management
+
+### Performance
+
+- end clicks without load
+
+### Documentation
+
+- drop macOS Intel
+
+### Maintenance
+
+- chore: version bump
+- test: isolate sync password
+- test: link e2e on windows
+- test: tauri-wd 0.2.2
+- test: linux sandbox flags
+- ci: drop macOS Intel builds
+- chore: git rm
+- chore: linting
+- chore: log proxy start steps
+- chore: cleanup
+- ci(deps): bump the github-actions group with 6 updates
+- chore: update flake.nix for v0.33.0 [skip ci] (#652)
+
+### Other
+
+- style: soft profile dialog
+- deps(rust)(deps): bump the rust-dependencies group (#656)
+- deps(deps): bump the frontend-dependencies group with 80 updates (#655)
+
+
+## v0.33.0 (2026-10-09)
+
+### Features
+
+- add ability to provide feedback
+
+### Refactoring
+
+- better logs
+
+### Maintenance
+
+- chore: ci
+- chore: version bump
+- chore: update flake.nix for v0.32.0 [skip ci] (#647)
+
+### Other
+
+- style: cleanup
+
+
+## v0.32.0 (2026-10-07)
+
+### Features
+
+- support vmess, trojan, and hysteria2
+
+### Refactoring
+
+- rework wayfern auth
+- cleanup
+- cleanup
+- adapt recipes to remote mcp
+
+### Maintenance
+
+- chore: version bump
+- chore: ci
+- ci(deps): bump anomalyco/opencode/github (#639)
+- chore: update flake.nix for v0.31.3 [skip ci] (#638)
+
+### Other
+
+- style: more consistent style across pages
+- deps(deps): bump the frontend-dependencies group with 8 updates
+- deps(rust)(deps): bump the rust-dependencies group across 1 directory with 57 updates
+- deps(deps): bump the frontend-dependencies group with 9 updates (#640)
+
+
+## v0.31.3 (2026-10-03)
+
+### Features
+
+- flatpak and snap support
+- german translation
+- privacy settings
+
+### Bug Fixes
+
+- flake next build
+- settings bar fade
+- unused static on linux and macos
+- flake build
+- donut-sync test storage
+- windows e2e harness
+- windows path handling
+- first browser download stuck at 0%
+- windows default browser detection
+
+### Refactoring
+
+- cleanup
+- cleanup
+- use std LazyLock
+
+### Maintenance
+
+- chore: linting
+- chore: linting
+- chore: linting
+- ci(deps): bump the github-actions group with 3 updates
+- chore: linting
+- chore: pnpm self-update
+- ci(deps): bump the github-actions group across 1 directory with 2 updates
+- ci: test flatpak in release runs
+- chore: keep shadowsocks below 1.25
+- ci: attach flatpak and snap to releases
+- ci: hold back breaking majors
+- ci: fix snap smoke test
+- test: fix schedule e2e race
+- ci: fix linux packages cache
+- chore: sync e2e lockfile
+- chore: fix node deprecation warning
+- chore: cleanup
+- ci: cleanup
+- chore: update dependencies
+- test: cleanup
+- chore: update flake.nix for v0.31.2 [skip ci] (#623)
+
+### Other
+
+- deps(deps): bump the frontend-dependencies group with 67 updates (#635)
+- deps(rust)(deps): bump the rust-dependencies group (#630)
+
+
+## v0.31.2 (2026-09-23)
+
+### Bug Fixes
+
+- prevent lock of old profiles
+- cache empty team scope
+- explain device refusal over mcp
+
+### Documentation
+
+- update CHANGELOG.md and README.md for v0.31.1 [skip ci] (#616)
+
+### Maintenance
+
+- chore: bump tauri-wd
+- chore: bump tauri-wd
+- chore: update flake.nix for v0.31.1 [skip ci] (#617)
+
+
+## v0.31.1 (2026-09-23)
+
+### Refactoring
+
+- cleanup
+
+### Maintenance
+
+- chore: nixpack version bump
+- chore: update flake.nix for v0.31.0 [skip ci] (#615)
+
+
+## v0.31.0 (2026-09-22)
+
+### Features
+
+- add tips
+
+### Refactoring
+
+- cleanup
+- cleanup
+- cleanup
+- cleanup
+- cleanup
+
+### Maintenance
+
+- chore: version bump
+- chore: ci
+- chore: linting
+- chore: linting
+- chore: update dependencies
+- ci(deps): bump the github-actions group with 6 updates
+- ci(deps): bump the github-actions group with 2 updates (#607)
+- ci(deps): bump the github-actions group with 2 updates (#599)
+- ci(deps): bump anomalyco/opencode/github in the github-actions group (#593)
+- chore: update flake.nix for v0.30.0 [skip ci] (#591)
+
+### Other
+
+- deps(rust)(deps): bump the rust-dependencies group
+- deps(deps): bump the frontend-dependencies group across 1 directory with 150 updates
+- deps(deps): bump next from 16.3.2 to 16.3.3 (#603)
+- deps(rust)(deps): bump the rust-dependencies group (#600)
+
+
+## v0.30.0 (2026-08-27)
+
+### Features
+
+- verify checksum for wayfern
+
+### Refactoring
+
+- cleanup
+- better cookie import experience
+- table style unification
+- confirmation button for profile-regeneration
+
+### Documentation
+
+- update CHANGELOG.md and README.md for v0.29.6 [skip ci] (#575)
+
+### Maintenance
+
+- chore: linting
+- test: better sync coverage
+- chore: update flake.nix for v0.29.6 [skip ci] (#576)
+- ci(deps): bump the github-actions group with 5 updates
+
+### Other
+
+- style: copy
+
+
+## v0.29.6 (2026-08-24)
+
+### Refactoring
+
+- cleanup
+
+### Documentation
+
+- readme
+- switch to svg
+
+### Maintenance
+
+- chore: linting
+- chore: version bump
+- chore: linting
+- test: integration cleanup
+- chore: switch to gitdebt
+- chore: update flake.nix for v0.29.5 [skip ci] (#563)
+
+
 ## v0.29.5 (2026-08-16)
 
 ### Features

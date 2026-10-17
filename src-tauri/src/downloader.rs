@@ -9,6 +9,7 @@ use crate::api_client::ApiClient;
 use crate::browser::{create_browser, BrowserType};
 use crate::browser_version_manager::DownloadInfo;
 use crate::events;
+use crate::log_redaction::Plain;
 
 // Maximum time to wait for the next chunk of a streaming download before treating
 // the connection as stalled. Converts an indefinite hang into a terminal error so
@@ -20,12 +21,12 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 const DOWNLOAD_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36";
 
 // Global state to track currently downloading browser-version pairs
-lazy_static::lazy_static! {
-  static ref DOWNLOADING_BROWSERS: std::sync::Arc<Mutex<std::collections::HashSet<String>>> =
-    std::sync::Arc::new(Mutex::new(std::collections::HashSet::new()));
-  static ref DOWNLOAD_CANCELLATION_TOKENS: std::sync::Arc<Mutex<std::collections::HashMap<String, CancellationToken>>> =
-    std::sync::Arc::new(Mutex::new(std::collections::HashMap::new()));
-}
+static DOWNLOADING_BROWSERS: std::sync::LazyLock<
+  std::sync::Arc<Mutex<std::collections::HashSet<String>>>,
+> = std::sync::LazyLock::new(|| std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())));
+static DOWNLOAD_CANCELLATION_TOKENS: std::sync::LazyLock<
+  std::sync::Arc<Mutex<std::collections::HashMap<String, CancellationToken>>>,
+> = std::sync::LazyLock::new(|| std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())));
 
 /// Clears a browser-version pair from the in-flight download maps on every
 /// exit path of `download_browser_full`. A leaked key would permanently report
@@ -53,6 +54,26 @@ pub struct DownloadProgress {
   pub speed_bytes_per_sec: f64,
   pub eta_seconds: Option<f64>,
   pub stage: String, // "downloading", "extracting", "verifying"
+  /// Why an "error" stage happened: a coded backend error or plain text.
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub error: Option<String>,
+}
+
+impl DownloadProgress {
+  /// The terminal event for a download that stopped, so the UI can show why.
+  pub fn failed(browser: &str, version: &str, error: Option<String>) -> Self {
+    Self {
+      browser: browser.to_string(),
+      version: version.to_string(),
+      downloaded_bytes: 0,
+      total_bytes: None,
+      percentage: 0.0,
+      speed_bytes_per_sec: 0.0,
+      eta_seconds: None,
+      stage: "error".to_string(),
+      error,
+    }
+  }
 }
 
 pub struct Downloader {
@@ -227,15 +248,9 @@ impl Downloader {
     let file_path = dest_path.join(&download_info.filename);
 
     // Resolve the actual download URL
-    log::info!(
-      "Resolving download URL for {} {}",
-      browser_type.as_str(),
-      version
-    );
     let download_url = self
       .resolve_download_url(browser_type.clone(), version, download_info)
       .await?;
-    log::info!("Download URL resolved");
 
     // Every browser asset is published with a `<asset>.sha256` sidecar. Fetch
     // it before the transfer starts: an asset nobody can verify costs one small
@@ -267,6 +282,7 @@ impl Downloader {
         speed_bytes_per_sec: 0.0,
         eta_seconds: None,
         stage: "verifying".to_string(),
+        error: None,
       },
     );
     verify_archive_checksum(
@@ -309,28 +325,34 @@ impl Downloader {
       Ok(response) if response.status().is_success() => response,
       Ok(response) => {
         log::warn!(
-          "Checksum sidecar request failed for {browser} {version}: HTTP {}",
-          response.status()
+          "Checksum sidecar request failed browser={browser} version={version} status={}",
+          response.status().as_u16()
         );
         return Err(unavailable());
       }
       Err(e) => {
-        log::warn!("Checksum sidecar request failed for {browser} {version}: {e}");
-        return Err(unavailable());
+        log::warn!(
+          "Checksum sidecar request failed browser={browser} version={version} err=\"{}\"",
+          crate::log_redaction::text(&e.to_string())
+        );
+        return Err(crate::system_proxy::explain(&e).map_or_else(unavailable, Into::into));
       }
     };
 
     let sidecar_text = match response.text().await {
       Ok(text) => text,
       Err(e) => {
-        log::warn!("Failed to read the checksum sidecar for {browser} {version}: {e}");
+        log::warn!("Checksum sidecar read failed browser={browser} version={version} err=\"{e}\"");
         return Err(unavailable());
       }
     };
 
     let asset_name = asset_filename_from_url(download_url);
     let Some(expected) = crate::checksum::parse_sidecar_digest(&sidecar_text, asset_name) else {
-      log::warn!("No usable digest for {asset_name} in {sidecar_url}");
+      log::warn!(
+        "Checksum sidecar has no digest for the asset browser={browser} version={version} asset={}",
+        Plain(asset_name)
+      );
       return Err(unavailable());
     };
     Ok(expected)
@@ -375,13 +397,13 @@ impl Downloader {
           request = request.header("Range", format!("bytes={existing_size}-"));
         }
 
-        log::info!("Sending download request (attempt {})...", attempt + 1);
         match request.send().await {
           Ok(resp) => {
-            log::info!(
-              "Download response received: status={}, content-length={:?}",
-              resp.status(),
-              resp.content_length()
+            log::debug!(
+              "Download response status={} content_length={:?} offset={existing_size} attempt={}",
+              resp.status().as_u16(),
+              resp.content_length(),
+              attempt + 1
             );
             if resp.status().as_u16() == 416 && existing_size > 0 {
               // The requested range is past the end of the object. Parse
@@ -399,30 +421,38 @@ impl Downloader {
                 None => true,
               };
               if partial_is_complete {
-                log::info!(
-                  "Archive {} already complete ({} bytes), skipping download",
-                  file_path.display(),
-                  existing_size
-                );
+                log::debug!("Archive already complete bytes={existing_size}");
                 return Ok(file_path);
               }
               let _ = std::fs::remove_file(&file_path);
               existing_size = 0;
-              log::warn!("Download returned 416 with an incomplete partial, restarting from 0");
+              log::debug!("Download range refused for an incomplete partial, restarting from 0");
               continue;
             }
             response = Some(resp);
             break;
           }
           Err(e) => {
+            // Through a system proxy, a second connect failure in a row means
+            // the proxy is the problem. Five more attempts would only keep the
+            // bar at 0% for minutes before saying the same thing.
+            if attempt > 0 {
+              if let Some(proxy_error) = crate::system_proxy::explain(&e) {
+                log::warn!(
+                  "Download request failed through the system proxy attempt={} err=\"{}\"",
+                  attempt + 1,
+                  crate::log_redaction::text(&e.to_string())
+                );
+                return Err(proxy_error.into());
+              }
+            }
             let is_retryable = e.is_connect() || e.is_timeout() || e.is_request();
             if is_retryable && attempt < max_send_retries {
               let delay = 2u64.pow(attempt.min(4));
-              log::warn!(
-                "Download attempt {} failed ({}), retrying in {}s...",
+              log::debug!(
+                "Download request failed attempt={} retry_in_s={delay} err=\"{}\"",
                 attempt + 1,
-                e,
-                delay
+                crate::log_redaction::text(&e.to_string())
               );
               tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
             } else {
@@ -481,11 +511,7 @@ impl Downloader {
       if existing_size > 0 {
         if let Some(total) = total_size {
           if existing_size >= total {
-            log::info!(
-              "Archive {} already complete ({} bytes), skipping download",
-              file_path.display(),
-              existing_size
-            );
+            log::debug!("Archive already complete bytes={existing_size}");
             return Ok(file_path);
           }
         }
@@ -510,6 +536,7 @@ impl Downloader {
           speed_bytes_per_sec: 0.0,
           eta_seconds: None,
           stage: "downloading".to_string(),
+          error: None,
         },
       );
 
@@ -593,6 +620,7 @@ impl Downloader {
               speed_bytes_per_sec: speed,
               eta_seconds: eta,
               stage: "downloading".to_string(),
+              error: None,
             },
           );
           last_update = now;
@@ -621,13 +649,10 @@ impl Downloader {
       }
       stream_restarts += 1;
       let delay = 2u64.pow(stream_restarts.min(4));
-      log::warn!(
-        "{} — resuming from {} bytes (restart {}/{}) in {}s",
-        err,
+      log::debug!(
+        "Download stream broke, resuming offset={} restart={stream_restarts}/{max_stream_restarts} retry_in_s={delay} err=\"{}\"",
         std::fs::metadata(&file_path).map(|m| m.len()).unwrap_or(0),
-        stream_restarts,
-        max_stream_restarts,
-        delay
+        crate::log_redaction::text(&err.to_string())
       );
       tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     }
@@ -677,6 +702,7 @@ impl Downloader {
       }
     }
 
+    let started = std::time::Instant::now();
     // Check if this browser-version pair is already being downloaded
     let download_key = format!("{browser_str}-{version}");
     let cancel_token = {
@@ -705,7 +731,11 @@ impl Downloader {
         return Ok(version);
       } else {
         // Registry says it's downloaded but files don't exist - clean up registry
-        log::info!("Registry indicates {browser_str} {version} is downloaded, but files are missing. Cleaning up registry entry.");
+        log::info!(
+          "Removed stale registry entry browser={} version={}",
+          Plain(&browser_str),
+          Plain(&version)
+        );
         self.registry.remove_browser(&browser_str, &version);
         self
           .registry
@@ -773,24 +803,18 @@ impl Downloader {
         // Emit a terminal stage so the UI stops spinning. A user cancellation maps to
         // "cancelled"; any other failure (network error, stall timeout, bad status)
         // maps to "error" so the frontend can show a concrete error toast.
-        let stage = if cancel_token.is_cancelled() {
-          "cancelled"
+        let failure = contextualize("Failed to download browser", e);
+        let progress = if cancel_token.is_cancelled() {
+          DownloadProgress {
+            stage: "cancelled".to_string(),
+            ..DownloadProgress::failed(&browser_str, &version, None)
+          }
         } else {
-          "error"
-        };
-        let progress = DownloadProgress {
-          browser: browser_str.clone(),
-          version: version.clone(),
-          downloaded_bytes: 0,
-          total_bytes: None,
-          percentage: 0.0,
-          speed_bytes_per_sec: 0.0,
-          eta_seconds: None,
-          stage: stage.to_string(),
+          DownloadProgress::failed(&browser_str, &version, Some(failure.to_string()))
         };
         let _ = events::emit("download-progress", &progress);
 
-        return Err(contextualize("Failed to download browser", e));
+        return Err(failure);
       }
     };
 
@@ -811,11 +835,8 @@ impl Downloader {
           // Do not remove the archive here. We keep it until verification succeeds.
         }
         Err(e) => {
-          log::error!("Extraction failed for {browser_str} {version}: {e}");
-
           // Delete the corrupt/invalid archive so a fresh download happens next time
           if download_path.exists() {
-            log::info!("Deleting corrupt archive: {}", download_path.display());
             let _ = std::fs::remove_file(&download_path);
           }
 
@@ -832,6 +853,7 @@ impl Downloader {
             speed_bytes_per_sec: 0.0,
             eta_seconds: None,
             stage: "error".to_string(),
+            error: None,
           };
           let _ = events::emit("download-progress", &progress);
 
@@ -853,12 +875,11 @@ impl Downloader {
       speed_bytes_per_sec: 0.0,
       eta_seconds: None,
       stage: "verifying".to_string(),
+      error: None,
     };
     let _ = events::emit("download-progress", &progress);
 
     // Verify the browser was downloaded correctly
-    log::info!("Verifying download for browser: {browser_str}, version: {version}");
-
     // Use the browser's own verification method
     if !browser.is_version_downloaded(&version, &binaries_dir) {
       // Provide detailed error information for debugging
@@ -900,6 +921,7 @@ impl Downloader {
         speed_bytes_per_sec: 0.0,
         eta_seconds: None,
         stage: "error".to_string(),
+        error: None,
       };
       let _ = events::emit("download-progress", &progress);
 
@@ -912,7 +934,11 @@ impl Downloader {
         .registry
         .mark_download_completed(&browser_str, &version, browser_dir.clone())
     {
-      log::warn!("Warning: Could not mark {browser_str} {version} as completed in registry: {e}");
+      log::warn!(
+        "Registry update failed browser={} version={} err=\"{e}\"",
+        Plain(&browser_str),
+        Plain(&version)
+      );
     }
     self
       .registry
@@ -924,10 +950,17 @@ impl Downloader {
       let archive_path = browser_dir.join(&download_info.filename);
       if archive_path.exists() {
         if let Err(e) = std::fs::remove_file(&archive_path) {
-          log::warn!("Warning: Could not delete archive file after verification: {e}");
+          log::warn!("Archive delete after install failed err=\"{e}\"");
         }
       }
     }
+
+    log::info!(
+      "Browser installed browser={} version={} elapsed_ms={}",
+      Plain(&browser_str),
+      Plain(&version),
+      started.elapsed().as_millis()
+    );
 
     // Emit completion
     let progress = DownloadProgress {
@@ -939,39 +972,66 @@ impl Downloader {
       speed_bytes_per_sec: 0.0,
       eta_seconds: Some(0.0),
       stage: "completed".to_string(),
+      error: None,
     };
     let _ = events::emit("download-progress", &progress);
 
     // Auto-update non-running profiles to the latest installed version and cleanup unused binaries
     {
       let app_handle_for_update = app_handle.clone();
+      let browser_for_update = browser_str.clone();
+      let version_for_update = version.clone();
       tauri::async_runtime::spawn(async move {
         let auto_updater = crate::auto_updater::AutoUpdater::instance();
-        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+
+        // A profile that is open right now cannot be switched to the new binary
+        // yet, so it only gets a pending update. That entry has to exist before
+        // cleanup runs: cleanup keeps a version only while it is in use or
+        // pending, and would otherwise delete what was just downloaded.
+        match auto_updater
+          .auto_update_profile_versions(
+            &app_handle_for_update,
+            &browser_for_update,
+            &version_for_update,
+          )
+          .await
+        {
           Ok(updated) => {
             if !updated.is_empty() {
               log::info!(
-                "Auto-updated {} profiles to latest installed versions: {:?}",
+                "Profiles moved to installed browser count={} browser={} version={}",
                 updated.len(),
-                updated
+                Plain(&browser_for_update),
+                Plain(&version_for_update)
               );
             }
           }
           Err(e) => {
-            log::error!("Failed to auto-update profile versions: {e}");
+            log::warn!(
+              "Moving profiles to installed browser failed browser={} version={} err=\"{e}\"",
+              Plain(&browser_for_update),
+              Plain(&version_for_update)
+            );
+          }
+        }
+
+        match auto_updater.update_profiles_to_latest_installed(&app_handle_for_update) {
+          Ok(updated) => {
+            if !updated.is_empty() {
+              log::info!(
+                "Profiles moved to the latest installed browser count={}",
+                updated.len()
+              );
+            }
+          }
+          Err(e) => {
+            log::warn!("Moving profiles to the latest installed browser failed err=\"{e}\"");
           }
         }
 
         let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
-        match registry.cleanup_unused_binaries() {
-          Ok(cleaned) => {
-            if !cleaned.is_empty() {
-              log::info!("Cleaned up unused binaries after download: {:?}", cleaned);
-            }
-          }
-          Err(e) => {
-            log::error!("Failed to cleanup unused binaries: {e}");
-          }
+        if let Err(e) = registry.cleanup_unused_binaries() {
+          log::warn!("Unused browser cleanup after install failed err=\"{e}\"");
         }
       });
     }
@@ -1016,11 +1076,13 @@ async fn verify_archive_checksum(
     })??;
 
   if actual.eq_ignore_ascii_case(expected) {
-    log::info!("Checksum verified for {browser} {version}: {actual}");
+    log::debug!("Checksum verified browser={browser} version={version} sha256={actual}");
     return Ok(());
   }
 
-  log::error!("Checksum mismatch for {browser} {version}: expected {expected}, got {actual}");
+  log::warn!(
+    "Checksum mismatch, archive deleted browser={browser} version={version} expected={expected} actual={actual}"
+  );
   let _ = std::fs::remove_file(file_path);
   Err(
     serde_json::json!({
@@ -1091,10 +1153,27 @@ pub async fn download_browser(
   version: String,
 ) -> Result<String, String> {
   let downloader = Downloader::instance();
+  let browser = Plain(&browser_str).to_string();
+  let requested = Plain(&version).to_string();
   downloader
     .download_browser_full(&app_handle, browser_str, version)
     .await
-    .map_err(|e| crate::wrap_backend_error(e, "Failed to download browser"))
+    .map_err(|e| {
+      let err = e.to_string();
+      if err.contains("Download cancelled") {
+        log::info!("Browser download cancelled browser={browser} version={requested}");
+      } else if err.contains("is already being downloaded") {
+        log::info!(
+          "Browser download skipped, already running browser={browser} version={requested}"
+        );
+      } else {
+        log::error!(
+          "Browser download failed browser={browser} version={requested} err=\"{}\"",
+          crate::log_redaction::text(&err)
+        );
+      }
+      crate::wrap_backend_error(e, "Failed to download browser")
+    })
 }
 
 #[tauri::command]
@@ -1114,6 +1193,9 @@ pub async fn cancel_download(browser_str: String, version: String) -> Result<(),
     ))
   }
 }
+
+// Global singleton instance
+static DOWNLOADER: std::sync::LazyLock<Downloader> = std::sync::LazyLock::new(Downloader::new);
 
 #[cfg(test)]
 mod tests {
@@ -1436,9 +1518,4 @@ mod tests {
     clear_download_state_for_browser("wayfern");
     clear_download_state_for_browser("chromium");
   }
-}
-
-// Global singleton instance
-lazy_static::lazy_static! {
-  static ref DOWNLOADER: Downloader = Downloader::new();
 }

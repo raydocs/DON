@@ -78,6 +78,7 @@ impl AutoUpdater {
         .push(profile);
     }
 
+    let mut fetch_failures = Vec::new();
     for (browser, profiles) in browser_profiles {
       // Always fetch fresh versions for update checks — stale cache would miss new releases
       let versions = match self
@@ -87,15 +88,15 @@ impl AutoUpdater {
       {
         Ok(versions) => versions,
         Err(e) => {
-          log::warn!("Failed to fetch versions for {browser}: {e}, trying cache");
           // Fall back to cache if network fails
-          if let Some(cached) = self
+          let cached = self
             .browser_version_manager
-            .get_cached_browser_versions_detailed(&browser)
-          {
-            cached
-          } else {
-            continue;
+            .get_cached_browser_versions_detailed(&browser);
+          let fallback = if cached.is_some() { "cache" } else { "none" };
+          fetch_failures.push(format!("browser={browser} fallback={fallback} {e}"));
+          match cached {
+            Some(cached) => cached,
+            None => continue,
           }
         }
       };
@@ -110,116 +111,112 @@ impl AutoUpdater {
       }
     }
 
+    if fetch_failures.is_empty() {
+      VERSION_FETCH_STREAK.succeeded();
+    } else {
+      VERSION_FETCH_STREAK.failed(fetch_failures.join("; "));
+    }
+
     Ok(notifications)
   }
 
   pub async fn check_for_updates_with_progress(&self, app_handle: &tauri::AppHandle) {
-    log::info!("Starting auto-update check with progress...");
-
     // Browser auto-updates are always enabled — the disable_auto_updates setting
     // only controls app self-updates, not browser version updates.
 
     // Check for browser updates and trigger auto-downloads
+    let started = std::time::Instant::now();
     match self.check_for_updates().await {
       Ok(update_notifications) => {
         // Group by browser+version to avoid duplicate downloads
         let grouped = self.group_update_notifications(update_notifications);
-        if !grouped.is_empty() {
-          log::info!("Found {} browser updates", grouped.len());
+        let summary = grouped
+          .iter()
+          .map(|n| {
+            format!(
+              "{}@{}(profiles={})",
+              n.browser,
+              n.new_version,
+              n.affected_profiles.len()
+            )
+          })
+          .collect::<Vec<_>>()
+          .join(",");
+        let changed = BROWSER_UPDATE_LAST_SUMMARY
+          .lock()
+          .map(|mut last| last.replace(summary.clone()) != Some(summary.clone()))
+          .unwrap_or(true);
+        log::log!(
+          if changed {
+            log::Level::Info
+          } else {
+            log::Level::Debug
+          },
+          "Browser update check updates=[{summary}] elapsed_ms={}",
+          started.elapsed().as_millis()
+        );
+        for notification in grouped {
+          let browser = notification.browser.clone();
+          let new_version = notification.new_version.clone();
+          let app_handle_clone = app_handle.clone();
 
-          for notification in grouped {
-            log::info!(
-              "Auto-updating {} to version {} ({} profiles)",
-              notification.browser,
-              notification.new_version,
-              notification.affected_profiles.len()
-            );
+          // Spawn async task to handle the download and auto-update
+          tokio::spawn(async move {
+            let registry =
+              crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
 
-            let browser = notification.browser.clone();
-            let new_version = notification.new_version.clone();
-            let app_handle_clone = app_handle.clone();
+            // Skip if this browser-version pair is already being downloaded
+            if crate::downloader::is_downloading(&browser, &new_version) {
+              log::debug!(
+                "Browser update download already running browser={browser} version={new_version}"
+              );
+              return;
+            }
 
-            // Spawn async task to handle the download and auto-update
-            tokio::spawn(async move {
-              let registry =
-                crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
-
-              // Skip if this browser-version pair is already being downloaded
-              if crate::downloader::is_downloading(&browser, &new_version) {
-                log::info!(
-                  "Browser {browser} {new_version} is already being downloaded, skipping duplicate"
-                );
-                return;
-              }
-
-              if registry.is_browser_downloaded(&browser, &new_version) {
-                log::info!("Browser {browser} {new_version} already downloaded, proceeding to auto-update profiles");
-
-                // Browser already exists, go straight to profile update
-                match AutoUpdater::instance()
-                  .auto_update_profile_versions(&app_handle_clone, &browser, &new_version)
-                  .await
-                {
-                  Ok(updated_profiles) => {
-                    if !updated_profiles.is_empty() {
-                      log::info!(
-                        "Auto-updated {} profiles to {browser} {new_version}: {:?}",
-                        updated_profiles.len(),
-                        updated_profiles
-                      );
-                    }
-                  }
-                  Err(e) => {
-                    log::error!("Failed to auto-update profiles for {browser}: {e}");
-                  }
-                }
-              } else {
-                log::info!("Downloading browser {browser} version {new_version}...");
-
-                // Download directly from Rust — download_browser_full already
-                // auto-updates non-running profiles after successful download.
-                match crate::downloader::download_browser(
-                  app_handle_clone,
-                  browser.clone(),
-                  new_version.clone(),
-                )
+            if registry.is_browser_downloaded(&browser, &new_version) {
+              // Browser already exists, go straight to profile update
+              if let Err(e) = AutoUpdater::instance()
+                .auto_update_profile_versions(&app_handle_clone, &browser, &new_version)
                 .await
-                {
-                  Ok(actual_version) => {
-                    log::info!("Auto-download completed for {browser} {actual_version}");
-                  }
-                  Err(e) => {
-                    log::error!("Failed to auto-download {browser} {new_version}: {e}");
-                  }
-                }
+              {
+                log::error!(
+                  "Browser update apply failed browser={browser} version={new_version} err=\"{e}\""
+                );
               }
-            });
-          }
-        } else {
-          log::info!("No browser updates needed");
+            } else {
+              // Download directly from Rust — download_browser_full already
+              // auto-updates non-running profiles after successful download.
+              let download_started = std::time::Instant::now();
+              // download_browser logs its own failure.
+              if let Ok(actual_version) = crate::downloader::download_browser(
+                app_handle_clone,
+                browser.clone(),
+                new_version.clone(),
+              )
+              .await
+              {
+                log::info!(
+                  "Browser update downloaded browser={browser} version={actual_version} elapsed_ms={}",
+                  download_started.elapsed().as_millis()
+                );
+              }
+            }
+          });
         }
       }
       Err(e) => {
-        log::error!("Failed to check for browser updates: {e}");
+        log::error!(
+          "Browser update check failed elapsed_ms={} err=\"{e}\"",
+          started.elapsed().as_millis()
+        );
       }
     }
 
     // Also update any profiles that can be bumped to an already-installed newer version.
     // This handles cases where a version was downloaded but profiles weren't updated
     // (e.g., they were running at the time, or the update was missed).
-    match self.update_profiles_to_latest_installed(app_handle) {
-      Ok(updated) => {
-        if !updated.is_empty() {
-          log::info!(
-            "Updated {} profiles to latest installed versions: {:?}",
-            updated.len(),
-            updated
-          );
-        }
-      }
-      Err(e) => {
-        log::error!("Failed to update profiles to latest installed versions: {e}");
-      }
+    if let Err(e) = self.update_profiles_to_latest_installed(app_handle) {
+      log::error!("Moving profiles to the latest installed browser failed err=\"{e}\"");
     }
   }
 
@@ -309,13 +306,19 @@ impl AutoUpdater {
 
         // Check if profile is currently running
         if profile.process_id.is_some() {
+          // A pending entry is matched on the profile's current version alone,
+          // so recording one for an older build would downgrade the profile the
+          // moment it closes, and would pin that older binary against cleanup.
+          if !self.is_version_newer(new_version, &profile.version) {
+            log::debug!(
+              "Pending browser update skipped: not newer profile={} from={} to={new_version}",
+              profile.id,
+              profile.version
+            );
+            continue;
+          }
+
           // Store as pending update so it gets applied when browser closes
-          log::info!(
-            "Profile {} is running, storing pending update {} -> {}",
-            profile.name,
-            profile.version,
-            new_version
-          );
           let mut state = self.load_auto_update_state().unwrap_or_default();
           let notification = UpdateNotification {
             id: format!("{}_{}_to_{}", browser, profile.version, new_version),
@@ -336,6 +339,11 @@ impl AutoUpdater {
           {
             state.pending_updates.push(notification);
             let _ = self.save_auto_update_state(&state);
+            log::info!(
+              "Browser update queued until the profile closes profile={} browser={browser} from={} to={new_version}",
+              profile.id,
+              profile.version
+            );
           }
           continue;
         }
@@ -349,10 +357,18 @@ impl AutoUpdater {
             new_version,
           ) {
             Ok(_) => {
+              log::info!(
+                "Profile browser updated profile={} browser={browser} from={} to={new_version}",
+                profile.id,
+                profile.version
+              );
               updated_profiles.push(profile.name);
             }
             Err(e) => {
-              log::error!("Failed to update profile {}: {}", profile.name, e);
+              log::error!(
+                "Profile browser update failed profile={} browser={browser} to={new_version} err=\"{e}\"",
+                profile.id
+              );
             }
           }
         }
@@ -500,18 +516,18 @@ impl AutoUpdater {
     {
       Ok(updated) => {
         log::info!(
-          "Updated profile {} from {} {} to latest installed version {}",
-          profile.name,
+          "Profile browser updated profile={} browser={} from={} to={latest}",
+          profile.id,
           profile.browser,
-          profile.version,
-          latest
+          profile.version
         );
         Some(updated)
       }
       Err(e) => {
         log::error!(
-          "Failed to update profile {} to latest installed version: {e}",
-          profile.name
+          "Profile browser update failed profile={} browser={} to={latest} err=\"{e}\"",
+          profile.id,
+          profile.browser
         );
         None
       }
@@ -577,16 +593,17 @@ impl AutoUpdater {
         ) {
           Ok(_) => {
             log::info!(
-              "Updated profile {} from {} {} to latest installed version {}",
-              profile.name,
-              browser,
-              profile.version,
-              latest_version
+              "Profile browser updated profile={} browser={browser} from={} to={latest_version}",
+              profile.id,
+              profile.version
             );
             all_updated.push(profile.name);
           }
           Err(e) => {
-            log::error!("Failed to update profile {}: {e}", profile.name);
+            log::error!(
+              "Profile browser update failed profile={} browser={browser} to={latest_version} err=\"{e}\"",
+              profile.id
+            );
           }
         }
       }
@@ -636,6 +653,13 @@ pub async fn check_for_updates_with_progress(app_handle: tauri::AppHandle) {
   updater.check_for_updates_with_progress(&app_handle).await;
 }
 
+// Global singleton instance
+static AUTO_UPDATER: std::sync::LazyLock<AutoUpdater> = std::sync::LazyLock::new(AutoUpdater::new);
+static VERSION_FETCH_STREAK: crate::log_streak::Streak =
+  crate::log_streak::Streak::new(module_path!(), "Browser version fetch");
+/// Updates found by the previous check, so an unchanged result logs at debug.
+static BROWSER_UPDATE_LAST_SUMMARY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -662,11 +686,15 @@ mod tests {
       last_sync: None,
       host_os: None,
       ephemeral: false,
+      temporary: false,
       extension_group_id: None,
       proxy_bypass_rules: Vec::new(),
       created_by_id: None,
       created_by_email: None,
       dns_blocklist: None,
+      dns_server: None,
+      status_id: None,
+      start_urls: Vec::new(),
       password_protected: false,
       clear_on_close: false,
       created_at: None,
@@ -985,9 +1013,4 @@ mod tests {
       "Pending updates should be empty after dismissal"
     );
   }
-}
-
-// Global singleton instance
-lazy_static::lazy_static! {
-  static ref AUTO_UPDATER: AutoUpdater = AutoUpdater::new();
 }

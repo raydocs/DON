@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  CopyObjectCommand,
   CreateBucketCommand,
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -17,6 +18,7 @@ import {
   ForbiddenException,
   Injectable,
   Logger,
+  NotFoundException,
   type OnModuleInit,
 } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
@@ -38,6 +40,13 @@ import type {
   PresignUploadBatchResponseDto,
   PresignUploadRequestDto,
   PresignUploadResponseDto,
+  SnapshotCreateRequestDto,
+  SnapshotDto,
+  SnapshotKind,
+  SnapshotListRequestDto,
+  SnapshotListResponseDto,
+  SnapshotRequestDto,
+  SnapshotRestoreResponseDto,
   StatRequestDto,
   StatResponseDto,
   SubscribeEventDto,
@@ -65,8 +74,9 @@ function clampExpiresIn(requested: number | undefined): number {
   return Math.min(v, MAX_PRESIGN_EXPIRES_IN);
 }
 
-/** Only this metadata key is meaningful to sync (LWW conflict resolution).
- * Whitelisting prevents a client from signing arbitrary x-amz-meta-* values. */
+/** Only these metadata keys are meaningful to sync: `updated-at` for LWW
+ * conflict resolution, `group-id` for team access by group. Whitelisting
+ * prevents a client from signing arbitrary x-amz-meta-* values. */
 function sanitizeMetadata(
   metadata: Record<string, string> | undefined,
 ): Record<string, string> | undefined {
@@ -75,8 +85,40 @@ function sanitizeMetadata(
   if (typeof metadata["updated-at"] === "string") {
     out["updated-at"] = metadata["updated-at"];
   }
+  if (
+    typeof metadata["group-id"] === "string" &&
+    GROUP_ID.test(metadata["group-id"])
+  ) {
+    out["group-id"] = metadata["group-id"];
+  }
   return Object.keys(out).length > 0 ? out : undefined;
 }
+
+/** The `group-id` a profile without a group carries. */
+export const UNGROUPED = "__ungrouped__";
+const GROUP_ID = /^[A-Za-z0-9_-]{1,128}$/;
+/** A profile's objects, relative to the namespace: its root and its id. A
+ * restore point (`snapshots/<root>`) belongs to the profile it copies. */
+const PROFILE_KEY = /^(?:snapshots\/)?((?:teams\/[^/]+\/)?profiles\/([^/]+)\/)/;
+/** A profile root as the restore-point routes take it. */
+const PROFILE_ROOT = /^(?:teams\/[^/]+\/)?profiles\/[^/]+\/$/;
+/** A restore point's id: its UTC time, then a short random part. */
+const SNAPSHOT_ID = /^\d{8}T\d{6}Z-[0-9a-f]{4}$/;
+/** A group's config object, relative to the namespace. */
+const GROUP_KEY = /^(?:teams\/[^/]+\/)?groups\/([^/]+)\.json$/;
+/** How long a profile's group is trusted before it is read again. */
+const GROUP_CACHE_MS = 30_000;
+const GROUP_CACHE_MAX = 10_000;
+
+/**
+ * What a launcher's session may write, relative to the team namespace. Team
+ * profiles live under `teams/<team id>/`, personal ones at the root.
+ */
+const LAUNCHER_WRITABLE =
+  /^(teams\/[^/]+\/)?profiles\/[^/]+\/(files\/.+|manifest\.json)$/;
+
+/** A key inside a profile that counts against the plan, relative to the namespace. */
+const COUNTED_PROFILE_KEY = /^profiles\/([^/]+)\//;
 
 @Injectable()
 export class SyncService implements OnModuleInit {
@@ -86,11 +128,21 @@ export class SyncService implements OnModuleInit {
   // `S3_PUBLIC_ENDPOINT` names a different, client-reachable address.
   private presignClient: S3Client;
   private publicEndpoint: string;
+  /**
+   * Whether an operator chose the public endpoint, or it fell back to the
+   * server's own storage address. The fallback is the shape that fails.
+   */
+  private publicEndpointWasConfigured: boolean;
   private bucket: string;
   // Upper bound on presign batch array length (DoS guard).
   private static readonly MAX_BATCH_ITEMS = 1000;
 
   private changeSubject = new Subject<SubscribeEventDto>();
+  /** A profile's group by the full key of its metadata object. */
+  private groupCache = new Map<
+    string,
+    { group: string | null | undefined; expires: number }
+  >();
   private s3Ready = false;
   private backendInternalUrl: string | undefined;
   private backendInternalKey: string | undefined;
@@ -131,9 +183,11 @@ export class SyncService implements OnModuleInit {
     // network and nowhere else. Signing is bound to the host, so the presign
     // client is a second client pinned to the public address rather than a
     // string rewrite of the signed URL.
-    const publicEndpoint =
-      this.configService.get<string>("S3_PUBLIC_ENDPOINT") || endpoint;
+    const configuredPublicEndpoint =
+      this.configService.get<string>("S3_PUBLIC_ENDPOINT");
+    const publicEndpoint = configuredPublicEndpoint || endpoint;
     this.publicEndpoint = publicEndpoint;
+    this.publicEndpointWasConfigured = Boolean(configuredPublicEndpoint);
     this.presignClient =
       publicEndpoint === endpoint
         ? this.s3Client
@@ -191,14 +245,33 @@ export class SyncService implements OnModuleInit {
 
     const isSingleLabel =
       !host.includes(".") && !host.includes(":") && host !== "localhost";
-    if (!isSingleLabel) return;
 
-    this.logger.warn(
-      `Storage endpoint '${this.publicEndpoint}' uses the container-only host '${host}'. ` +
-        "Presigned URLs built from it cannot be reached by Donut Browser, so every " +
-        "transfer will fail while /health and /readyz stay green. Set S3_PUBLIC_ENDPOINT " +
-        "to an address your devices can reach (and publish that port).",
-    );
+    if (isSingleLabel) {
+      this.logger.warn(
+        `Storage endpoint '${this.publicEndpoint}' uses the container-only host '${host}'. ` +
+          "Presigned URLs built from it cannot be reached by Donut Browser, so every " +
+          "transfer will fail while /health and /readyz stay green. Set S3_PUBLIC_ENDPOINT " +
+          "to an address your devices can reach (and publish that port).",
+      );
+      return;
+    }
+
+    // A dotted host proves nothing. With `S3_PUBLIC_ENDPOINT` unset, clients are
+    // handed whatever address this server uses for storage itself, and a
+    // reachable-looking name such as `storage.internal`, or a private address on
+    // a network the devices are not on, fails in exactly the same way while
+    // saying nothing at all. This server cannot test the endpoint for them,
+    // because it does not know where its clients are, so state what it does
+    // know and leave the judgement to the operator.
+    if (!this.publicEndpointWasConfigured) {
+      this.logger.log(
+        `S3_PUBLIC_ENDPOINT is not set, so presigned URLs will name '${this.publicEndpoint}', ` +
+          "the address this server uses for storage itself. Transfers go straight from each " +
+          "device to that address, and this server cannot verify a device can reach it. If " +
+          "transfers fail while /health and /readyz stay green, set S3_PUBLIC_ENDPOINT to an " +
+          "address your devices can reach and publish that port.",
+      );
+    }
   }
 
   private async ensureBucketExists(): Promise<void> {
@@ -335,9 +408,138 @@ export class SyncService implements OnModuleInit {
     throw new ForbiddenException("Access denied to this key");
   }
 
+  /**
+   * A launcher may write only what a session changes: a profile's files and
+   * its manifest. Never its settings (`metadata.json`), the team's proxies,
+   * groups or other shared config, and never a whole profile or a tombstone.
+   */
+  private validateWriteAccess(ctx: UserContext, key: string): void {
+    this.validateKeyAccess(ctx, key);
+    if (ctx.teamRole !== "launcher") return;
+    const relative = key.slice(ctx.prefix.length);
+    if (LAUNCHER_WRITABLE.test(relative)) return;
+    throw new ForbiddenException({
+      code: "TEAM_ROLE_READ_ONLY",
+      message: "This team role can run profiles but not change them",
+    });
+  }
+
+  /**
+   * The group of the profile whose root is `root` (relative), read from the
+   * `group-id` of its metadata object. `undefined` when the profile has no
+   * metadata object yet, `null` when it has one without a group id (written
+   * by an older app), so no group can be checked.
+   */
+  private async profileGroup(
+    ctx: UserContext,
+    root: string,
+  ): Promise<string | null | undefined> {
+    const key = `${ctx.prefix}${root}metadata.json`;
+    const now = Date.now();
+    const cached = this.groupCache.get(key);
+    if (cached && cached.expires > now) return cached.group;
+    let group: string | null | undefined;
+    try {
+      const head = await this.s3Client.send(
+        new HeadObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      const value = head.Metadata?.["group-id"];
+      group = typeof value === "string" && GROUP_ID.test(value) ? value : null;
+    } catch (error: unknown) {
+      const name =
+        error && typeof error === "object" && "name" in error
+          ? error.name
+          : undefined;
+      if (name !== "NotFound" && name !== "NoSuchKey") throw error;
+      group = undefined;
+    }
+    if (this.groupCache.size > GROUP_CACHE_MAX) this.groupCache.clear();
+    this.groupCache.set(key, { group, expires: now + GROUP_CACHE_MS });
+    return group;
+  }
+
+  /**
+   * Whether a member limited to some groups may see the object at the scoped
+   * `key`. A profile's objects follow its group; a group's config object
+   * follows the group itself; everything else is shared team config.
+   */
+  private async canReach(ctx: UserContext, key: string): Promise<boolean> {
+    if (!ctx.groupIds) return true;
+    const relative = key.slice(ctx.prefix.length);
+    const groupConfig = GROUP_KEY.exec(relative);
+    if (groupConfig) return ctx.groupIds.includes(groupConfig[1]);
+    const profile = PROFILE_KEY.exec(relative);
+    if (!profile) return true;
+    const group = await this.profileGroup(ctx, profile[1]);
+    return typeof group === "string" && ctx.groupIds.includes(group);
+  }
+
+  private async assertReachable(ctx: UserContext, key: string): Promise<void> {
+    if (await this.canReach(ctx, key)) return;
+    throw new ForbiddenException({
+      code: "TEAM_GROUP_ACCESS_DENIED",
+      message: "This member has no access to the group of this profile",
+    });
+  }
+
+  /**
+   * A limited member may change a profile only inside its groups: the group
+   * the profile is in now, and the group a new metadata object names. A new
+   * profile starts with its metadata, so its first write names its group.
+   */
+  private async assertGroupWrite(
+    ctx: UserContext,
+    key: string,
+    metadata?: Record<string, string>,
+  ): Promise<void> {
+    if (!ctx.groupIds) return;
+    const relative = key.slice(ctx.prefix.length);
+    const groupConfig = GROUP_KEY.exec(relative);
+    const profile = PROFILE_KEY.exec(relative);
+    let allowed = true;
+    if (groupConfig) {
+      allowed = ctx.groupIds.includes(groupConfig[1]);
+    } else if (profile) {
+      const current = await this.profileGroup(ctx, profile[1]);
+      const isMetadata = relative === `${profile[1]}metadata.json`;
+      const named = metadata?.["group-id"];
+      if (current === null) allowed = false;
+      if (typeof current === "string" && !ctx.groupIds.includes(current)) {
+        allowed = false;
+      }
+      if (current === undefined && !isMetadata) allowed = false;
+      if (isMetadata && !(named && ctx.groupIds.includes(named))) {
+        allowed = false;
+      }
+      if (allowed && isMetadata && named) {
+        // The next read must see the group this write gives the profile.
+        this.groupCache.delete(`${ctx.prefix}${profile[1]}metadata.json`);
+      }
+    }
+    if (allowed) return;
+    throw new ForbiddenException({
+      code: "TEAM_GROUP_ACCESS_DENIED",
+      message: "This member has no access to the group of this profile",
+    });
+  }
+
+  /** `items` without the ones a limited member may not see. */
+  private async reachableOnly<T>(
+    ctx: UserContext,
+    items: T[],
+    keyOf: (item: T) => string,
+  ): Promise<T[]> {
+    if (!ctx.groupIds) return items;
+    const verdicts = await Promise.all(
+      items.map((item) => this.canReach(ctx, keyOf(item))),
+    );
+    return items.filter((_, index) => verdicts[index]);
+  }
+
   async stat(dto: StatRequestDto, ctx: UserContext): Promise<StatResponseDto> {
     const key = this.scopeKey(ctx, dto.key);
     this.validateKeyAccess(ctx, key);
+    await this.assertReachable(ctx, key);
 
     try {
       const response = await this.s3Client.send(
@@ -374,19 +576,17 @@ export class SyncService implements OnModuleInit {
     ctx: UserContext,
   ): Promise<PresignUploadResponseDto> {
     const key = this.scopeKey(ctx, dto.key);
-    this.validateKeyAccess(ctx, key);
+    this.validateWriteAccess(ctx, key);
+    // Whitelist metadata to the keys sync relies on, so a client can't sign
+    // arbitrary x-amz-meta-* values into its objects.
+    const metadata = sanitizeMetadata(dto.metadata);
+    await this.assertGroupWrite(ctx, key, metadata);
 
-    // Check profile limit for cloud users
-    if (ctx.mode === "cloud" && ctx.profileLimit > 0) {
-      await this.checkProfileLimit(ctx);
-    }
+    await this.checkProfileLimit(ctx, [key]);
 
     const expiresIn = clampExpiresIn(dto.expiresIn);
     const expiresAt = new Date(Date.now() + expiresIn * 1000);
 
-    // Whitelist metadata to the single key sync relies on, so a client can't
-    // sign arbitrary x-amz-meta-* values into its objects.
-    const metadata = sanitizeMetadata(dto.metadata);
     const command = new PutCmd({
       Bucket: this.bucket,
       Key: key,
@@ -432,6 +632,7 @@ export class SyncService implements OnModuleInit {
   ): Promise<PresignDownloadResponseDto> {
     const key = this.scopeKey(ctx, dto.key);
     this.validateKeyAccess(ctx, key);
+    await this.assertReachable(ctx, key);
 
     const expiresIn = clampExpiresIn(dto.expiresIn);
     const expiresAt = new Date(Date.now() + expiresIn * 1000);
@@ -454,7 +655,12 @@ export class SyncService implements OnModuleInit {
     ctx: UserContext,
   ): Promise<DeleteResponseDto> {
     const key = this.scopeKey(ctx, dto.key);
-    this.validateKeyAccess(ctx, key);
+    this.validateWriteAccess(ctx, key);
+    await this.assertGroupWrite(ctx, key);
+    const scopedTombstoneKey = dto.tombstoneKey
+      ? this.scopeKey(ctx, dto.tombstoneKey)
+      : undefined;
+    if (scopedTombstoneKey) this.validateWriteAccess(ctx, scopedTombstoneKey);
 
     let deleted = false;
     let tombstoneCreated = false;
@@ -471,8 +677,7 @@ export class SyncService implements OnModuleInit {
       deleted = false;
     }
 
-    if (dto.tombstoneKey) {
-      const scopedTombstoneKey = this.scopeKey(ctx, dto.tombstoneKey);
+    if (scopedTombstoneKey) {
       const tombstoneData = JSON.stringify({
         id: key,
         deleted_at: dto.deletedAt || new Date().toISOString(),
@@ -533,7 +738,13 @@ export class SyncService implements OnModuleInit {
       });
 
     return {
-      objects,
+      objects: ctx
+        ? await this.reachableOnly(
+            ctx,
+            objects,
+            (object) => `${userPrefix}${object.key}`,
+          )
+        : objects,
       isTruncated: response.IsTruncated || false,
       nextContinuationToken: response.NextContinuationToken,
     };
@@ -553,10 +764,10 @@ export class SyncService implements OnModuleInit {
         `items must be an array of at most ${SyncService.MAX_BATCH_ITEMS} entries`,
       );
     }
-    // Check profile limit for cloud users
-    if (ctx.mode === "cloud" && ctx.profileLimit > 0) {
-      await this.checkProfileLimit(ctx);
-    }
+    await this.checkProfileLimit(
+      ctx,
+      dto.items.map((item) => this.scopeKey(ctx, item.key)),
+    );
 
     const expiresIn = clampExpiresIn(dto.expiresIn);
     const expiresAt = new Date(Date.now() + expiresIn * 1000);
@@ -564,7 +775,8 @@ export class SyncService implements OnModuleInit {
     const items = await Promise.all(
       dto.items.map(async (item) => {
         const key = this.scopeKey(ctx, item.key);
-        this.validateKeyAccess(ctx, key);
+        this.validateWriteAccess(ctx, key);
+        await this.assertGroupWrite(ctx, key);
 
         const command = new PutCmd({
           Bucket: this.bucket,
@@ -628,6 +840,7 @@ export class SyncService implements OnModuleInit {
       dto.keys.map(async (rawKey) => {
         const key = this.scopeKey(ctx, rawKey);
         this.validateKeyAccess(ctx, key);
+        await this.assertReachable(ctx, key);
 
         const command = new GetObjectCommand({
           Bucket: this.bucket,
@@ -649,6 +862,251 @@ export class SyncService implements OnModuleInit {
     return { items };
   }
 
+  // --- Restore points --------------------------------------------------------
+
+  /** How many restore points of each kind a profile keeps. */
+  static readonly SNAPSHOTS_PER_KIND = 3;
+  /** Objects copied at a time. */
+  private static readonly COPY_CONCURRENCY = 8;
+
+  /** The checked profile root, relative to the namespace. */
+  private snapshotRoot(raw: string): string {
+    if (typeof raw !== "string" || !PROFILE_ROOT.test(raw)) {
+      throw new BadRequestException({ code: "SNAPSHOT_INVALID" });
+    }
+    return raw;
+  }
+
+  private snapshotId(raw: string): string {
+    if (typeof raw !== "string" || !SNAPSHOT_ID.test(raw)) {
+      throw new BadRequestException({ code: "SNAPSHOT_INVALID" });
+    }
+    return raw;
+  }
+
+  /** Every object under the scoped `prefix`. */
+  private async listAll(
+    prefix: string,
+  ): Promise<{ key: string; size: number }[]> {
+    const out: { key: string; size: number }[] = [];
+    let continuationToken: string | undefined;
+    do {
+      const page = await this.s3Client.send(
+        new ListObjectsV2Command({
+          Bucket: this.bucket,
+          Prefix: prefix,
+          ContinuationToken: continuationToken,
+        }),
+      );
+      for (const object of page.Contents ?? []) {
+        if (object.Key) out.push({ key: object.Key, size: object.Size ?? 0 });
+      }
+      continuationToken = page.NextContinuationToken;
+    } while (continuationToken);
+    return out;
+  }
+
+  /** Run `work` over `items`, a few at a time. */
+  private async inBatches<T>(
+    items: T[],
+    work: (item: T) => Promise<void>,
+  ): Promise<void> {
+    for (let i = 0; i < items.length; i += SyncService.COPY_CONCURRENCY) {
+      await Promise.all(
+        items.slice(i, i + SyncService.COPY_CONCURRENCY).map(work),
+      );
+    }
+  }
+
+  private async copy(from: string, to: string): Promise<void> {
+    await this.s3Client.send(
+      new CopyObjectCommand({
+        Bucket: this.bucket,
+        Key: to,
+        CopySource: `${this.bucket}/${from.split("/").map(encodeURIComponent).join("/")}`,
+      }),
+    );
+  }
+
+  private async readSnapshot(key: string): Promise<SnapshotDto | null> {
+    try {
+      const object = await this.s3Client.send(
+        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+      );
+      const text = await object.Body?.transformToString();
+      return text ? (JSON.parse(text) as SnapshotDto) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  async listSnapshots(
+    dto: SnapshotListRequestDto,
+    ctx: UserContext,
+  ): Promise<SnapshotListResponseDto> {
+    const root = this.snapshotRoot(dto.profileRoot);
+    const base = this.scopeKey(ctx, `snapshots/${root}`);
+    this.validateKeyAccess(ctx, base);
+    await this.assertReachable(ctx, this.scopeKey(ctx, `${root}manifest.json`));
+    const objects = await this.listAll(base);
+    const records = objects.filter((object) =>
+      object.key.endsWith("/snapshot.json"),
+    );
+    const snapshots = (
+      await Promise.all(records.map((record) => this.readSnapshot(record.key)))
+    ).filter((snapshot): snapshot is SnapshotDto => snapshot !== null);
+    snapshots.sort((a, b) => b.id.localeCompare(a.id));
+    return { snapshots };
+  }
+
+  /**
+   * Copy a profile's files and manifest into a new restore point, inside the
+   * store (no byte leaves it), and keep the newest few of each kind.
+   */
+  async createSnapshot(
+    dto: SnapshotCreateRequestDto,
+    ctx: UserContext,
+  ): Promise<SnapshotDto> {
+    const root = this.snapshotRoot(dto.profileRoot);
+    const kind = dto.kind === "auto" ? "auto" : "manual";
+    const live = this.scopeKey(ctx, root);
+    const base = this.scopeKey(ctx, `snapshots/${root}`);
+    this.validateWriteAccess(ctx, base);
+    await this.assertGroupWrite(ctx, live);
+    const objects = (await this.listAll(live)).filter((object) => {
+      const relative = object.key.slice(live.length);
+      return relative === "manifest.json" || relative.startsWith("files/");
+    });
+    if (!objects.some((object) => object.key === `${live}manifest.json`)) {
+      throw new BadRequestException({ code: "SNAPSHOT_NOTHING_TO_KEEP" });
+    }
+    const now = new Date();
+    const id = `${now
+      .toISOString()
+      .replace(/[-:]/g, "")
+      .replace(/\.\d+Z$/, "Z")}-${randomUUID().slice(0, 4)}`;
+    const target = `${base}${id}/`;
+    await this.inBatches(objects, (object) =>
+      this.copy(object.key, `${target}${object.key.slice(live.length)}`),
+    );
+    const snapshot: SnapshotDto = {
+      id,
+      createdAt: now.toISOString(),
+      kind,
+      files: objects.length - 1,
+      bytes: objects.reduce((sum, object) => sum + object.size, 0),
+    };
+    await this.s3Client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: `${target}snapshot.json`,
+        Body: JSON.stringify(snapshot),
+        ContentType: "application/json",
+      }),
+    );
+    await this.pruneSnapshots(ctx, root, kind);
+    this.logger.log(
+      `Snapshot created kind=${kind} files=${snapshot.files} bytes=${snapshot.bytes}`,
+    );
+    return snapshot;
+  }
+
+  private async pruneSnapshots(
+    ctx: UserContext,
+    root: string,
+    kind: SnapshotKind,
+  ): Promise<void> {
+    const { snapshots } = await this.listSnapshots({ profileRoot: root }, ctx);
+    const old = snapshots
+      .filter((snapshot) => snapshot.kind === kind)
+      .slice(SyncService.SNAPSHOTS_PER_KIND);
+    for (const snapshot of old) {
+      await this.removeSnapshot(ctx, root, snapshot.id);
+    }
+  }
+
+  private async removeSnapshot(
+    ctx: UserContext,
+    root: string,
+    id: string,
+  ): Promise<void> {
+    const prefix = this.scopeKey(ctx, `snapshots/${root}${id}/`);
+    const objects = await this.listAll(prefix);
+    for (let i = 0; i < objects.length; i += 1000) {
+      await this.s3Client.send(
+        new DeleteObjectsCommand({
+          Bucket: this.bucket,
+          Delete: {
+            Objects: objects.slice(i, i + 1000).map((o) => ({ Key: o.key })),
+            Quiet: true,
+          },
+        }),
+      );
+    }
+  }
+
+  async deleteSnapshot(
+    dto: SnapshotRequestDto,
+    ctx: UserContext,
+  ): Promise<{ deleted: boolean }> {
+    const root = this.snapshotRoot(dto.profileRoot);
+    const id = this.snapshotId(dto.id);
+    const base = this.scopeKey(ctx, `snapshots/${root}`);
+    this.validateWriteAccess(ctx, base);
+    await this.assertGroupWrite(ctx, this.scopeKey(ctx, root));
+    await this.removeSnapshot(ctx, root, id);
+    return { deleted: true };
+  }
+
+  /**
+   * Put a restore point's files back in place of the live ones. The manifest
+   * is left to the app: it may be sealed, and the app must stamp it as the
+   * newest so every device takes the restored files.
+   */
+  async restoreSnapshotFiles(
+    dto: SnapshotRequestDto,
+    ctx: UserContext,
+  ): Promise<SnapshotRestoreResponseDto> {
+    const root = this.snapshotRoot(dto.profileRoot);
+    const id = this.snapshotId(dto.id);
+    const live = this.scopeKey(ctx, root);
+    const source = this.scopeKey(ctx, `snapshots/${root}${id}/`);
+    this.validateWriteAccess(ctx, source);
+    await this.assertGroupWrite(ctx, live);
+    const kept = (await this.listAll(`${source}files/`)).map((object) =>
+      object.key.slice(source.length),
+    );
+    if (
+      kept.length === 0 &&
+      !(await this.readSnapshot(`${source}snapshot.json`))
+    ) {
+      throw new NotFoundException({ code: "SNAPSHOT_NOT_FOUND" });
+    }
+    const keptSet = new Set(kept);
+    const stale = (await this.listAll(`${live}files/`)).filter(
+      (object) => !keptSet.has(object.key.slice(live.length)),
+    );
+    await this.inBatches(kept, (relative) =>
+      this.copy(`${source}${relative}`, `${live}${relative}`),
+    );
+    for (let i = 0; i < stale.length; i += 1000) {
+      await this.s3Client.send(
+        new DeleteObjectsCommand({
+          Bucket: this.bucket,
+          Delete: {
+            Objects: stale.slice(i, i + 1000).map((o) => ({ Key: o.key })),
+            Quiet: true,
+          },
+        }),
+      );
+    }
+    void this.bumpManifest(ctx, `${live}manifest.json`);
+    this.logger.log(
+      `Snapshot restored restored=${kept.length} removed=${stale.length}`,
+    );
+    return { restored: kept.length, removed: stale.length };
+  }
+
   async deletePrefix(
     dto: DeletePrefixRequestDto,
     ctx: UserContext,
@@ -659,10 +1117,18 @@ export class SyncService implements OnModuleInit {
     // (one already starting with its own/team scope, which scopeKey returns
     // verbatim) could wipe an entire shared namespace. Enforce scope, and
     // refuse an empty scoped prefix (which would match the whole scope).
-    this.validateKeyAccess(ctx, prefix);
-    if (ctx.mode === "cloud" && dto.prefix.replace(/\/+$/, "").length === 0) {
+    this.validateWriteAccess(ctx, prefix);
+    await this.assertGroupWrite(ctx, prefix);
+    if (
+      ctx.mode !== "self-hosted" &&
+      dto.prefix.replace(/\/+$/, "").length === 0
+    ) {
       throw new ForbiddenException("Refusing to delete an empty prefix");
     }
+    const scopedTombstoneKey = dto.tombstoneKey
+      ? this.scopeKey(ctx, dto.tombstoneKey)
+      : undefined;
+    if (scopedTombstoneKey) this.validateWriteAccess(ctx, scopedTombstoneKey);
     let deletedCount = 0;
     let tombstoneCreated = false;
     let continuationToken: string | undefined;
@@ -703,9 +1169,7 @@ export class SyncService implements OnModuleInit {
     } while (continuationToken);
 
     // Create tombstone if requested
-    if (dto.tombstoneKey && deletedCount > 0) {
-      const scopedTombstoneKey = this.scopeKey(ctx, dto.tombstoneKey);
-      this.validateKeyAccess(ctx, scopedTombstoneKey);
+    if (scopedTombstoneKey && deletedCount > 0) {
       const tombstoneData = JSON.stringify({
         prefix: dto.prefix,
         deleted_at: dto.deletedAt || new Date().toISOString(),
@@ -744,14 +1208,25 @@ export class SyncService implements OnModuleInit {
    *   2. a write touched the scope and bumped its manifest ETag.
    *
    * This is *eventual* cross-device sync, gated by the poll interval.
-   * Real-time push is intentionally not provided here — that lives in the
-   * paid backend.
+   * Real-time push is intentionally not provided here.
    */
   subscribe(
     ctx: UserContext,
     pollIntervalMs = 5000,
   ): Observable<SubscribeEventDto> {
-    const basePrefixes = ["profiles/", "proxies/", "groups/", "tombstones/"];
+    // Every key prefix the desktop reacts to. Filtering happens after the one
+    // LIST per scope, so a prefix added here costs no extra S3 call.
+    const basePrefixes = [
+      "profiles/",
+      "proxies/",
+      "groups/",
+      "vpns/",
+      "extensions/",
+      "extension_groups/",
+      "statuses/",
+      "templates/",
+      "tombstones/",
+    ];
     const scopes = this.scopesFor(ctx);
 
     // Per-connection state (not shared across subscribers).
@@ -814,7 +1289,7 @@ export class SyncService implements OnModuleInit {
         }
 
         // Phase 2 — one LIST per scope (not per base prefix). Filter to the
-        // four base prefixes client-side. This is the cost we pay only when
+        // base prefixes client-side. This is the cost we pay only when
         // a manifest told us there's something new to look at.
         const currentState = new Map<string, string>();
         for (const scope of scopes) {
@@ -837,7 +1312,7 @@ export class SyncService implements OnModuleInit {
                   ? fullKey.substring(scope.length)
                   : fullKey;
                 // Skip the manifest object itself + anything outside the
-                // four data prefixes.
+                // data prefixes.
                 if (relativeKey === MANIFEST_KEY) continue;
                 if (!basePrefixes.some((bp) => relativeKey.startsWith(bp))) {
                   continue;
@@ -876,7 +1351,13 @@ export class SyncService implements OnModuleInit {
 
         lastKnownState = currentState;
         initialized = true;
-        return events;
+        // A limited member learns nothing about profiles outside its groups,
+        // not even that they changed.
+        return this.reachableOnly(
+          ctx,
+          events,
+          (event) => `${ctx.prefix}${event.key ?? ""}`,
+        );
       }),
       switchMap((events) => of(...events)),
       filter((event): event is SubscribeEventDto => event !== null),
@@ -1025,39 +1506,47 @@ export class SyncService implements OnModuleInit {
   }
 
   /**
-   * Check if the user has reached their profile limit.
-   * Counts objects in the profiles/ prefix.
+   * Refuse writes that would store more profiles than the plan allows.
+   *
+   * Only a new profile counts. A stored profile keeps syncing at the limit,
+   * and proxies, groups and other settings never count: refusing every write
+   * at the limit stopped a full plan from syncing any change at all. Over the
+   * limit (after a downgrade), nothing under profiles/ is written until
+   * profiles are removed.
+   *
+   * ctx.prefix is the effective namespace (the team owner's, for a team
+   * member) and ctx.profileLimit the effective (team) limit, so this covers
+   * personal and team accounts alike.
    */
-  private async checkProfileLimit(ctx: UserContext): Promise<void> {
-    if (ctx.profileLimit <= 0) return; // 0 = unlimited
+  private async checkProfileLimit(
+    ctx: UserContext,
+    scopedKeys: string[],
+  ): Promise<void> {
+    if (ctx.mode === "self-hosted" || ctx.profileLimit <= 0) return; // 0 = unlimited
 
-    let count = 0;
+    const written = new Set<string>();
+    for (const key of scopedKeys) {
+      const match = COUNTED_PROFILE_KEY.exec(key.slice(ctx.prefix.length));
+      if (match) written.add(match[1]);
+    }
+    if (written.size === 0) return;
 
-    const userResult = await this.s3Client.send(
-      new ListObjectsV2Command({
-        Bucket: this.bucket,
-        Prefix: `${ctx.prefix}profiles/`,
-        Delimiter: "/",
-      }),
-    );
-    count += userResult.CommonPrefixes?.length || 0;
-
-    // ctx.prefix is already the effective namespace (the team owner's, for a
-    // team member) and ctx.profileLimit the effective (team) limit, so this
-    // single check covers both personal and team accounts.
-    if (count >= ctx.profileLimit) {
+    const stored = await this.storedProfileIds(ctx);
+    let total = stored.size;
+    for (const id of written) {
+      if (!stored.has(id)) total += 1;
+    }
+    if (total > ctx.profileLimit) {
       throw new ForbiddenException(
         `Profile limit reached (${ctx.profileLimit}). Upgrade your plan for more profiles.`,
       );
     }
   }
 
-  /**
-   * Count the number of distinct profile directories for a user.
-   */
-  private async countProfiles(ctx: UserContext): Promise<number> {
+  /** The ids of the profiles stored in the user's namespace. */
+  private async storedProfileIds(ctx: UserContext): Promise<Set<string>> {
     const profilePrefix = `${ctx.prefix}profiles/`;
-    let count = 0;
+    const ids = new Set<string>();
     let continuationToken: string | undefined;
 
     do {
@@ -1070,11 +1559,21 @@ export class SyncService implements OnModuleInit {
           ContinuationToken: continuationToken,
         }),
       );
-      count += result.CommonPrefixes?.length || 0;
+      for (const common of result.CommonPrefixes ?? []) {
+        const id = common.Prefix?.slice(profilePrefix.length, -1);
+        if (id) ids.add(id);
+      }
       continuationToken = result.NextContinuationToken;
     } while (continuationToken);
 
-    return count;
+    return ids;
+  }
+
+  /**
+   * Count the number of distinct profile directories for a user.
+   */
+  private async countProfiles(ctx: UserContext): Promise<number> {
+    return (await this.storedProfileIds(ctx)).size;
   }
 
   /**

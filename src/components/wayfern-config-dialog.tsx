@@ -11,6 +11,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { translateBackendError } from "@/lib/backend-errors";
+import { getProfileNativeOs } from "@/lib/browser-utils";
 import type { BrowserProfile, WayfernConfig, WayfernOS } from "@/types";
 import { LoadingButton } from "./loading-button";
 import { RippleButton } from "./ui/ripple";
@@ -50,10 +52,8 @@ export function WayfernConfigDialog({
   useEffect(() => {
     if (profile?.browser === "wayfern") {
       setConfig(
-        profile.wayfern_config || {
-          geoip: true,
-          os: getCurrentOS(),
-        },
+        // No `os` means the profile's native OS, which the form shows.
+        profile.wayfern_config || { geoip: true },
       );
     }
   }, [profile]);
@@ -65,9 +65,10 @@ export function WayfernConfigDialog({
   const handleSave = async () => {
     if (!profile) return;
 
-    if (config.fingerprint) {
+    const storedJson = config.identity_overrides ?? config.fingerprint;
+    if (storedJson) {
       try {
-        JSON.parse(config.fingerprint);
+        JSON.parse(storedJson);
       } catch (_error) {
         const { toast } = await import("sonner");
         toast.error(t("wayfernConfigDialog.invalidFingerprint"), {
@@ -85,10 +86,7 @@ export function WayfernConfigDialog({
       console.error("Failed to save config:", error);
       const { toast } = await import("sonner");
       toast.error(t("wayfernConfigDialog.saveFailed"), {
-        description:
-          error instanceof Error
-            ? error.message
-            : t("wayfernConfigDialog.unknownError"),
+        description: translateBackendError(t, error),
       });
     } finally {
       setIsSaving(false);
@@ -97,12 +95,7 @@ export function WayfernConfigDialog({
 
   const handleClose = () => {
     if (profile?.browser === "wayfern") {
-      setConfig(
-        profile.wayfern_config || {
-          geoip: true,
-          os: getCurrentOS(),
-        },
-      );
+      setConfig(profile.wayfern_config || { geoip: true });
     }
     onClose();
   };
@@ -139,6 +132,8 @@ export function WayfernConfigDialog({
               limitedMode={!crossOsUnlocked}
               profileVersion={profile.version}
               profileBrowser="wayfern"
+              profileId={profile.id}
+              nativeOS={getProfileNativeOs(profile)}
             />
           </div>
         </ScrollArea>

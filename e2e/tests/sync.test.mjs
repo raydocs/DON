@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, utimes, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import path from "node:path";
 import test from "node:test";
 import { appFromEnvironment } from "../lib/app.mjs";
@@ -78,6 +79,193 @@ async function createProfile(app, name) {
 async function waitFor(app, callback, description, timeoutMs = 45_000) {
   return app.waitFor(callback, { description, timeoutMs, intervalMs: 250 });
 }
+
+test("remote profile changes return after a long outage without another app restart", async () => {
+  assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
+  const app = appFromEnvironment("sync-remote-return");
+  let mode = "missing";
+  let profileId;
+  let missingManifests = 0;
+  let failedPulls = 0;
+  let failedFiles = 0;
+  let proxyUrl;
+  const proxy = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString();
+      const input = body ? JSON.parse(body) : {};
+      if (request.url === "/failed-file") {
+        failedFiles += 1;
+        response.writeHead(503).end();
+        return;
+      }
+      if (request.url.endsWith("/subscribe")) {
+        response.writeHead(503).end();
+        return;
+      }
+      if (mode === "offline") {
+        if (input.key === `profiles/${profileId}/metadata.json`) {
+          failedPulls += 1;
+        }
+        response.writeHead(503).end();
+        return;
+      }
+      if (
+        mode === "missing" &&
+        request.url.endsWith("/stat") &&
+        input.key === `profiles/${profileId}/manifest.json`
+      ) {
+        missingManifests += 1;
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(JSON.stringify({ exists: false }));
+        return;
+      }
+      const upstream = await fetch(`${syncUrl}${request.url}`, {
+        method: request.method,
+        headers: {
+          authorization: `Bearer ${syncToken}`,
+          "content-type": "application/json",
+        },
+        ...(body ? { body } : {}),
+        signal: AbortSignal.timeout(10_000),
+      });
+      let text = await upstream.text();
+      if (
+        mode === "partial" &&
+        request.url.endsWith("/presign-download-batch")
+      ) {
+        const result = JSON.parse(text);
+        for (const item of result.items ?? []) {
+          if (item.key.endsWith("/History"))
+            item.url = `${proxyUrl}/failed-file`;
+        }
+        text = JSON.stringify(result);
+      }
+      response.writeHead(upstream.status, {
+        "content-type": "application/json",
+      });
+      response.end(text);
+    } catch {
+      response.writeHead(502).end();
+    }
+  });
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+
+  try {
+    await app.start();
+    await configureSync(app);
+    const profile = await createProfile(app, "Remote Return");
+    profileId = profile.id;
+    const profileRoot = path.join(app.dataRoot, "data", "profiles", profileId);
+    const data = path.join(profileRoot, "profile", "Default");
+    const preferences = path.join(data, "Preferences");
+    const history = path.join(data, "History");
+    await mkdir(data, { recursive: true });
+    await writeFile(preferences, "remote preferences");
+    await writeFile(history, "remote history");
+    await app.invoke("set_profile_sync_mode", {
+      profileId,
+      syncMode: "Regular",
+    });
+    await app.invoke("request_profile_sync", { profileId });
+    await waitFor(
+      app,
+      async () =>
+        (await app.invoke("list_browser_profiles")).some(
+          (item) => item.id === profileId && item.last_sync != null,
+        ),
+      "the source profile finishes its upload",
+    );
+    const manifestKey = `profiles/${profileId}/manifest.json`;
+    const originalManifest = await downloadRemote(manifestKey);
+    await app.invoke("save_sync_settings", {
+      syncServerUrl: proxyUrl,
+      syncToken,
+    });
+    await app.close();
+
+    await writeFile(preferences, "stale local preferences");
+    await writeFile(history, "stale local history");
+    const later = new Date(Date.now() + 60_000);
+    await Promise.all([
+      utimes(preferences, later, later),
+      utimes(history, later, later),
+    ]);
+    await mkdir(path.join(profileRoot, ".donut-sync"), { recursive: true });
+    await writeFile(
+      path.join(profileRoot, ".donut-sync", "resume-state.json"),
+      JSON.stringify({
+        profile_id: profileId,
+        direction: "download",
+        started_at: new Date().toISOString(),
+        completed_files: [
+          "profile/Default/Preferences",
+          "profile/Default/History",
+        ],
+      }),
+    );
+    await writeFile(
+      path.join(app.dataRoot, "data", "settings", "remote_handoff.json"),
+      JSON.stringify({
+        [profileId]: {
+          session_id: "remote-return-session",
+          state: "pending_sync",
+          observed_at: Math.floor(Date.now() / 1000),
+        },
+      }),
+    );
+    await app.start();
+    const pending = async () =>
+      (await app.invoke("get_remote_handoff_states"))[profileId] ===
+      "pending_sync";
+    await waitFor(
+      app,
+      () => missingManifests >= 2,
+      "return waits for the remote manifest",
+    );
+    assert.equal(await pending(), true);
+    assert.deepEqual(await downloadRemote(manifestKey), originalManifest);
+
+    mode = "offline";
+    await app.invoke("request_profile_sync", { profileId });
+    await waitFor(
+      app,
+      () => failedPulls >= 6,
+      "return keeps trying after five failures",
+      120_000,
+    );
+    assert.equal(await pending(), true);
+
+    mode = "partial";
+    await waitFor(
+      app,
+      () => failedFiles >= 3,
+      "a non-critical file fails to return",
+    );
+    assert.equal(await pending(), true);
+    assert.deepEqual(await downloadRemote(manifestKey), originalManifest);
+
+    mode = "healthy";
+    await waitFor(
+      app,
+      async () => !(await pending()),
+      "return completes without a restart",
+      25_000,
+    );
+    assert.equal(await readFile(preferences, "utf8"), "remote preferences");
+    assert.equal(await readFile(history, "utf8"), "remote history");
+    assert.deepEqual(await downloadRemote(manifestKey), originalManifest);
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await app.close();
+    proxy.closeAllConnections();
+    await new Promise((resolve) => proxy.close(resolve));
+  }
+});
 
 test("two real app devices reconcile profile files and every config entity with last-write-wins", async () => {
   assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
@@ -338,6 +526,136 @@ test("two real app devices reconcile profile files and every config entity with 
   }
 });
 
+test("the first sync of an empty profile publishes a manifest and records completion", async () => {
+  const source = appFromEnvironment("sync-empty-source");
+  try {
+    await source.start();
+    await configureSync(source);
+    const profile = await createProfile(source, "Empty Profile");
+    await source.invoke("set_profile_sync_mode", {
+      profileId: profile.id,
+      syncMode: "Regular",
+    });
+    await source.invoke("request_profile_sync", { profileId: profile.id });
+    const manifestKey = `profiles/${profile.id}/manifest.json`;
+    await waitFor(
+      source,
+      async () => {
+        const profiles = await source.invoke("list_browser_profiles");
+        return (
+          profiles.find((item) => item.id === profile.id)?.last_sync > 0 &&
+          (await listRemote(`profiles/${profile.id}/`)).some(
+            (item) => item.key === manifestKey,
+          )
+        );
+      },
+      "empty profile has a remote manifest and a completed sync",
+    );
+    const manifest = JSON.parse(
+      (await downloadRemote(manifestKey)).toString("utf8"),
+    );
+    assert.deepEqual(manifest.files, []);
+  } catch (error) {
+    await source.capture("failure");
+    throw error;
+  } finally {
+    await source.close();
+  }
+});
+
+test("a restore point keeps a profile's files and puts them back on every device", async () => {
+  const app = appFromEnvironment("sync-restore-points");
+  try {
+    await app.start();
+    await configureSync(app);
+    const profile = await createProfile(app, "Restore Point Profile");
+    const data = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      profile.id,
+      "profile",
+      "Default",
+    );
+    await mkdir(data, { recursive: true });
+    const preferences = path.join(data, "Preferences");
+    await writeFile(preferences, "kept preferences");
+    await app.invoke("set_profile_sync_mode", {
+      profileId: profile.id,
+      syncMode: "Regular",
+    });
+    const synced = async () =>
+      (await app.invoke("list_browser_profiles")).find(
+        (item) => item.id === profile.id,
+      )?.last_sync;
+    await app.invoke("request_profile_sync", { profileId: profile.id });
+    await waitFor(
+      app,
+      async () => (await synced()) > 0,
+      "the first sync of the profile",
+    );
+
+    const point = await app.invoke("create_restore_point", {
+      profileId: profile.id,
+    });
+    assert.equal(point.kind, "manual");
+    assert.ok(point.files >= 1, JSON.stringify(point));
+    const listed = await app.invoke("list_restore_points", {
+      profileId: profile.id,
+    });
+    assert.ok(
+      listed.some((item) => item.id === point.id),
+      JSON.stringify(listed),
+    );
+
+    // A change after the point, synced up.
+    const before = await synced();
+    await new Promise((resolve) => setTimeout(resolve, 1_100));
+    await writeFile(preferences, "changed preferences");
+    await app.invoke("request_profile_sync", { profileId: profile.id });
+    await waitFor(
+      app,
+      async () => (await synced()) > before,
+      "the changed profile synced",
+    );
+
+    await app.invoke("restore_restore_point", {
+      profileId: profile.id,
+      id: point.id,
+    });
+    assert.equal(await readFile(preferences, "utf8"), "kept preferences");
+    const remoteManifest = JSON.parse(
+      (await downloadRemote(`profiles/${profile.id}/manifest.json`)).toString(
+        "utf8",
+      ),
+    );
+    assert.ok(
+      remoteManifest.files.some((file) => file.path.endsWith("Preferences")),
+    );
+    // The data the restore replaced is a restore point of its own.
+    const after = await app.invoke("list_restore_points", {
+      profileId: profile.id,
+    });
+    assert.equal(after.length, listed.length + 1);
+
+    await app.invoke("delete_restore_point", {
+      profileId: profile.id,
+      id: point.id,
+    });
+    assert.equal(
+      (await app.invoke("list_restore_points", { profileId: profile.id })).some(
+        (item) => item.id === point.id,
+      ),
+      false,
+    );
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await app.close();
+  }
+});
+
 test("global config sealing and encrypted profile sync reject a wrong password, round-trip with the right one, and roll over", async () => {
   const source = appFromEnvironment("sync-encrypted-source");
   const receiver = appFromEnvironment("sync-encrypted-receiver");
@@ -482,10 +800,54 @@ test("global config sealing and encrypted profile sync reject a wrong password, 
       "correct password decrypts profile browser file",
     );
 
+    const emptyProfile = await createProfile(source, "Encrypted Empty Profile");
+    await source.invoke("set_profile_sync_mode", {
+      profileId: emptyProfile.id,
+      syncMode: "Encrypted",
+    });
+    await waitFor(
+      source,
+      async () =>
+        (await listRemote(`profiles/${emptyProfile.id}/`)).some(
+          (object) =>
+            object.key === `profiles/${emptyProfile.id}/metadata.json`,
+        ),
+      "empty profile metadata uploaded before rollover",
+    );
+
     await source.invoke("set_e2e_password", {
       password: "rolled encryption password",
     });
-    await source.invoke("rollover_encryption_for_all_entities");
+    let rollingOver = true;
+    let manifestDisappeared = false;
+    await Promise.all([
+      source.invoke("rollover_encryption_for_all_entities").finally(() => {
+        rollingOver = false;
+      }),
+      (async () => {
+        while (rollingOver) {
+          const objects = await listRemote(`profiles/${encryptedProfile.id}/`);
+          manifestDisappeared ||= !objects.some(
+            (object) =>
+              object.key === `profiles/${encryptedProfile.id}/manifest.json`,
+          );
+          if (rollingOver) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+      })(),
+    ]);
+    assert.equal(
+      manifestDisappeared,
+      false,
+      "rollover must not let another device interpret a missing manifest as an empty remote profile",
+    );
+    assert.ok(
+      (await listRemote(`profiles/${emptyProfile.id}/`)).some(
+        (object) => object.key === `profiles/${emptyProfile.id}/manifest.json`,
+      ),
+      "rollover must publish a manifest even for an empty profile",
+    );
     await waitFor(
       source,
       async () => {
@@ -554,6 +916,10 @@ test("global config sealing and encrypted profile sync reject a wrong password, 
       profileId: encryptedProfile.id,
       syncMode: "Disabled",
     });
+    await source.invoke("set_profile_sync_mode", {
+      profileId: emptyProfile.id,
+      syncMode: "Disabled",
+    });
     await source.invoke("delete_e2e_password");
     assert.equal(await source.invoke("check_has_e2e_password"), false);
     const missingPassword = await source.invokeError("verify_e2e_password", {
@@ -573,5 +939,284 @@ test("global config sealing and encrypted profile sync reject a wrong password, 
       receiver.close(),
       rolloverReceiver.close(),
     ]);
+  }
+});
+
+test("a synced profile restored from the trash keeps its sync, and a delete made offline is not undone by the next sync", async () => {
+  assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
+  const app = appFromEnvironment("sync-trash");
+  try {
+    await app.start();
+    await configureSync(app);
+
+    const remoteHas = async (key) =>
+      (await listRemote(key)).some((object) => object.key === key);
+    const manifestKey = (id) => `profiles/${id}/manifest.json`;
+    const tombstoneKey = (id) => `tombstones/profiles/${id}.json`;
+    const isLive = async (id) =>
+      (await app.invoke("list_browser_profiles")).some(
+        (profile) => profile.id === id,
+      );
+    const pendingFile = path.join(
+      app.dataRoot,
+      "data",
+      "pending_profile_deletes.json",
+    );
+    // The pipeline logs this once its reconcile at sync start has finished.
+    const logDir = path.join(app.dataRoot, "logs");
+    const pipelineStarts = async () => {
+      let count = 0;
+      for (const name of await readdir(logDir)) {
+        if (!name.endsWith(".log")) continue;
+        const text = await readFile(path.join(logDir, name), "utf8");
+        count += text.split("Sync scheduler started").length - 1;
+      }
+      return count;
+    };
+    const restartSync = async (description) => {
+      const before = await pipelineStarts();
+      await app.invoke("restart_sync_service");
+      await waitFor(
+        app,
+        async () => (await pipelineStarts()) > before,
+        description,
+      );
+    };
+    const syncedProfile = async (name) => {
+      const profile = await createProfile(app, name);
+      const data = path.join(
+        app.dataRoot,
+        "data",
+        "profiles",
+        profile.id,
+        "profile",
+        "Default",
+      );
+      await mkdir(data, { recursive: true });
+      await writeFile(path.join(data, "Preferences"), JSON.stringify({ name }));
+      await app.invoke("set_profile_sync_mode", {
+        profileId: profile.id,
+        syncMode: "Regular",
+      });
+      await app.invoke("request_profile_sync", { profileId: profile.id });
+      await waitFor(
+        app,
+        () => remoteHas(manifestKey(profile.id)),
+        `${name} uploaded`,
+      );
+      return profile;
+    };
+
+    // Restored at once, while the cloud delete may still be running. The
+    // restore waits for that delete and clears its tombstone before sync is
+    // back on, so nothing can erase the restored profile afterwards.
+    const kept = await syncedProfile("Trash Round Trip");
+    await app.invoke("delete_profile", { profileId: kept.id });
+    const [entry] = await app.invoke("list_trashed_profiles");
+    assert.equal(entry.id, kept.id);
+    assert.equal(entry.sync_enabled, true);
+    const restored = await app.invoke("restore_trashed_profile", {
+      profileId: kept.id,
+    });
+    assert.equal(restored.sync_mode, "Regular");
+    assert.equal(
+      await remoteHas(tombstoneKey(kept.id)),
+      false,
+      "the restore clears the tombstone of the delete",
+    );
+    await waitFor(
+      app,
+      () => remoteHas(manifestKey(kept.id)),
+      "the restored profile uploads again",
+    );
+    await restartSync("the reconcile after the restore finishes");
+    assert.equal(
+      await isLive(kept.id),
+      true,
+      "the reconcile at sync start keeps the restored profile",
+    );
+
+    // Deleted while the server cannot be reached: the delete is owed, and the
+    // next sync start carries it out instead of downloading the profile back.
+    const offline = await syncedProfile("Deleted Offline");
+    await app.invoke("save_sync_settings", {
+      syncServerUrl: "http://127.0.0.1:9",
+      syncToken,
+    });
+    await app.invoke("delete_profile", { profileId: offline.id });
+    await waitFor(
+      app,
+      async () =>
+        JSON.parse(await readFile(pendingFile, "utf8")).some(
+          (pending) => pending.profile_id === offline.id,
+        ),
+      "the unreachable delete is recorded",
+    );
+    assert.equal(await remoteHas(manifestKey(offline.id)), true);
+
+    await app.invoke("save_sync_settings", {
+      syncServerUrl: syncUrl,
+      syncToken,
+    });
+    await restartSync("the reconcile with the owed delete finishes");
+    assert.equal(await remoteHas(tombstoneKey(offline.id)), true);
+    assert.equal(await remoteHas(manifestKey(offline.id)), false);
+    assert.equal(
+      await isLive(offline.id),
+      false,
+      "the profile deleted offline does not come back",
+    );
+    assert.deepEqual(
+      (await app.invoke("list_trashed_profiles")).map((item) => item.id),
+      [offline.id],
+    );
+    await assert.rejects(readFile(pendingFile, "utf8"), { code: "ENOENT" });
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await app.close();
+  }
+});
+
+// A self-hosted server reaches its storage over an address only it can
+// resolve — the documented compose file points S3_ENDPOINT at
+// http://minio:9000, a Docker service name that exists on the compose network
+// and nowhere else. Files never travel through the sync server, so every
+// presigned URL then names a host the desktop cannot open: /health and /readyz
+// stay green while every single transfer dies at connect. Reported as "the
+// endpoint connection works every time, but no MB is ever synced".
+test("the connection check fails a server whose storage host this device cannot reach", async () => {
+  assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
+  const app = appFromEnvironment("sync-preflight");
+
+  // Answers exactly like a healthy self-hosted server that signs presigned
+  // URLs against a container-only host.
+  const misconfigured = createServer((request, response) => {
+    if (request.url === "/readyz") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          status: "ready",
+          s3: true,
+          storageEndpoint: "http://minio.invalid:9000",
+        }),
+      );
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolve) => misconfigured.listen(0, "127.0.0.1", resolve));
+  const misconfiguredUrl = `http://127.0.0.1:${misconfigured.address().port}`;
+
+  try {
+    await app.start();
+
+    const healthy = await app.invoke("check_sync_server_connection", {
+      serverUrl: syncUrl,
+    });
+    assert.equal(healthy.server_reachable, true, "real sync server answers");
+    assert.notEqual(
+      healthy.storage_reachable,
+      false,
+      "the suite's own storage must be reachable from the test device",
+    );
+
+    // The regression itself: green server, storage nobody here can open.
+    const broken = await app.invoke("check_sync_server_connection", {
+      serverUrl: misconfiguredUrl,
+    });
+    assert.equal(broken.server_reachable, true, "server itself answered");
+    assert.equal(broken.storage_ready, true, "server reaches its own storage");
+    assert.equal(broken.storage_endpoint, "http://minio.invalid:9000");
+    assert.equal(
+      broken.storage_reachable,
+      false,
+      "an unreachable storage host must not report as a working connection",
+    );
+    assert.ok(
+      broken.storage_error && broken.storage_error.length > 0,
+      "the failure must carry a cause",
+    );
+    assert.notEqual(
+      broken.storage_error,
+      "error sending request",
+      "the cause must name the transport failure, not the bare reqwest text",
+    );
+
+    // A server that does not answer at all stays a plain connection failure,
+    // so the two are never confused in the UI.
+    const dead = await app.invoke("check_sync_server_connection", {
+      serverUrl: "http://127.0.0.1:1",
+    });
+    assert.equal(dead.server_reachable, false);
+    assert.equal(dead.storage_reachable, null);
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await new Promise((resolve) => misconfigured.close(resolve));
+    await app.close();
+  }
+});
+
+// A paid account syncs with its own server only while signed in, with a token
+// the Donut API binds to that server's address. The suites cannot sign in, so
+// this covers what a device sees on its own: the address the server names on
+// /readyz, and the refusals that keep a signed-out device from storing one.
+test("an own sync server is read from /readyz and needs a signed-in account", async () => {
+  const app = appFromEnvironment("sync-account-server");
+  const accountServer = createServer((request, response) => {
+    if (request.url === "/readyz") {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(
+        JSON.stringify({
+          status: "ready",
+          s3: true,
+          accountUrl: "https://sync.example.test",
+        }),
+      );
+      return;
+    }
+    response.writeHead(404);
+    response.end();
+  });
+  await new Promise((resolve) => accountServer.listen(0, "127.0.0.1", resolve));
+  const accountServerUrl = `http://127.0.0.1:${accountServer.address().port}`;
+
+  try {
+    await app.start();
+
+    const check = await app.invoke("check_sync_server_connection", {
+      serverUrl: accountServerUrl,
+    });
+    assert.equal(check.server_reachable, true);
+    assert.equal(check.account_url, "https://sync.example.test");
+
+    assert.equal(await app.invoke("get_account_sync_server"), null);
+    const refused = await app.invokeError("set_account_sync_server", {
+      serverUrl: accountServerUrl,
+    });
+    assert.match(refused, /"code":"ACCOUNT_SYNC_SIGN_IN_REQUIRED"/);
+    // Going back to Donut cloud is always allowed, and stores nothing.
+    assert.equal(
+      await app.invoke("set_account_sync_server", { serverUrl: null }),
+      null,
+    );
+    assert.equal(await app.invoke("get_account_sync_server"), null);
+
+    // A settings save from the frontend never writes the field.
+    const settings = await app.invoke("get_app_settings");
+    await app.invoke("save_app_settings", {
+      settings: { ...settings, account_sync_server_url: accountServerUrl },
+    });
+    assert.equal(await app.invoke("get_account_sync_server"), null);
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    await new Promise((resolve) => accountServer.close(resolve));
+    await app.close();
   }
 });

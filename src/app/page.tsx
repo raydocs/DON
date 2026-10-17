@@ -3,12 +3,13 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrent } from "@tauri-apps/plugin-deep-link";
-import { motion } from "motion/react";
+import { useReducedMotion } from "motion/react";
 import { useOnborda } from "onborda";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AboutDialog } from "@/components/about-dialog";
 import { AccountPage } from "@/components/account-page";
+import { AgentPage, type AgentTab } from "@/components/agent-page";
 import { ClaudeWorkflowPanel } from "@/components/claude-workflow-panel";
 import { CloneProfileDialog } from "@/components/clone-profile-dialog";
 import { CloseConfirmDialog } from "@/components/close-confirm-dialog";
@@ -21,18 +22,21 @@ import { DeleteConfirmationDialog } from "@/components/delete-confirmation-dialo
 import { DeviceCodeVerifyDialog } from "@/components/device-code-verify-dialog";
 import { ExtensionGroupAssignmentDialog } from "@/components/extension-group-assignment-dialog";
 import { ExtensionManagementDialog } from "@/components/extension-management-dialog";
+import { FeedbackDialog } from "@/components/feedback-dialog";
 import { GroupAssignmentDialog } from "@/components/group-assignment-dialog";
 import { GroupManagementDialog } from "@/components/group-management-dialog";
 import HomeHeader from "@/components/home-header";
 import { ImportProfileDialog } from "@/components/import-profile-dialog";
 import { IntegrationsDialog } from "@/components/integrations-dialog";
 import { ONBOARDING_TOUR } from "@/components/onboarding-provider";
+import { PaidWelcomeDialog } from "@/components/paid-welcome-dialog";
 import { PermissionDialog } from "@/components/permission-dialog";
 import {
   type GateFindings,
   PreLaunchGateDialog,
 } from "@/components/pre-launch-gate-dialog";
 import { ProfilesDataTable } from "@/components/profile-data-table";
+import { ProfileGroupDragProvider } from "@/components/profile-group-drag";
 import {
   type PasswordDialogMode,
   ProfilePasswordDialog,
@@ -41,6 +45,7 @@ import { ProfileSelectorDialog } from "@/components/profile-selector-dialog";
 import { ProfileSyncDialog } from "@/components/profile-sync-dialog";
 import { ProfileTransferDialog } from "@/components/profile-transfer-dialog";
 import { ProxyAssignmentDialog } from "@/components/proxy-assignment-dialog";
+import { ProxyDistributionDialog } from "@/components/proxy-distribution-dialog";
 import { ProxyManagementDialog } from "@/components/proxy-management-dialog";
 import { type AppPage, RailNav } from "@/components/rail-nav";
 import { SettingsDialog } from "@/components/settings-dialog";
@@ -48,20 +53,30 @@ import { ShortcutsPage } from "@/components/shortcuts-page";
 import { SyncAllDialog } from "@/components/sync-all-dialog";
 import { SyncConfigDialog } from "@/components/sync-config-dialog";
 import { SyncFollowerDialog } from "@/components/sync-follower-dialog";
+import { SynchronizerPanel } from "@/components/synchronizer-panel";
+import { TableFilterControls } from "@/components/table-controls";
 import { ThankYouDialog } from "@/components/thank-you-dialog";
+import { TipsDialog } from "@/components/tips-dialog";
+import { TotpToolDialog } from "@/components/totp-code";
+import { TrashPage } from "@/components/trash-page";
 import { WayfernConfigDialog } from "@/components/wayfern-config-dialog";
 import { WayfernTermsDialog } from "@/components/wayfern-terms-dialog";
 import { WelcomeDialog } from "@/components/welcome-dialog";
 import { WindowResizeWarningDialog } from "@/components/window-resize-warning-dialog";
+import { useAgentConsole } from "@/hooks/use-agent-console";
 import { useAppUpdateNotifications } from "@/hooks/use-app-update-notifications";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
 import { cookieBotScopeFor, useCookieBot } from "@/hooks/use-cookie-bot";
 import { useGroupEvents } from "@/hooks/use-group-events";
+import { useKonamiCode } from "@/hooks/use-konami-code";
 import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useProfileEvents } from "@/hooks/use-profile-events";
+import { useProfileStatuses } from "@/hooks/use-profile-statuses";
+import { useProfileTableFilters } from "@/hooks/use-profile-table-filters";
 import { useProxyEvents } from "@/hooks/use-proxy-events";
 import { useSyncSessions } from "@/hooks/use-sync-session";
+import { useTips } from "@/hooks/use-tips";
 import { useUpdateNotifications } from "@/hooks/use-update-notifications";
 import { useVersionUpdater } from "@/hooks/use-version-updater";
 import { useVpnEvents } from "@/hooks/use-vpn-events";
@@ -71,25 +86,27 @@ import {
   launchBlockMessages,
   resolveClaudeStartUrl,
 } from "@/lib/claude-workflow";
-import { canUseCookieBot, getEntitlements } from "@/lib/entitlements";
+import { fireSprinkleConfetti } from "@/lib/confetti";
+import {
+  canUseCookieBot,
+  canUseRemoteControl,
+  getEntitlements,
+  isTeamLauncher,
+} from "@/lib/entitlements";
 import { type GateDecision, gateDecisionAction } from "@/lib/launch-gate";
-import { MOTION_EASE_OUT } from "@/lib/motion";
 import {
   ONBOARDING_TOUR_CLOSED_EVENT,
   ONBOARDING_TOUR_FINISHED_EVENT,
   setOnboardingActive,
 } from "@/lib/onboarding-signal";
-import {
-  matchesProfile,
-  type ProfileSearchContext,
-  parseProfileSearch,
-} from "@/lib/profile-search";
+import { type ProfileSearchContext } from "@/lib/profile-search";
 import {
   matchesGroupDigit,
   matchesShortcut,
   SHORTCUTS,
   type ShortcutId,
 } from "@/lib/shortcuts";
+import type { TipAction } from "@/lib/tips";
 import {
   dismissToast,
   showErrorToast,
@@ -132,6 +149,9 @@ function consistencyFromErrorParams(
     fingerprint_timezone: params?.fingerprintTimezone || null,
     fingerprint_language: params?.fingerprintLanguage || null,
     mismatches: (params?.mismatches ?? "").split(",").filter(Boolean),
+    // Carried through rather than defaulted to empty: a dimension nothing
+    // compared must not be rebuilt here as a dimension that passed.
+    unverified: (params?.unverified ?? "").split(",").filter(Boolean),
   };
 }
 
@@ -144,6 +164,7 @@ interface PendingUrl {
 
 export default function Home() {
   const { t } = useTranslation();
+  const reducedMotion = useReducedMotion();
   // Mount global version update listener/toasts
   useVersionUpdater();
 
@@ -153,6 +174,7 @@ export default function Home() {
     runningProfiles,
     isLoading: profilesLoading,
     error: profilesError,
+    loadProfiles,
   } = useProfileEvents();
 
   // First-run onboarding tour (Onborda).
@@ -266,7 +288,9 @@ export default function Home() {
     groups: groupsData,
     isLoading: groupsLoading,
     error: groupsError,
+    loadGroups,
   } = useGroupEvents();
+  const profileStatuses = useProfileStatuses();
 
   const {
     storedProxies,
@@ -307,11 +331,15 @@ export default function Home() {
   }, []);
 
   // Synchronizer sessions
-  const { getProfileSyncInfo } = useSyncSessions();
+  const {
+    sessions: syncSessions,
+    getProfileSyncInfo,
+    applySession,
+  } = useSyncSessions();
   const [syncLeaderProfile, setSyncLeaderProfile] =
     useState<BrowserProfile | null>(null);
 
-  // Wayfern terms hooks
+  // Wayfern terms
   const {
     termsAccepted,
     isLoading: termsLoading,
@@ -319,20 +347,18 @@ export default function Home() {
   } = useWayfernTerms();
 
   // Cloud auth for cross-OS unlock
-  const { user: cloudUser } = useCloudAuth();
+  const { user: cloudUser, loggedInAt: cloudLoggedInAt } = useCloudAuth();
   const crossOsUnlocked = getEntitlements(cloudUser).crossOsFingerprints;
-  // Bulk run/stop is a paid (browser automation) feature, matching the
-  // /v1/profiles/batch/run API gate. Free/solo users see the bulk Run/Stop
-  // actions disabled with a Pro badge.
   const automationUnlocked = getEntitlements(cloudUser).browserAutomation;
   // The rail needs to show a live run from every page, so the shell subscribes
   // to the shared cookie-bot store too. It is a module singleton, so this costs
   // one more listener and no extra request. This is also what starts the event
   // stream for a user who signs in without restarting the app.
-  const { liveSessions: cookieBotLiveSessions } = useCookieBot(
-    canUseCookieBot(cloudUser),
-    cookieBotScopeFor(cloudUser),
-  );
+  const {
+    liveSessions: cookieBotLiveSessions,
+    schedules: cookieBotSchedules,
+    isLoading: cookieBotLoading,
+  } = useCookieBot(canUseCookieBot(cloudUser), cookieBotScopeFor(cloudUser));
 
   const [selfHostedSyncConfigured, setSelfHostedSyncConfigured] =
     useState(false);
@@ -356,6 +382,50 @@ export default function Home() {
   const cloudBackupUnlocked = getEntitlements(cloudUser).cloudBackup;
   const syncUnlocked = cloudBackupUnlocked || selfHostedSyncConfigured;
 
+  // Feature tips and the paid-plan welcome wait for a settled app: not the
+  // first-run session, terms accepted, nothing modal in the way. The usage
+  // lists let the automatic tip skip a feature the user already has in use.
+  const tipUsage = useMemo(
+    () => ({
+      loaded: !groupsLoading && !proxiesLoading && !cookieBotLoading,
+      profiles,
+      groupCount: groupsData.length,
+      extensionGroupCount: extensionGroups.length,
+      cookieBotEnrolled:
+        Object.keys(cookieBotSchedules).length > 0 ||
+        Object.keys(cookieBotLiveSessions).length > 0,
+      syncServerConfigured: selfHostedSyncConfigured,
+      proxyIds: storedProxies.map((proxy) => proxy.id),
+    }),
+    [
+      groupsLoading,
+      proxiesLoading,
+      cookieBotLoading,
+      profiles,
+      groupsData.length,
+      extensionGroups.length,
+      cookieBotSchedules,
+      cookieBotLiveSessions,
+      selfHostedSyncConfigured,
+      storedProxies,
+    ],
+  );
+  const settledLaunch =
+    firstRunOnboarding === false &&
+    !profilesLoading &&
+    !welcomeOpen &&
+    !thankYouOpen &&
+    !isOnbordaVisible &&
+    !termsLoading &&
+    termsAccepted === true;
+  const tipsFlow = useTips({
+    cloudUser,
+    loggedInAt: cloudLoggedInAt,
+    ready: settledLaunch,
+    usage: tipUsage,
+  });
+  const { openTips, closeTips } = tipsFlow;
+
   const [currentPage, setCurrentPage] = useState<AppPage>("profiles");
   const [accountDialogOpen, setAccountDialogOpen] = useState(false);
   // Tracks which tab inside the shared proxy-management page should be active.
@@ -366,14 +436,38 @@ export default function Home() {
   const [extensionManagementInitialTab, setExtensionManagementInitialTab] =
     useState<"extensions" | "groups">("extensions");
   const [integrationsInitialTab, setIntegrationsInitialTab] = useState<
-    "api" | "mcp"
+    "api" | "remote"
   >("api");
   const [cookieBotDialogOpen, setCookieBotDialogOpen] = useState(false);
+  const [totpToolOpen, setTotpToolOpen] = useState(false);
   const [cookieBotInitialTab, setCookieBotInitialTab] =
     useState<CookieBotTab>("overview");
+  const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [agentInitialTab, setAgentInitialTab] =
+    useState<AgentTab>("conversation");
   const [createProfileDialogOpen, setCreateProfileDialogOpen] = useState(false);
   const [claudeWorkflowOpen, setClaudeWorkflowOpen] = useState(false);
+  const [profileToShare, setProfileToShare] = useState<BrowserProfile | null>(
+    null,
+  );
+  const teamReadOnly = isTeamLauncher(cloudUser);
+  const teamReadOnlyRef = useRef(teamReadOnly);
+  teamReadOnlyRef.current = teamReadOnly;
+  // A launcher's new profile would be refused; say so before the form is
+  // filled in, not after.
+  const openCreateProfile = useCallback(() => {
+    if (teamReadOnlyRef.current) {
+      showErrorToast(t("backendErrors.teamRoleReadOnly"));
+      return;
+    }
+    setCreateProfileDialogOpen(true);
+  }, [t]);
   const [settingsDialogOpen, setSettingsDialogOpen] = useState(false);
+  // A settings section to land on, set by a tip's action for one opening.
+  const [settingsInitialSection, setSettingsInitialSection] = useState<
+    string | null
+  >(null);
+  const [trashPageOpen, setTrashPageOpen] = useState(false);
   const [integrationsDialogOpen, setIntegrationsDialogOpen] = useState(false);
   const [importProfileDialogOpen, setImportProfileDialogOpen] = useState(false);
   const [proxyManagementDialogOpen, setProxyManagementDialogOpen] =
@@ -412,15 +506,16 @@ export default function Home() {
   const [selectedProfilesForProxy, setSelectedProfilesForProxy] = useState<
     string[]
   >([]);
+  const [proxyDistributionDialogOpen, setProxyDistributionDialogOpen] =
+    useState(false);
+  const [selectedProfilesForDistribution, setSelectedProfilesForDistribution] =
+    useState<string[]>([]);
   const [selectedProfiles, setSelectedProfiles] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState<string>("");
   const [pendingUrls, setPendingUrls] = useState<PendingUrl[]>([]);
   const [currentProfileForWayfernConfig, setCurrentProfileForWayfernConfig] =
     useState<BrowserProfile | null>(null);
   const [cloneProfile, setCloneProfile] = useState<BrowserProfile | null>(null);
-  const [profileToShare, setProfileToShare] = useState<BrowserProfile | null>(
-    null,
-  );
   const [passwordDialogProfile, setPasswordDialogProfile] =
     useState<BrowserProfile | null>(null);
   const [passwordDialogMode, setPasswordDialogMode] =
@@ -444,6 +539,7 @@ export default function Home() {
     useState<BrowserProfile | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [aboutDialogOpen, setAboutDialogOpen] = useState(false);
+  const [feedbackDialogOpen, setFeedbackDialogOpen] = useState(false);
   // Pre-launch gate. Requests queue instead of overwriting a single resolver:
   // a bulk run enqueues one per profile, and every waiter must settle or the
   // Promise.allSettled below it never resolves and the bulk spinner sticks.
@@ -482,6 +578,9 @@ export default function Home() {
   // info dialog. ProfilesDataTable consumes it through controlled props.
   const [profileInfoDialog, setProfileInfoDialog] =
     useState<BrowserProfile | null>(null);
+  const [profileInfoOpenMethod, setProfileInfoOpenMethod] = useState<
+    "pointer" | "keyboard"
+  >("pointer");
   const { isMicrophoneAccessGranted, isCameraAccessGranted, isInitialized } =
     usePermissions();
 
@@ -502,6 +601,9 @@ export default function Home() {
     setImportProfileDialogOpen(false);
     setAccountDialogOpen(false);
     setCookieBotDialogOpen(false);
+    setAgentDialogOpen(false);
+    setTrashPageOpen(false);
+    setSettingsInitialSection(null);
 
     setCurrentPage(page);
     switch (page) {
@@ -523,6 +625,9 @@ export default function Home() {
       case "cookieBot":
         setCookieBotDialogOpen(true);
         break;
+      case "agent":
+        setAgentDialogOpen(true);
+        break;
       case "integrations":
         setIntegrationsDialogOpen(true);
         break;
@@ -538,17 +643,59 @@ export default function Home() {
       case "account":
         setAccountDialogOpen(true);
         break;
+      case "trash":
+        setTrashPageOpen(true);
+        break;
       case "shortcuts":
         // Plain page render — nothing else to open.
         break;
     }
   }, []);
 
+  const openAgentConversation = useCallback(() => {
+    setAgentInitialTab("conversation");
+    handleRailNavigate("agent");
+  }, [handleRailNavigate]);
+  const agentConsole = useAgentConsole({
+    onOpenPage: openAgentConversation,
+    pageVisible: currentPage === "agent",
+  });
+
+  const runTipAction = useCallback(
+    (action: TipAction) => {
+      closeTips();
+      switch (action.kind) {
+        case "page":
+          handleRailNavigate(action.page);
+          break;
+        case "settings":
+          // The navigation clears the section; setting it afterwards in the
+          // same batch is what makes it win.
+          handleRailNavigate("settings");
+          setSettingsInitialSection(action.section);
+          break;
+        case "palette":
+          setCommandPaletteOpen(true);
+          break;
+        case "feedback":
+          setFeedbackDialogOpen(true);
+          break;
+      }
+    },
+    [closeTips, handleRailNavigate],
+  );
+
   const runShortcut = useCallback(
     (id: ShortcutId) => {
       switch (id) {
         case "openPalette":
           setCommandPaletteOpen(true);
+          break;
+        case "openTips":
+          openTips();
+          break;
+        case "sendFeedback":
+          setFeedbackDialogOpen(true);
           break;
         case "openShortcuts":
           handleRailNavigate("shortcuts");
@@ -601,10 +748,28 @@ export default function Home() {
           }
           break;
         }
+        case "goAgent": {
+          // Mod+J: navigate first time; flip conversation↔activity while
+          // already there, matching how Mod+B flips the Cookie Bot tabs.
+          if (currentPage === "agent") {
+            setAgentInitialTab((cur) =>
+              cur === "conversation" ? "activity" : "conversation",
+            );
+          } else {
+            openAgentConversation();
+          }
+          break;
+        }
         case "goIntegrations": {
-          // Mod+I: flip api↔mcp tab when already on integrations.
+          // Mod+I: flip the tabs when already on integrations. The Remote MCP
+          // tab only exists for a user entitled to remote control, so everyone
+          // else stays on the API tab.
           if (currentPage === "integrations") {
-            setIntegrationsInitialTab((cur) => (cur === "api" ? "mcp" : "api"));
+            setIntegrationsInitialTab((cur) =>
+              cur === "api" && canUseRemoteControl(cloudUser)
+                ? "remote"
+                : "api",
+            );
           } else {
             handleRailNavigate("integrations");
           }
@@ -616,9 +781,22 @@ export default function Home() {
         case "goSettings":
           handleRailNavigate("settings");
           break;
+        case "goTrash":
+          handleRailNavigate("trash");
+          break;
+        case "openTotp":
+          setTotpToolOpen(true);
+          break;
       }
     },
-    [handleRailNavigate, currentPage, proxyManagementInitialTab],
+    [
+      handleRailNavigate,
+      currentPage,
+      proxyManagementInitialTab,
+      cloudUser,
+      openTips,
+      openAgentConversation,
+    ],
   );
 
   // Ordered list the digit shortcuts and palette consume. "__all__" is index 1
@@ -678,6 +856,19 @@ export default function Home() {
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [runShortcut, selectGroupByDigit, orderedGroupTargets.length]);
+
+  // The classic cheat code pays out in sprinkles. Nothing else changes: it
+  // touches no profile, setting, or file, so it is safe anywhere in the app.
+  useKonamiCode(
+    useCallback(() => {
+      showSuccessToast(t("easterEgg.konami.title"), {
+        id: "cheat-code",
+        description: t("easterEgg.konami.description"),
+      });
+      window.dispatchEvent(new CustomEvent("donut-cheat-code"));
+      if (!reducedMotion) fireSprinkleConfetti();
+    }, [reducedMotion, t]),
+  );
 
   // Check for missing binaries and offer to download them
   const checkMissingBinaries = useCallback(async () => {
@@ -916,7 +1107,7 @@ export default function Home() {
             event.payload,
           );
           showErrorToast(t("errors.noProfilesForUrl"));
-          setCreateProfileDialogOpen(true);
+          if (!teamReadOnlyRef.current) setCreateProfileDialogOpen(true);
         }),
       );
 
@@ -954,13 +1145,10 @@ export default function Home() {
         setWayfernConfigDialogOpen(false);
       } catch (err: unknown) {
         console.error("Failed to update wayfern config:", err);
-        showErrorToast(
-          t("errors.updateWayfernConfigFailed", { error: JSON.stringify(err) }),
-        );
         throw err;
       }
     },
-    [t],
+    [],
   );
 
   const handleCreateProfile = useCallback(
@@ -976,6 +1164,8 @@ export default function Home() {
       extensionGroupId?: string;
       ephemeral?: boolean;
       dnsBlocklist?: string;
+      dnsServer?: string;
+      startUrls?: string[];
       launchHook?: string;
       password?: string;
       claudeTags?: string[];
@@ -999,7 +1189,9 @@ export default function Home() {
                 : undefined),
             ephemeral: profileData.ephemeral,
             dnsBlocklist: profileData.dnsBlocklist,
+            dnsServer: profileData.dnsServer,
             launchHook: profileData.launchHook,
+            startUrls: profileData.startUrls,
           },
         );
 
@@ -1029,28 +1221,22 @@ export default function Home() {
           }
         }
 
-        // DON Claude isolation metadata (tags + note labels)
         if (profileData.claudeTags?.length) {
-          try {
-            await invoke("update_profile_tags", {
-              profileId: profile.id,
-              tags: profileData.claudeTags,
-            });
-          } catch (err) {
-            console.error("Failed to set Claude tags:", err);
-          }
+          await invoke("update_profile_tags", {
+            profileId: profile.id,
+            tags: profileData.claudeTags,
+          }).catch((error: unknown) => {
+            showErrorToast(translateBackendError(t, error));
+          });
         }
         if (profileData.claudeNote) {
-          try {
-            await invoke("update_profile_note", {
-              profileId: profile.id,
-              note: profileData.claudeNote,
-            });
-          } catch (err) {
-            console.error("Failed to set Claude note:", err);
-          }
+          await invoke("update_profile_note", {
+            profileId: profile.id,
+            note: profileData.claudeNote,
+          }).catch((error: unknown) => {
+            showErrorToast(translateBackendError(t, error));
+          });
         }
-
         // No need to manually reload - useProfileEvents will handle the update
       } catch (error) {
         showErrorToast(
@@ -1083,6 +1269,57 @@ export default function Home() {
                 })
               : undefined,
           id: `fingerprint-mismatch-${exit_timezone ?? "unknown"}`,
+        });
+      },
+    );
+    return () => {
+      void unlisten.then((fn) => {
+        fn();
+      });
+    };
+  }, [t]);
+
+  useEffect(() => {
+    const unlisten = listen<{ profile_name: string; error: string }>(
+      "profile-launch-args-skipped",
+      (event) => {
+        showErrorToast(
+          t("fingerprint.launchArgsSkipped", {
+            profile: event.payload.profile_name,
+            reason: translateBackendError(t, event.payload.error),
+          }),
+          { id: `launch-args-skipped-${event.payload.profile_name}` },
+        );
+      },
+    );
+    return () => {
+      void unlisten.then((fn) => {
+        fn();
+      });
+    };
+  }, [t]);
+
+  // The third state. The gate reached the exit but the fingerprint declares no
+  // value to compare it against, so nothing was verified, which is not a
+  // mismatch and never blocks, but is not the clean bill of health that
+  // reporting nothing would imply.
+  useEffect(() => {
+    const unlisten = listen<ConsistencyResult>(
+      "fingerprint-consistency-unverified",
+      (event) => {
+        const { unverified, exit_timezone, exit_country_code } = event.payload;
+        if (unverified.length === 0) {
+          return;
+        }
+        showErrorToast(t("consistencyWarning.unverifiedTitle"), {
+          description: unverified.includes("timezone")
+            ? t("consistencyWarning.unverifiedTimezoneDetail", {
+                exit: exit_timezone ?? exit_country_code ?? "?",
+              })
+            : t("consistencyWarning.unverifiedLanguageDetail", {
+                country: exit_country_code ?? "?",
+              }),
+          id: `fingerprint-unverified-${unverified.join("-")}`,
         });
       },
     );
@@ -1143,7 +1380,7 @@ export default function Home() {
         return;
       }
       entry.resolve(decision);
-      if (decision.applyToRemaining) {
+      if (decision.applyToRemaining && !decision.retryAfterFingerprintMatch) {
         const coversBlocking = entry.req.findings.fingerprint !== null;
         // Only a bulk run gets a standing blanket, and it claims the run the
         // answered dialog belonged to — never whichever run happens to be in
@@ -1214,23 +1451,10 @@ export default function Home() {
       opts?: { bulkRunId?: number },
     ): Promise<LaunchResult> => {
       console.log("Starting launch for profile:", profile.name);
-
-      // DON Claude isolation: hard-block unsafe launches (shared IP / randomize / DPR).
-      // Skip for non-wayfern. Allow force via bulk only if user fixes first.
-      if (profile.browser === "wayfern" && !opts?.bulkRunId) {
-        const hostDpr =
-          typeof window !== "undefined" ? window.devicePixelRatio : undefined;
-        const blocks = launchBlockMessages(profile, profiles, hostDpr);
-        if (blocks.length > 0) {
-          showErrorToast(
-            t("claudeWorkflow.launchBlocked", {
-              message: blocks[0],
-              defaultValue: `Launch blocked: ${blocks[0]}`,
-            }),
-          );
-          setClaudeWorkflowOpen(true);
-          return { status: "blocked" };
-        }
+      const blockers = launchBlockMessages(profile, profiles);
+      if (blockers.length) {
+        showErrorToast(blockers.join(" · "));
+        return { status: "blocked" };
       }
 
       // Password-protected: must be unlocked before launch
@@ -1270,46 +1494,24 @@ export default function Home() {
         }
       }
 
-      let profileForAttempt = profile;
+      // Matching changes identity: rerun both tiers without stale consent.
       let reloadBeforeAttempt = false;
-
-      // Matching the fingerprint persists a new identity. It must re-enter
-      // both launch-gate tiers with a freshly loaded profile and no consent
-      // token from the old identity. An explicit user action may repeat this
-      // loop; an ordinary launch still executes it exactly once.
       for (;;) {
         if (reloadBeforeAttempt) {
-          try {
-            const latestProfiles = await invoke<BrowserProfile[]>(
-              "list_browser_profiles",
-            );
-            const latestProfile = latestProfiles.find(
-              (candidate) => candidate.id === profileForAttempt.id,
-            );
-            if (!latestProfile) {
-              showErrorToast(t("backendErrors.profileNotFound"));
-              return { status: "blocked" };
-            }
-            profileForAttempt = latestProfile;
-            reloadBeforeAttempt = false;
-          } catch (err) {
-            showErrorToast(
-              t("errors.launchBrowserFailed", {
-                error: translateBackendError(t, err),
-              }),
-            );
-            return { status: "blocked" };
-          }
+          const fresh = await invoke<BrowserProfile[]>("list_browser_profiles");
+          const updated = fresh.find((item) => item.id === profile.id);
+          if (!updated) return { status: "cancelled" };
+          profile = updated;
+          reloadBeforeAttempt = false;
         }
-
         // Tier 1: purely local checks — an extension scan and a cached exit
         // verdict. No network, no worker started, so a profile whose exit is
         // already known blocks before the launch touches anything.
         let consentToken: string | null = null;
         // Kept for the tier-2 dialog below: the extensions are the same ones,
-        // and a mismatch measured mid-launch is exactly when knowing that one
-        // of them can change the proxy matters most. Minus anything the user
-        // just acknowledged, so a box they ticked is not shown again.
+        // and a mismatch measured mid-launch is exactly when knowing that one of
+        // them can change the proxy matters most. Minus anything the user just
+        // acknowledged, so a box they ticked seconds ago is not shown again.
         let localChecks: PreLaunchChecks | null = null;
         let ackedExtensionKeys: string[] = [];
         try {
@@ -1317,10 +1519,10 @@ export default function Home() {
           // so a user who already dismissed this profile isn't hard-blocked by
           // the new gate. Granted against the profile's current exit, which is
           // the mismatch they were looking at when they dismissed it.
-          const legacySkipKey = `consistency-warn-skip-${profileForAttempt.id}`;
+          const legacySkipKey = `consistency-warn-skip-${profile.id}`;
           if (localStorage.getItem(legacySkipKey) === "1") {
             await invoke("ack_launch_gate", {
-              profileId: profileForAttempt.id,
+              profileId: profile.id,
               ackFingerprint: true,
               ackExtensionKeys: [],
             }).catch((err: unknown) => {
@@ -1331,7 +1533,7 @@ export default function Home() {
 
           const checks = await invoke<PreLaunchChecks>(
             "get_profile_pre_launch_checks",
-            { profileId: profileForAttempt.id },
+            { profileId: profile.id },
           );
           localChecks = checks;
           const blocked =
@@ -1339,18 +1541,19 @@ export default function Home() {
           if (blocked || checks.vpn_extensions.length > 0) {
             const decision = await requestGateDecision(
               {
-                profile: profileForAttempt,
+                profile,
                 findings: {
                   vpnExtensions: checks.vpn_extensions,
                   scanState: checks.scan_state,
                   fingerprint: blocked ? checks.consistency : null,
                   measurementUnreliable: checks.exit_measurement_unreliable,
                   probePending: checks.exit_probe_pending,
+                  unverified: checks.exit_unverified,
                 },
               },
               opts?.bulkRunId,
             );
-            await persistGateAcks(profileForAttempt.id, decision);
+            await persistGateAcks(profile.id, decision);
             const action = gateDecisionAction(decision);
             if (action === "retry") {
               reloadBeforeAttempt = true;
@@ -1368,29 +1571,27 @@ export default function Home() {
           console.warn("Pre-launch checks failed, launching anyway:", err);
         }
 
-        // Claude isolation profiles open claude.com (or note start_url) by default.
-        const startUrl = resolveClaudeStartUrl(profileForAttempt) ?? undefined;
-
         try {
           const result = await invoke<BrowserProfile>(
             "launch_browser_profile",
             {
-              profile: profileForAttempt,
-              url: startUrl,
+              profile,
               consentToken,
+              url: resolveClaudeStartUrl(profile),
             },
           );
           console.log("Successfully launched profile:", result.name);
           return { status: "launched" };
         } catch (err: unknown) {
           // Tier 2: the enforcing gate measured the exit mid-launch and stopped
-          // before spawning the browser. Approval retries exactly once with the
-          // token it minted. A fingerprint match instead restarts both tiers.
+          // before spawning the browser. Offer the same decision, then retry
+          // exactly once with the token it minted — bounded, so a gate loop is
+          // structurally impossible.
           const parsed = parseBackendError(err);
           if (parsed?.code === "FINGERPRINT_EXIT_MISMATCH") {
             const decision = await requestGateDecision(
               {
-                profile: profileForAttempt,
+                profile,
                 findings: {
                   vpnExtensions: (localChecks?.vpn_extensions ?? []).filter(
                     (ext) => !ackedExtensionKeys.includes(ext.key),
@@ -1400,11 +1601,12 @@ export default function Home() {
                   measurementUnreliable:
                     localChecks?.exit_measurement_unreliable ?? false,
                   probePending: false,
+                  unverified: localChecks?.exit_unverified ?? [],
                 },
               },
               opts?.bulkRunId,
             );
-            await persistGateAcks(profileForAttempt.id, decision);
+            await persistGateAcks(profile.id, decision);
             const action = gateDecisionAction(decision);
             if (action === "retry") {
               reloadBeforeAttempt = true;
@@ -1415,9 +1617,9 @@ export default function Home() {
             }
             try {
               await invoke<BrowserProfile>("launch_browser_profile", {
-                profile: profileForAttempt,
-                url: startUrl,
+                profile,
                 consentToken: parsed.params?.token ?? null,
+                url: resolveClaudeStartUrl(profile),
               });
               return { status: "launched" };
             } catch (retryErr: unknown) {
@@ -1439,7 +1641,7 @@ export default function Home() {
         }
       }
     },
-    [persistGateAcks, profiles, requestGateDecision, t],
+    [persistGateAcks, requestGateDecision, profiles, t],
   );
 
   const handleCloneProfile = useCallback((profile: BrowserProfile) => {
@@ -1487,9 +1689,10 @@ export default function Home() {
         console.log("Profile deleted successfully");
       } catch (err: unknown) {
         console.error("Failed to delete profile:", err);
-        const errorMessage = err instanceof Error ? err.message : String(err);
         showErrorToast(
-          t("errors.deleteProfileFailed", { error: errorMessage }),
+          t("errors.deleteProfileFailed", {
+            error: translateBackendError(t, err),
+          }),
         );
       }
     },
@@ -1553,6 +1756,48 @@ export default function Home() {
     setGroupAssignmentDialogOpen(true);
   }, []);
 
+  const handleDropProfilesToGroup = useCallback(
+    async (profileIds: string[], groupId: string | null) => {
+      const targets = profiles.filter((profile) =>
+        profileIds.includes(profile.id),
+      );
+      if (
+        targets.length !== profileIds.length ||
+        targets.some(
+          (profile) =>
+            profile.process_id != null || runningProfiles.has(profile.id),
+        ) ||
+        (groupId !== null && !groupsData.some((group) => group.id === groupId))
+      ) {
+        showErrorToast(t("profileMotion.dragUnavailable"));
+        return false;
+      }
+      try {
+        await invoke("assign_profiles_to_group", { profileIds, groupId });
+        setSelectedProfiles((selected) =>
+          selected.filter((id) => !profileIds.includes(id)),
+        );
+        showSuccessToast(
+          t("groups.assignSuccess", {
+            count: profileIds.length,
+            group:
+              groupsData.find((group) => group.id === groupId)?.name ??
+              t("groups.noGroup"),
+          }),
+        );
+        return true;
+      } catch (error) {
+        showErrorToast(translateBackendError(t, error));
+        return false;
+      } finally {
+        // The backend can reject after writing an earlier member of the batch.
+        // Refresh both views even on failure so counts and placement stay true.
+        await Promise.allSettled([loadProfiles(), loadGroups()]);
+      }
+    },
+    [profiles, runningProfiles, groupsData, loadProfiles, loadGroups, t],
+  );
+
   const handleBulkDelete = useCallback(() => {
     if (selectedProfiles.length === 0) return;
     setShowBulkDeleteConfirmation(true);
@@ -1613,6 +1858,12 @@ export default function Home() {
     handleAssignProfilesToProxy(selectedProfiles);
     setSelectedProfiles([]);
   }, [selectedProfiles, handleAssignProfilesToProxy]);
+
+  const handleBulkProxyDistribution = useCallback(() => {
+    if (selectedProfiles.length === 0) return;
+    setSelectedProfilesForDistribution(selectedProfiles);
+    setProxyDistributionDialogOpen(true);
+  }, [selectedProfiles]);
 
   const handleBulkCopyCookies = useCallback(() => {
     if (selectedProfiles.length === 0) return;
@@ -1926,6 +2177,7 @@ export default function Home() {
     let unlistenProgress: (() => void) | undefined;
     let unlistenCompleted: (() => void) | undefined;
     let unlistenWayfernBlocked: (() => void) | undefined;
+    let unlistenGenerationLimit: (() => void) | undefined;
 
     void (async () => {
       unlistenRequired = await listen(
@@ -1988,6 +2240,19 @@ export default function Home() {
         });
       });
 
+      unlistenGenerationLimit = await listen(
+        "profile-generation-limit-reached",
+        () => {
+          showToast({
+            id: "profile-generation-limit-reached",
+            type: "error",
+            title: t("profileGenerationLimit.title"),
+            description: t("profileGenerationLimit.description"),
+            duration: 15000,
+          });
+        },
+      );
+
       unlistenWayfernBlocked = await listen("wayfern-paid-blocked", () => {
         showToast({
           id: "wayfern-paid-blocked",
@@ -2006,6 +2271,7 @@ export default function Home() {
         unlistenProgress?.();
         unlistenCompleted?.();
         unlistenWayfernBlocked?.();
+        unlistenGenerationLimit?.();
       }
     })();
 
@@ -2016,6 +2282,7 @@ export default function Home() {
       unlistenProgress?.();
       unlistenCompleted?.();
       unlistenWayfernBlocked?.();
+      unlistenGenerationLimit?.();
     };
   }, [t]);
 
@@ -2062,29 +2329,41 @@ export default function Home() {
       proxyNames: new Map(storedProxies.map((p) => [p.id, p.name])),
       vpnNames: new Map(vpnConfigs.map((v) => [v.id, v.name])),
       extensionGroupNames: new Map(extensionGroups.map((e) => [e.id, e.name])),
+      statusNames: new Map(profileStatuses.map((s) => [s.id, s.name])),
       runningProfiles,
     }),
-    [groupsData, storedProxies, vpnConfigs, extensionGroups, runningProfiles],
+    [
+      groupsData,
+      storedProxies,
+      vpnConfigs,
+      extensionGroups,
+      profileStatuses,
+      runningProfiles,
+    ],
   );
 
-  // Filter data by selected group and search query. The two are independent
-  // controls and both apply: the rail narrows to a group, the query narrows
-  // within whatever the rail left.
-  const filteredProfiles = useMemo(() => {
-    // "__all__" is a virtual filter that shows every profile (including
-    // ungrouped ones). Any other value is a real group id; ungrouped profiles
-    // only show through "All".
-    const inGroup =
+  const clearTableSelection = useCallback(() => setSelectedProfiles([]), []);
+  const profilesInGroup = useMemo(
+    () =>
       !selectedGroupId || selectedGroupId === "__all__"
         ? profiles
-        : profiles.filter((profile) => profile.group_id === selectedGroupId);
-
-    const parsed = parseProfileSearch(searchQuery);
-    if (parsed.isEmpty) return inGroup;
-    return inGroup.filter((profile) =>
-      matchesProfile(profile, parsed, searchContext),
-    );
-  }, [profiles, selectedGroupId, searchQuery, searchContext]);
+        : profiles.filter((profile) => profile.group_id === selectedGroupId),
+    [profiles, selectedGroupId],
+  );
+  const profileFilters = useProfileTableFilters(
+    profilesInGroup,
+    searchQuery,
+    searchContext,
+    clearTableSelection,
+  );
+  const changeProfileSearch = (query: string) => {
+    setSelectedProfiles([]);
+    setSearchQuery(query);
+  };
+  const clearProfileFilters = () => {
+    profileFilters.reset();
+    setSearchQuery("");
+  };
 
   // Update loading states
   const isLoading = profilesLoading || groupsLoading || proxiesLoading;
@@ -2097,577 +2376,692 @@ export default function Home() {
         : t(`pageTitle.${currentPage}`);
 
   return (
-    <div className="flex h-dvh flex-col bg-background font-(family-name:--font-geist-sans)">
-      <CloseConfirmDialog />
-      <HomeHeader
-        onCreateProfileDialogOpen={setCreateProfileDialogOpen}
-        onClaudeWorkflowOpen={() => {
-          setClaudeWorkflowOpen(true);
-        }}
-        searchQuery={searchQuery}
-        onSearchQueryChange={setSearchQuery}
-        groups={groupsData}
-        totalProfiles={profiles.length}
-        selectedGroupId={selectedGroupId}
-        onGroupSelect={handleSelectGroup}
-        pageTitle={subPageTitle}
-      />
-      <div className="flex min-h-0 flex-1">
-        <RailNav
-          currentPage={currentPage}
-          onNavigate={handleRailNavigate}
+    <ProfileGroupDragProvider
+      enabled={currentPage === "profiles"}
+      onAssign={handleDropProfilesToGroup}
+    >
+      <div className="flex h-dvh flex-col bg-background font-(family-name:--font-geist-sans)">
+        <CloseConfirmDialog />
+        <HomeHeader
+          onClaudeWorkflowOpen={() => setClaudeWorkflowOpen(true)}
+          onCreateProfileDialogOpen={(open) =>
+            open ? openCreateProfile() : setCreateProfileDialogOpen(false)
+          }
+          canCreateProfiles={!teamReadOnly}
+          searchQuery={searchQuery}
+          onSearchQueryChange={changeProfileSearch}
+          groups={groupsData}
+          totalProfiles={profiles.length}
+          selectedGroupId={selectedGroupId}
+          onGroupSelect={handleSelectGroup}
+          pageTitle={subPageTitle}
+        />
+        <div className="flex min-h-0 flex-1">
+          <RailNav
+            currentPage={currentPage}
+            onNavigate={handleRailNavigate}
+            onOpenAbout={() => {
+              setAboutDialogOpen(true);
+            }}
+            onOpenTips={() => openTips()}
+            onOpenFeedback={() => {
+              setFeedbackDialogOpen(true);
+            }}
+            cookieBotRunning={Object.keys(cookieBotLiveSessions).length > 0}
+            agentRequests={agentConsole.openRequests.length}
+          />
+          <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+            {currentPage === "profiles" && (
+              <div
+                data-table-id="profiles"
+                className="flex min-h-0 flex-1 flex-col px-3 pt-2.5"
+              >
+                <SynchronizerPanel
+                  sessions={syncSessions}
+                  onSessionChanged={applySession}
+                />
+                {teamReadOnly && (
+                  <p
+                    className="mb-2 rounded-md bg-foreground/5 px-3 py-2 text-xs text-muted-foreground"
+                    data-testid="team-read-only-notice"
+                  >
+                    {t("teamRoles.readOnlyNotice")}
+                  </p>
+                )}
+                <ProfilesDataTable
+                  profileStatuses={profileStatuses}
+                  isLoading={isLoading && profiles.length === 0}
+                  showOnboardingEmptyState={profiles.length === 0}
+                  profiles={profileFilters.rows}
+                  filterControls={
+                    <TableFilterControls
+                      {...profileFilters}
+                      query={searchQuery}
+                      onQueryChange={changeProfileSearch}
+                      showSearch={false}
+                      count={profileFilters.rows.length}
+                      total={profilesInGroup.length}
+                      onReset={clearProfileFilters}
+                    />
+                  }
+                  onClearFilters={clearProfileFilters}
+                  allProfiles={profiles}
+                  infoDialogProfile={profileInfoDialog}
+                  infoOpenMethod={profileInfoOpenMethod}
+                  onInfoOpenMethodChange={setProfileInfoOpenMethod}
+                  onInfoDialogProfileChange={setProfileInfoDialog}
+                  onLaunchProfile={launchProfile}
+                  onKillProfile={handleKillProfile}
+                  onCloneProfile={handleCloneProfile}
+                  onShareProfile={setProfileToShare}
+                  onSetPassword={handleSetPassword}
+                  onChangePassword={handleChangePassword}
+                  onRemovePassword={handleRemovePassword}
+                  onDeleteProfile={handleDeleteProfile}
+                  onRenameProfile={handleRenameProfile}
+                  onConfigureWayfern={handleConfigureWayfern}
+                  onCopyCookiesToProfile={handleCopyCookiesToProfile}
+                  onOpenCookieManagement={handleOpenCookieManagement}
+                  runningProfiles={runningProfiles}
+                  extensionGroups={extensionGroups}
+                  isUpdating={isUpdating}
+                  onDeleteSelectedProfiles={handleDeleteSelectedProfiles}
+                  onAssignProfilesToGroup={handleAssignProfilesToGroup}
+                  onAssignProfilesToProxy={handleAssignProfilesToProxy}
+                  selectedGroupId={selectedGroupId}
+                  selectedProfiles={selectedProfiles}
+                  onSelectedProfilesChange={setSelectedProfiles}
+                  onBulkDelete={handleBulkDelete}
+                  onBulkGroupAssignment={handleBulkGroupAssignment}
+                  onBulkProxyAssignment={handleBulkProxyAssignment}
+                  onBulkProxyDistribution={handleBulkProxyDistribution}
+                  onBulkCopyCookies={handleBulkCopyCookies}
+                  onBulkRun={handleBulkRun}
+                  onBulkStop={handleBulkStop}
+                  bulkActionsUnlocked={automationUnlocked}
+                  onBulkExtensionGroupAssignment={
+                    handleBulkExtensionGroupAssignment
+                  }
+                  onAssignExtensionGroup={handleAssignExtensionGroup}
+                  onOpenProfileSyncDialog={handleOpenProfileSyncDialog}
+                  onToggleProfileSync={handleToggleProfileSync}
+                  crossOsUnlocked={crossOsUnlocked}
+                  syncUnlocked={syncUnlocked}
+                  getProfileSyncInfo={getProfileSyncInfo}
+                  onLaunchWithSync={(profile) => {
+                    setSyncLeaderProfile(profile);
+                  }}
+                  onCreateProfile={openCreateProfile}
+                  onImportProfiles={() => {
+                    handleRailNavigate("import");
+                  }}
+                />
+              </div>
+            )}
+
+            {currentPage === "shortcuts" && (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <ShortcutsPage groupTargets={orderedGroupTargets} />
+              </div>
+            )}
+
+            {settingsDialogOpen && (
+              <SettingsDialog
+                isOpen={settingsDialogOpen}
+                onClose={() => {
+                  setSettingsDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                onIntegrationsOpen={() => {
+                  setSettingsDialogOpen(false);
+                  setIntegrationsDialogOpen(true);
+                  setCurrentPage("integrations");
+                }}
+                subPage={currentPage === "settings"}
+                initialSection={settingsInitialSection}
+              />
+            )}
+
+            {integrationsDialogOpen && (
+              <IntegrationsDialog
+                isOpen={integrationsDialogOpen}
+                onClose={() => {
+                  setIntegrationsDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "integrations"}
+                initialTab={integrationsInitialTab}
+              />
+            )}
+
+            {proxyManagementDialogOpen && (
+              <ProxyManagementDialog
+                isOpen={proxyManagementDialogOpen}
+                onClose={() => {
+                  setProxyManagementDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "proxies" || currentPage === "vpns"}
+                initialTab={proxyManagementInitialTab}
+              />
+            )}
+
+            {groupManagementDialogOpen && (
+              <GroupManagementDialog
+                isOpen={groupManagementDialogOpen}
+                onClose={() => {
+                  setGroupManagementDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                onGroupManagementComplete={handleGroupManagementComplete}
+                subPage={currentPage === "groups"}
+              />
+            )}
+
+            {extensionManagementDialogOpen && (
+              <ExtensionManagementDialog
+                isOpen={extensionManagementDialogOpen}
+                onClose={() => {
+                  setExtensionManagementDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                limitedMode={false}
+                subPage={currentPage === "extensions"}
+                initialTab={extensionManagementInitialTab}
+              />
+            )}
+
+            {importProfileDialogOpen && (
+              <ImportProfileDialog
+                isOpen={importProfileDialogOpen}
+                onClose={() => {
+                  setImportProfileDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                crossOsUnlocked={crossOsUnlocked}
+                subPage={currentPage === "import"}
+              />
+            )}
+
+            <TotpToolDialog
+              isOpen={totpToolOpen}
+              onClose={() => setTotpToolOpen(false)}
+            />
+
+            {cookieBotDialogOpen && (
+              <CookieBotPage
+                isOpen={cookieBotDialogOpen}
+                onClose={() => {
+                  setCookieBotDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "cookieBot"}
+                initialTab={cookieBotInitialTab}
+                profiles={profiles}
+                cloudUser={cloudUser}
+                onOpenProfileSync={handleOpenProfileSyncDialog}
+                onAssignProxy={handleAssignProfilesToProxy}
+              />
+            )}
+
+            {agentDialogOpen && (
+              <AgentPage
+                isOpen={agentDialogOpen}
+                onClose={() => {
+                  setAgentDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "agent"}
+                initialTab={agentInitialTab}
+                onTabChange={setAgentInitialTab}
+                profiles={profiles}
+                cloudUser={cloudUser}
+                agentConsole={agentConsole}
+                onConnectAgent={() => {
+                  setIntegrationsInitialTab("remote");
+                  handleRailNavigate("integrations");
+                }}
+                onOpenAccount={() => {
+                  handleRailNavigate("account");
+                }}
+              />
+            )}
+
+            {accountDialogOpen && (
+              <AccountPage
+                isOpen={accountDialogOpen}
+                onClose={() => {
+                  setAccountDialogOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "account"}
+                onOpenSignIn={() => {
+                  setAccountDialogOpen(false);
+                  setCurrentPage("profiles");
+                  setDeviceCodeDialogOpen(true);
+                }}
+              />
+            )}
+
+            {trashPageOpen && (
+              <TrashPage
+                isOpen={trashPageOpen}
+                onClose={() => {
+                  setTrashPageOpen(false);
+                  setCurrentPage("profiles");
+                }}
+                subPage={currentPage === "trash"}
+              />
+            )}
+          </main>
+        </div>
+
+        <CreateProfileDialog
+          existingProfiles={profiles}
+          isOpen={createProfileDialogOpen}
+          onClose={() => {
+            setCreateProfileDialogOpen(false);
+          }}
+          onCreateProfile={handleCreateProfile}
+          selectedGroupId={selectedGroupId}
+          crossOsUnlocked={crossOsUnlocked}
+        />
+
+        <CommandPalette
+          open={commandPaletteOpen}
+          onOpenChange={setCommandPaletteOpen}
+          onAction={runShortcut}
+          groupTargets={orderedGroupTargets}
+          onSelectGroup={(id) => {
+            handleRailNavigate("profiles");
+            handleSelectGroup(id);
+          }}
+          profiles={profiles}
+          runningProfileIds={runningProfiles}
+          onLaunchProfile={(profile) => {
+            void launchProfile(profile);
+          }}
+          onKillProfile={(profile) => {
+            void handleKillProfile(profile);
+          }}
+          onShowProfileInfo={(profile) => {
+            handleRailNavigate("profiles");
+            setProfileInfoOpenMethod("keyboard");
+            setProfileInfoDialog(profile);
+          }}
+          onCreateProfile={openCreateProfile}
           onOpenAbout={() => {
             setAboutDialogOpen(true);
           }}
-          cookieBotRunning={Object.keys(cookieBotLiveSessions).length > 0}
         />
-        <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-          {currentPage === "profiles" && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
-              className="flex min-h-0 flex-1 flex-col px-3 pt-2.5"
-            >
-              <ProfilesDataTable
-                isLoading={isLoading && profiles.length === 0}
-                showOnboardingEmptyState={profiles.length === 0}
-                profiles={filteredProfiles}
-                infoDialogProfile={profileInfoDialog}
-                onInfoDialogProfileChange={setProfileInfoDialog}
-                onLaunchProfile={launchProfile}
-                onKillProfile={handleKillProfile}
-                onCloneProfile={handleCloneProfile}
-                onShareProfile={setProfileToShare}
-                onSetPassword={handleSetPassword}
-                onChangePassword={handleChangePassword}
-                onRemovePassword={handleRemovePassword}
-                onDeleteProfile={handleDeleteProfile}
-                onRenameProfile={handleRenameProfile}
-                onConfigureWayfern={handleConfigureWayfern}
-                onCopyCookiesToProfile={handleCopyCookiesToProfile}
-                onOpenCookieManagement={handleOpenCookieManagement}
-                runningProfiles={runningProfiles}
-                extensionGroups={extensionGroups}
-                isUpdating={isUpdating}
-                onDeleteSelectedProfiles={handleDeleteSelectedProfiles}
-                onAssignProfilesToGroup={handleAssignProfilesToGroup}
-                onAssignProfilesToProxy={handleAssignProfilesToProxy}
-                selectedGroupId={selectedGroupId}
-                selectedProfiles={selectedProfiles}
-                onSelectedProfilesChange={setSelectedProfiles}
-                onBulkDelete={handleBulkDelete}
-                onBulkGroupAssignment={handleBulkGroupAssignment}
-                onBulkProxyAssignment={handleBulkProxyAssignment}
-                onBulkCopyCookies={handleBulkCopyCookies}
-                onBulkRun={handleBulkRun}
-                onBulkStop={handleBulkStop}
-                bulkActionsUnlocked={automationUnlocked}
-                onBulkExtensionGroupAssignment={
-                  handleBulkExtensionGroupAssignment
-                }
-                onAssignExtensionGroup={handleAssignExtensionGroup}
-                onOpenProfileSyncDialog={handleOpenProfileSyncDialog}
-                onToggleProfileSync={handleToggleProfileSync}
-                crossOsUnlocked={crossOsUnlocked}
-                syncUnlocked={syncUnlocked}
-                getProfileSyncInfo={getProfileSyncInfo}
-                onLaunchWithSync={(profile) => {
-                  setSyncLeaderProfile(profile);
-                }}
-                onCreateProfile={() => {
-                  setCreateProfileDialogOpen(true);
-                }}
-                onImportProfiles={() => {
-                  handleRailNavigate("import");
-                }}
-              />
-            </motion.div>
-          )}
 
-          {currentPage === "shortcuts" && (
-            <motion.div
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.25, ease: MOTION_EASE_OUT }}
-              className="flex min-h-0 flex-1 flex-col"
-            >
-              <ShortcutsPage groupTargets={orderedGroupTargets} />
-            </motion.div>
-          )}
-
-          {settingsDialogOpen && (
-            <SettingsDialog
-              isOpen={settingsDialogOpen}
-              onClose={() => {
-                setSettingsDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              onIntegrationsOpen={() => {
-                setSettingsDialogOpen(false);
-                setIntegrationsDialogOpen(true);
-                setCurrentPage("integrations");
-              }}
-              subPage={currentPage === "settings"}
-            />
-          )}
-
-          {integrationsDialogOpen && (
-            <IntegrationsDialog
-              isOpen={integrationsDialogOpen}
-              onClose={() => {
-                setIntegrationsDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "integrations"}
-              initialTab={integrationsInitialTab}
-            />
-          )}
-
-          {proxyManagementDialogOpen && (
-            <ProxyManagementDialog
-              isOpen={proxyManagementDialogOpen}
-              onClose={() => {
-                setProxyManagementDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "proxies" || currentPage === "vpns"}
-              initialTab={proxyManagementInitialTab}
-            />
-          )}
-
-          {groupManagementDialogOpen && (
-            <GroupManagementDialog
-              isOpen={groupManagementDialogOpen}
-              onClose={() => {
-                setGroupManagementDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              onGroupManagementComplete={handleGroupManagementComplete}
-              subPage={currentPage === "groups"}
-            />
-          )}
-
-          {extensionManagementDialogOpen && (
-            <ExtensionManagementDialog
-              isOpen={extensionManagementDialogOpen}
-              onClose={() => {
-                setExtensionManagementDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              limitedMode={false}
-              subPage={currentPage === "extensions"}
-              initialTab={extensionManagementInitialTab}
-            />
-          )}
-
-          {importProfileDialogOpen && (
-            <ImportProfileDialog
-              isOpen={importProfileDialogOpen}
-              onClose={() => {
-                setImportProfileDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              crossOsUnlocked={crossOsUnlocked}
-              subPage={currentPage === "import"}
-            />
-          )}
-
-          {cookieBotDialogOpen && (
-            <CookieBotPage
-              isOpen={cookieBotDialogOpen}
-              onClose={() => {
-                setCookieBotDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "cookieBot"}
-              initialTab={cookieBotInitialTab}
-              profiles={profiles}
-              cloudUser={cloudUser}
-              onOpenProfileSync={handleOpenProfileSyncDialog}
-              onAssignProxy={handleAssignProfilesToProxy}
-            />
-          )}
-
-          {accountDialogOpen && (
-            <AccountPage
-              isOpen={accountDialogOpen}
-              onClose={() => {
-                setAccountDialogOpen(false);
-                setCurrentPage("profiles");
-              }}
-              subPage={currentPage === "account"}
-              onOpenSignIn={() => {
-                setAccountDialogOpen(false);
-                setCurrentPage("profiles");
-                setDeviceCodeDialogOpen(true);
-              }}
-            />
-          )}
-        </main>
-      </div>
-
-      <CreateProfileDialog
-        isOpen={createProfileDialogOpen}
-        onClose={() => {
-          setCreateProfileDialogOpen(false);
-        }}
-        onCreateProfile={handleCreateProfile}
-        selectedGroupId={selectedGroupId}
-        crossOsUnlocked={crossOsUnlocked}
-        existingProfiles={profiles}
-      />
-
-      <ClaudeWorkflowPanel
-        isOpen={claudeWorkflowOpen}
-        onClose={() => {
-          setClaudeWorkflowOpen(false);
-        }}
-        profiles={profiles}
-        proxies={storedProxies}
-        onCreateProfile={() => {
-          setCreateProfileDialogOpen(true);
-        }}
-      />
-
-      <CommandPalette
-        open={commandPaletteOpen}
-        onOpenChange={setCommandPaletteOpen}
-        onAction={runShortcut}
-        groupTargets={orderedGroupTargets}
-        onSelectGroup={(id) => {
-          handleRailNavigate("profiles");
-          handleSelectGroup(id);
-        }}
-        profiles={profiles}
-        runningProfileIds={runningProfiles}
-        onLaunchProfile={(profile) => {
-          void launchProfile(profile);
-        }}
-        onKillProfile={(profile) => {
-          void handleKillProfile(profile);
-        }}
-        onShowProfileInfo={(profile) => {
-          handleRailNavigate("profiles");
-          setProfileInfoDialog(profile);
-        }}
-        onCreateProfile={() => {
-          setCreateProfileDialogOpen(true);
-        }}
-        onOpenAbout={() => {
-          setAboutDialogOpen(true);
-        }}
-      />
-
-      <AboutDialog
-        isOpen={aboutDialogOpen}
-        onClose={() => {
-          setAboutDialogOpen(false);
-        }}
-      />
-
-      <PreLaunchGateDialog
-        isOpen={gateState !== null}
-        profileName={gateState?.req.profile.name ?? ""}
-        profileId={gateState?.req.profile.id ?? ""}
-        requestId={gateState?.id ?? 0}
-        findings={gateState?.req.findings ?? null}
-        remainingCount={gateState?.remaining ?? 0}
-        onResult={settleGate}
-      />
-
-      {pendingUrls.map((pendingUrl) => (
-        <ProfileSelectorDialog
-          key={pendingUrl.id}
-          isOpen={true}
+        <AboutDialog
+          isOpen={aboutDialogOpen}
           onClose={() => {
-            setPendingUrls((prev) =>
-              prev.filter((u) => u.id !== pendingUrl.id),
-            );
+            setAboutDialogOpen(false);
           }}
-          url={pendingUrl.url}
-          isUpdating={isUpdating}
-          runningProfiles={runningProfiles}
         />
-      ))}
 
-      <PermissionDialog
-        isOpen={permissionDialogOpen}
-        onClose={() => {
-          setPermissionDialogOpen(false);
-        }}
-        permissionType={currentPermissionType}
-        onPermissionGranted={checkNextPermission}
-      />
+        <FeedbackDialog
+          isOpen={feedbackDialogOpen}
+          onClose={() => {
+            setFeedbackDialogOpen(false);
+          }}
+          accountEmail={cloudUser?.email ?? null}
+        />
 
-      <WelcomeDialog
-        isOpen={welcomeOpen}
-        needsSetup={profiles.length === 0}
-        onComplete={handleWelcomeComplete}
-      />
-      <ThankYouDialog
-        isOpen={thankYouOpen}
-        onClose={() => setThankYouOpen(false)}
-      />
+        <PreLaunchGateDialog
+          isOpen={gateState !== null}
+          profileName={gateState?.req.profile.name ?? ""}
+          profileId={gateState?.req.profile.id ?? ""}
+          requestId={gateState?.id ?? 0}
+          findings={gateState?.req.findings ?? null}
+          remainingCount={gateState?.remaining ?? 0}
+          onResult={settleGate}
+        />
 
-      <CloneProfileDialog
-        isOpen={!!cloneProfile}
-        onClose={() => {
-          setCloneProfile(null);
-        }}
-        profile={cloneProfile}
-      />
+        {pendingUrls.map((pendingUrl) => (
+          <ProfileSelectorDialog
+            key={pendingUrl.id}
+            isOpen={true}
+            onClose={() => {
+              setPendingUrls((prev) =>
+                prev.filter((u) => u.id !== pendingUrl.id),
+              );
+            }}
+            url={pendingUrl.url}
+            isUpdating={isUpdating}
+            runningProfiles={runningProfiles}
+          />
+        ))}
 
-      <ProfileTransferDialog
-        isOpen={profileToShare !== null}
-        onClose={() => setProfileToShare(null)}
-        profile={profileToShare}
-      />
+        <PermissionDialog
+          isOpen={permissionDialogOpen}
+          onClose={() => {
+            setPermissionDialogOpen(false);
+          }}
+          permissionType={currentPermissionType}
+          onPermissionGranted={checkNextPermission}
+        />
 
-      <ProfilePasswordDialog
-        isOpen={!!passwordDialogProfile}
-        onClose={() => {
-          pendingLaunchAfterUnlockRef.current = null;
-          setPasswordDialogProfile(null);
-        }}
-        profile={passwordDialogProfile}
-        mode={passwordDialogMode}
-        onSuccess={(p) => {
-          // Resume pending launch after unlock.
-          if (
-            passwordDialogMode === "unlock" &&
-            pendingLaunchAfterUnlockRef.current?.id === p.id
-          ) {
-            const target = pendingLaunchAfterUnlockRef.current;
+        <WelcomeDialog
+          isOpen={welcomeOpen}
+          needsSetup={profiles.length === 0}
+          onComplete={handleWelcomeComplete}
+        />
+        <ThankYouDialog
+          isOpen={thankYouOpen}
+          onClose={() => setThankYouOpen(false)}
+        />
+        <TipsDialog
+          key={tipsFlow.dialog.session}
+          open={tipsFlow.dialog.open}
+          mode={tipsFlow.dialog.mode}
+          tips={tipsFlow.tips}
+          seen={tipsFlow.seen}
+          initialTipId={tipsFlow.dialog.initialTipId}
+          auto={tipsFlow.dialog.auto}
+          autoShow={tipsFlow.autoShow}
+          onOpenChange={(open) => {
+            if (!open) closeTips();
+          }}
+          onTipShown={tipsFlow.markSeen}
+          onAutoShowChange={(enabled) => void tipsFlow.setAutoShow(enabled)}
+          onAction={runTipAction}
+        />
+        <PaidWelcomeDialog
+          open={tipsFlow.paidWelcome.open}
+          plan={tipsFlow.paidWelcome.plan}
+          tips={tipsFlow.planTips}
+          onOpenChange={(open) => {
+            if (!open) tipsFlow.dismissPaidWelcome();
+          }}
+          onOpenTip={(id) => {
+            tipsFlow.dismissPaidWelcome();
+            openTips(id);
+          }}
+        />
+
+        <CloneProfileDialog
+          isOpen={!!cloneProfile}
+          onClose={() => {
+            setCloneProfile(null);
+          }}
+          profile={cloneProfile}
+        />
+
+        <ProfilePasswordDialog
+          isOpen={!!passwordDialogProfile}
+          onClose={() => {
             pendingLaunchAfterUnlockRef.current = null;
-            void launchProfile(target);
+            setPasswordDialogProfile(null);
+          }}
+          profile={passwordDialogProfile}
+          mode={passwordDialogMode}
+          onSuccess={(p) => {
+            // Resume pending launch after unlock.
+            if (
+              passwordDialogMode === "unlock" &&
+              pendingLaunchAfterUnlockRef.current?.id === p.id
+            ) {
+              const target = pendingLaunchAfterUnlockRef.current;
+              pendingLaunchAfterUnlockRef.current = null;
+              void launchProfile(target);
+            }
+            // On set/change/remove, the profile's encryption state changed.
+            // Push that state to the sync server immediately so other devices
+            // see the new envelope before they next pull. Skip if the profile
+            // is currently running — its files would be in flux.
+            if (
+              (passwordDialogMode === "set" ||
+                passwordDialogMode === "change" ||
+                passwordDialogMode === "remove") &&
+              !runningProfiles.has(p.id) &&
+              p.sync_mode !== "Disabled"
+            ) {
+              void invoke("request_profile_sync", { profileId: p.id }).catch(
+                (err: unknown) => {
+                  console.error("post-password sync failed", err);
+                },
+              );
+            }
+          }}
+        />
+
+        <WayfernConfigDialog
+          isOpen={wayfernConfigDialogOpen}
+          onClose={() => {
+            setWayfernConfigDialogOpen(false);
+          }}
+          profile={currentProfileForWayfernConfig}
+          onSave={handleSaveWayfernConfig}
+          isRunning={
+            currentProfileForWayfernConfig
+              ? runningProfiles.has(currentProfileForWayfernConfig.id)
+              : false
           }
-          // On set/change/remove, the profile's encryption state changed.
-          // Push that state to the sync server immediately so other devices
-          // see the new envelope before they next pull. Skip if the profile
-          // is currently running — its files would be in flux.
-          if (
-            (passwordDialogMode === "set" ||
-              passwordDialogMode === "change" ||
-              passwordDialogMode === "remove") &&
-            !runningProfiles.has(p.id) &&
-            p.sync_mode !== "Disabled"
-          ) {
-            void invoke("request_profile_sync", { profileId: p.id }).catch(
-              (err: unknown) => {
-                console.error("post-password sync failed", err);
-              },
-            );
+          crossOsUnlocked={crossOsUnlocked}
+        />
+
+        <GroupAssignmentDialog
+          isOpen={groupAssignmentDialogOpen}
+          onClose={() => {
+            setGroupAssignmentDialogOpen(false);
+          }}
+          selectedProfiles={selectedProfilesForGroup}
+          onAssignmentComplete={handleGroupAssignmentComplete}
+          profiles={profiles}
+        />
+
+        <ExtensionGroupAssignmentDialog
+          isOpen={extensionGroupAssignmentDialogOpen}
+          onClose={() => {
+            setExtensionGroupAssignmentDialogOpen(false);
+          }}
+          selectedProfiles={selectedProfilesForExtensionGroup}
+          onAssignmentComplete={handleExtensionGroupAssignmentComplete}
+          profiles={profiles}
+        />
+
+        <ProxyAssignmentDialog
+          isOpen={proxyAssignmentDialogOpen}
+          onClose={() => {
+            setProxyAssignmentDialogOpen(false);
+          }}
+          selectedProfiles={selectedProfilesForProxy}
+          onAssignmentComplete={handleProxyAssignmentComplete}
+          profiles={profiles}
+          storedProxies={storedProxies}
+          vpnConfigs={vpnConfigs}
+        />
+
+        <ProxyDistributionDialog
+          isOpen={proxyDistributionDialogOpen}
+          onClose={() => {
+            setProxyDistributionDialogOpen(false);
+          }}
+          selectedProfiles={selectedProfilesForDistribution}
+          profiles={profiles}
+          storedProxies={storedProxies}
+          onDistributionComplete={() => {
+            // useProfileEvents refreshes the table; only the selection needs
+            // clearing, and only once the assignments actually landed.
+            setSelectedProfiles([]);
+          }}
+        />
+
+        <CookieCopyDialog
+          isOpen={cookieCopyDialogOpen}
+          onClose={() => {
+            setCookieCopyDialogOpen(false);
+            setSelectedProfilesForCookies([]);
+          }}
+          selectedProfiles={selectedProfilesForCookies}
+          profiles={profiles}
+          runningProfiles={runningProfiles}
+          onCopyComplete={() => {
+            setSelectedProfilesForCookies([]);
+          }}
+        />
+
+        <CookieManagementDialog
+          isOpen={cookieManagementDialogOpen}
+          onClose={() => {
+            setCookieManagementDialogOpen(false);
+            setCurrentProfileForCookieManagement(null);
+          }}
+          profile={currentProfileForCookieManagement}
+        />
+
+        <DeleteConfirmationDialog
+          isOpen={pendingBulkAction !== null}
+          onClose={() => {
+            setPendingBulkAction(null);
+          }}
+          onConfirm={() => {
+            if (!pendingBulkAction) return;
+            if (pendingBulkAction.action === "run") {
+              void executeBulkRun(pendingBulkAction.profiles);
+            } else {
+              void executeBulkStop(pendingBulkAction.profiles);
+            }
+          }}
+          title={
+            pendingBulkAction?.action === "stop"
+              ? t("profiles.bulkStop.confirmTitle", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
+              : t("profiles.bulkRun.confirmTitle", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
           }
-        }}
-      />
-
-      <WayfernConfigDialog
-        isOpen={wayfernConfigDialogOpen}
-        onClose={() => {
-          setWayfernConfigDialogOpen(false);
-        }}
-        profile={currentProfileForWayfernConfig}
-        onSave={handleSaveWayfernConfig}
-        isRunning={
-          currentProfileForWayfernConfig
-            ? runningProfiles.has(currentProfileForWayfernConfig.id)
-            : false
-        }
-        crossOsUnlocked={crossOsUnlocked}
-      />
-
-      <GroupAssignmentDialog
-        isOpen={groupAssignmentDialogOpen}
-        onClose={() => {
-          setGroupAssignmentDialogOpen(false);
-        }}
-        selectedProfiles={selectedProfilesForGroup}
-        onAssignmentComplete={handleGroupAssignmentComplete}
-        profiles={profiles}
-      />
-
-      <ExtensionGroupAssignmentDialog
-        isOpen={extensionGroupAssignmentDialogOpen}
-        onClose={() => {
-          setExtensionGroupAssignmentDialogOpen(false);
-        }}
-        selectedProfiles={selectedProfilesForExtensionGroup}
-        onAssignmentComplete={handleExtensionGroupAssignmentComplete}
-        profiles={profiles}
-      />
-
-      <ProxyAssignmentDialog
-        isOpen={proxyAssignmentDialogOpen}
-        onClose={() => {
-          setProxyAssignmentDialogOpen(false);
-        }}
-        selectedProfiles={selectedProfilesForProxy}
-        onAssignmentComplete={handleProxyAssignmentComplete}
-        profiles={profiles}
-        storedProxies={storedProxies}
-        vpnConfigs={vpnConfigs}
-      />
-
-      <CookieCopyDialog
-        isOpen={cookieCopyDialogOpen}
-        onClose={() => {
-          setCookieCopyDialogOpen(false);
-          setSelectedProfilesForCookies([]);
-        }}
-        selectedProfiles={selectedProfilesForCookies}
-        profiles={profiles}
-        runningProfiles={runningProfiles}
-        onCopyComplete={() => {
-          setSelectedProfilesForCookies([]);
-        }}
-      />
-
-      <CookieManagementDialog
-        isOpen={cookieManagementDialogOpen}
-        onClose={() => {
-          setCookieManagementDialogOpen(false);
-          setCurrentProfileForCookieManagement(null);
-        }}
-        profile={currentProfileForCookieManagement}
-      />
-
-      <DeleteConfirmationDialog
-        isOpen={pendingBulkAction !== null}
-        onClose={() => {
-          setPendingBulkAction(null);
-        }}
-        onConfirm={() => {
-          if (!pendingBulkAction) return;
-          if (pendingBulkAction.action === "run") {
-            void executeBulkRun(pendingBulkAction.profiles);
-          } else {
-            void executeBulkStop(pendingBulkAction.profiles);
+          description={
+            pendingBulkAction?.action === "stop"
+              ? t("profiles.bulkStop.confirmDescription", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
+              : t("profiles.bulkRun.confirmDescription", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
           }
-        }}
-        title={
-          pendingBulkAction?.action === "stop"
-            ? t("profiles.bulkStop.confirmTitle", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-            : t("profiles.bulkRun.confirmTitle", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-        }
-        description={
-          pendingBulkAction?.action === "stop"
-            ? t("profiles.bulkStop.confirmDescription", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-            : t("profiles.bulkRun.confirmDescription", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-        }
-        confirmButtonText={
-          pendingBulkAction?.action === "stop"
-            ? t("profiles.bulkStop.confirmButton", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-            : t("profiles.bulkRun.confirmButton", {
-                count: pendingBulkAction?.profiles.length ?? 0,
-              })
-        }
-        confirmButtonVariant="default"
-        isLoading={isBulkActing}
-      />
-      <DeleteConfirmationDialog
-        isOpen={showBulkDeleteConfirmation}
-        onClose={() => {
-          setShowBulkDeleteConfirmation(false);
-        }}
-        onConfirm={confirmBulkDelete}
-        title={t("profiles.bulkDelete.title")}
-        description={t("profiles.bulkDelete.description", {
-          count: selectedProfiles.length,
-        })}
-        confirmButtonText={t("profiles.bulkDelete.confirmButton", {
-          count: selectedProfiles.length,
-        })}
-        isLoading={isBulkDeleting}
-        profileIds={selectedProfiles}
-        profiles={profiles.map((p) => ({ id: p.id, name: p.name }))}
-      />
-
-      <SyncConfigDialog
-        isOpen={syncConfigDialogOpen}
-        onClose={(loginOccurred) => {
-          setSyncConfigDialogOpen(false);
-          void checkSelfHostedSync();
-          if (loginOccurred) {
-            setSyncAllDialogOpen(true);
+          confirmButtonText={
+            pendingBulkAction?.action === "stop"
+              ? t("profiles.bulkStop.confirmButton", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
+              : t("profiles.bulkRun.confirmButton", {
+                  count: pendingBulkAction?.profiles.length ?? 0,
+                })
           }
-        }}
-        onLoginStarted={() => {
-          // Hand the verify step off to its own dialog. We close this one
-          // first so the verify dialog isn't stacked on top of it (and
-          // can't end up stacked on top of the profile selector either).
-          setSyncConfigDialogOpen(false);
-          setDeviceCodeDialogOpen(true);
-        }}
-      />
+          confirmButtonVariant="default"
+          isLoading={isBulkActing}
+        />
+        <DeleteConfirmationDialog
+          isOpen={showBulkDeleteConfirmation}
+          onClose={() => {
+            setShowBulkDeleteConfirmation(false);
+          }}
+          onConfirm={confirmBulkDelete}
+          title={t("profiles.bulkDelete.title")}
+          description={t("profiles.bulkDelete.description", {
+            count: selectedProfiles.length,
+          })}
+          confirmButtonText={t("profiles.bulkDelete.confirmButton", {
+            count: selectedProfiles.length,
+          })}
+          isLoading={isBulkDeleting}
+          profileIds={selectedProfiles}
+          profiles={profiles.map((p) => ({ id: p.id, name: p.name }))}
+        />
 
-      {/* Only render while no profile-selector flow is in progress, so the
-          verify dialog never lands on top of a deep-link-triggered selector. */}
-      {pendingUrls.length === 0 && (
-        <DeviceCodeVerifyDialog
-          isOpen={deviceCodeDialogOpen}
+        <SyncConfigDialog
+          isOpen={syncConfigDialogOpen}
           onClose={(loginOccurred) => {
-            setDeviceCodeDialogOpen(false);
+            setSyncConfigDialogOpen(false);
+            void checkSelfHostedSync();
             if (loginOccurred) {
               setSyncAllDialogOpen(true);
             }
           }}
+          onLoginStarted={() => {
+            // Hand the verify step off to its own dialog. We close this one
+            // first so the verify dialog isn't stacked on top of it (and
+            // can't end up stacked on top of the profile selector either).
+            setSyncConfigDialogOpen(false);
+            setDeviceCodeDialogOpen(true);
+          }}
         />
-      )}
 
-      <SyncAllDialog
-        isOpen={syncAllDialogOpen}
-        onClose={() => {
-          setSyncAllDialogOpen(false);
-        }}
-      />
+        {/* Only render while no profile-selector flow is in progress, so the
+          verify dialog never lands on top of a deep-link-triggered selector. */}
+        {pendingUrls.length === 0 && (
+          <DeviceCodeVerifyDialog
+            isOpen={deviceCodeDialogOpen}
+            onClose={(loginOccurred) => {
+              setDeviceCodeDialogOpen(false);
+              if (loginOccurred) {
+                setSyncAllDialogOpen(true);
+              }
+            }}
+          />
+        )}
 
-      <ProfileSyncDialog
-        isOpen={profileSyncDialogOpen}
-        onClose={() => {
-          setProfileSyncDialogOpen(false);
-          setCurrentProfileForSync(null);
-        }}
-        profile={currentProfileForSync}
-        onSyncConfigOpen={() => {
-          setSyncConfigDialogOpen(true);
-        }}
-      />
+        <SyncAllDialog
+          isOpen={syncAllDialogOpen}
+          onClose={() => {
+            setSyncAllDialogOpen(false);
+          }}
+        />
 
-      {/* Wayfern Terms and Conditions Dialog - shown if terms not accepted */}
-      <WayfernTermsDialog
-        isOpen={!termsLoading && termsAccepted === false}
-        onAccepted={checkTerms}
-      />
+        <ProfileSyncDialog
+          isOpen={profileSyncDialogOpen}
+          onClose={() => {
+            setProfileSyncDialogOpen(false);
+            setCurrentProfileForSync(null);
+          }}
+          profile={currentProfileForSync}
+          onSyncConfigOpen={() => {
+            setSyncConfigDialogOpen(true);
+          }}
+        />
 
-      <WindowResizeWarningDialog
-        isOpen={windowResizeWarningOpen}
-        onResult={(proceed) => {
-          setWindowResizeWarningOpen(false);
-          windowResizeWarningResolver.current?.(proceed);
-          windowResizeWarningResolver.current = null;
-        }}
-      />
+        {/* Wayfern Terms and Conditions Dialog - shown if terms not accepted */}
+        <WayfernTermsDialog
+          isOpen={!termsLoading && termsAccepted === false}
+          onAccepted={checkTerms}
+        />
 
-      <SyncFollowerDialog
-        isOpen={syncLeaderProfile !== null}
-        onClose={() => {
-          setSyncLeaderProfile(null);
-        }}
-        leaderProfile={syncLeaderProfile}
-        allProfiles={profiles}
-        runningProfiles={runningProfiles}
-      />
-    </div>
+        <ClaudeWorkflowPanel
+          isOpen={claudeWorkflowOpen}
+          onClose={() => setClaudeWorkflowOpen(false)}
+          profiles={profiles}
+          proxies={storedProxies}
+          onCreateProfile={openCreateProfile}
+        />
+        <ProfileTransferDialog
+          isOpen={profileToShare !== null}
+          onClose={() => setProfileToShare(null)}
+          profile={profileToShare}
+        />
+        <WindowResizeWarningDialog
+          isOpen={windowResizeWarningOpen}
+          onResult={(proceed) => {
+            setWindowResizeWarningOpen(false);
+            windowResizeWarningResolver.current?.(proceed);
+            windowResizeWarningResolver.current = null;
+          }}
+        />
+
+        <SyncFollowerDialog
+          isOpen={syncLeaderProfile !== null}
+          onClose={() => {
+            setSyncLeaderProfile(null);
+          }}
+          leaderProfile={syncLeaderProfile}
+          allProfiles={profiles}
+          runningProfiles={runningProfiles}
+        />
+      </div>
+    </ProfileGroupDragProvider>
   );
 }

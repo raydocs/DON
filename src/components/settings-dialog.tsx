@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { writeText as writeClipboardText } from "@tauri-apps/plugin-clipboard-manager";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import Color from "color";
+import { motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BsCamera, BsMic } from "react-icons/bs";
@@ -23,6 +24,7 @@ import {
   ColorPickerOutput,
   ColorPickerSelection,
 } from "@/components/ui/color-picker";
+import { ConfirmationMark } from "@/components/ui/confirmation-mark";
 import {
   Dialog,
   DialogContent,
@@ -38,6 +40,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { ScrollStrip } from "@/components/ui/scroll-strip";
 import {
   Select,
   SelectContent,
@@ -46,9 +49,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useCloudAuth } from "@/hooks/use-cloud-auth";
+import { useInputModality } from "@/hooks/use-input-modality";
 import { useLanguage } from "@/hooks/use-language";
 import type { PermissionType } from "@/hooks/use-permissions";
 import { usePermissions } from "@/hooks/use-permissions";
+import { translateBackendError } from "@/lib/backend-errors";
+import { effectivePlanOf } from "@/lib/entitlements";
+import { MOTION_SPRING_POSITION } from "@/lib/motion";
 import {
   applyThemeColors,
   clearThemeColors,
@@ -60,7 +67,9 @@ import {
   withThemeTransition,
 } from "@/lib/themes";
 import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
+import { setUiSoundsEnabled } from "@/lib/ui-sounds";
 import { cn } from "@/lib/utils";
+import type { SetDefaultBrowserOutcome } from "@/types";
 import { RippleButton } from "./ui/ripple";
 
 interface AppSettings {
@@ -74,7 +83,15 @@ interface AppSettings {
   keep_decrypted_profiles_in_ram?: boolean;
   fingerprint_gate_disabled?: boolean;
   vpn_extension_warning_disabled?: boolean;
+  require_route_for_launch?: boolean;
+  trash_retention_days?: number;
+  record_traffic_domains?: boolean;
+  ui_sounds?: boolean;
 }
+
+/** The retention choices offered, in days. 0 turns the trash off. */
+const TRASH_RETENTION_DAYS = [0, 1, 7, 14, 30, 90] as const;
+const DEFAULT_TRASH_RETENTION_DAYS = 30;
 
 interface CustomThemeState {
   selectedThemeId: string | null;
@@ -94,6 +111,8 @@ interface SettingsDialogProps {
   onClose: () => void;
   onIntegrationsOpen?: () => void;
   subPage?: boolean;
+  /** A section to scroll to and focus as soon as the page opens. */
+  initialSection?: string | null;
 }
 
 export function SettingsDialog({
@@ -101,6 +120,7 @@ export function SettingsDialog({
   onClose,
   onIntegrationsOpen,
   subPage,
+  initialSection = null,
 }: SettingsDialogProps) {
   const [settings, setSettings] = useState<AppSettings>({
     set_as_default_browser: false,
@@ -123,8 +143,24 @@ export function SettingsDialog({
     colors: {},
   });
   const [isDefaultBrowser, setIsDefaultBrowser] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [saved, setSaved] = useState(false);
+  const [search, setSearch] = useState("");
+  const [jumpTo, setJumpTo] = useState<string | null>(initialSection);
+  const sectionsRef = useRef<HTMLFieldSetElement>(null);
+  const scrollerRef = useRef<HTMLDivElement>(null);
+  // The section the reader is in, so the nav can point at it. A click pins
+  // its target until the reader scrolls away, because the last sections can
+  // never reach the top of the scroller on their own.
+  const [activeSection, setActiveSection] = useState<string | null>(null);
+  const pinnedSectionRef = useRef<{ id: string; scrollTop: number } | null>(
+    null,
+  );
+  const reduceMotion = useReducedMotion();
+  const inputModality = useInputModality();
+  const animateNav = !reduceMotion && inputModality === "pointer";
   const [isSettingDefault, setIsSettingDefault] = useState(false);
   const [isClearingCache, setIsClearingCache] = useState(false);
   const [isClearingTraffic, setIsClearingTraffic] = useState(false);
@@ -169,7 +205,7 @@ export function SettingsDialog({
   // Encryption is available to everyone except team members who aren't owners
   const canUseEncryption =
     cloudUser == null ||
-    cloudUser.plan !== "team" ||
+    effectivePlanOf(cloudUser) !== "team" ||
     cloudUser.teamRole === "owner";
   const {
     currentLanguage,
@@ -399,14 +435,39 @@ export function SettingsDialog({
   const handleSetDefaultBrowser = useCallback(async () => {
     setIsSettingDefault(true);
     try {
-      await invoke("set_as_default_browser");
+      // Windows keeps the final choice for its own settings page, so a call
+      // that succeeded does not always mean Donut is the default yet. Say which
+      // of the two happened. Saying nothing at all is what left the user
+      // watching the badge stay "Inactive" with no explanation.
+      const outcome = await invoke<SetDefaultBrowserOutcome>(
+        "set_as_default_browser",
+      );
       await checkDefaultBrowserStatus();
+
+      if (outcome.status === "awaitingSystemSettings") {
+        showSuccessToast(t("settings.defaultBrowser.finishInSystemSettings"), {
+          description: t(
+            "settings.defaultBrowser.finishInSystemSettingsDescription",
+          ),
+          duration: 8000,
+        });
+      } else {
+        showSuccessToast(t("settings.defaultBrowser.setSuccess"));
+      }
     } catch (error) {
-      console.error("Failed to set as default browser:", error);
+      showErrorToast(t("settings.defaultBrowser.setFailed"), {
+        description:
+          error instanceof Error
+            ? error.message
+            : typeof error === "string"
+              ? error
+              : t("common.errors.unknown"),
+        duration: 8000,
+      });
     } finally {
       setIsSettingDefault(false);
     }
-  }, [checkDefaultBrowserStatus]);
+  }, [checkDefaultBrowserStatus, t]);
 
   const handleClearTraffic = useCallback(async () => {
     setIsClearingTraffic(true);
@@ -479,6 +540,7 @@ export function SettingsDialog({
 
   const handleSave = useCallback(async () => {
     setIsSaving(true);
+    setSaveError(null);
     try {
       // Update settings with current custom theme state
       let settingsToSave: AppSettings = {
@@ -511,7 +573,10 @@ export function SettingsDialog({
 
       // Update settings with any generated tokens
       setSettings(savedSettings);
+      setUiSoundsEnabled(savedSettings.ui_sounds ?? true);
       settingsToSave = savedSettings;
+      setOriginalSettings(savedSettings);
+      originalSettingsRef.current = savedSettings;
       // Pass the actual theme value through. Calling setTheme("dark") here
       // when the user is on "custom" pushes the provider state to "dark",
       // which triggers its clear-custom-vars effect and wipes the CSS
@@ -547,10 +612,12 @@ export function SettingsDialog({
                 | "es"
                 | "pt"
                 | "fr"
+                | "de"
                 | "zh"
                 | "ja"
                 | "ko"
                 | "ru"
+                | "tr"
                 | "vi"),
         );
         setOriginalLanguage(selectedLanguage);
@@ -561,9 +628,13 @@ export function SettingsDialog({
       // just-SAVED theme, not the pre-save one (which reverted the theme
       // until app restart).
       originalSettingsRef.current = settingsToSave;
-      onClose();
+      setSaved(true);
+      if (!subPage) onClose();
     } catch (error) {
       console.error("Failed to save settings:", error);
+      const message = translateBackendError(t, error);
+      setSaveError(message);
+      showErrorToast(t("appFeedback.saveFailed"), { description: message });
     } finally {
       setIsSaving(false);
     }
@@ -575,19 +646,22 @@ export function SettingsDialog({
     selectedLanguage,
     originalLanguage,
     changeLanguage,
+    subPage,
+    t,
   ]);
 
   const updateSetting = useCallback(
     (
       key: keyof AppSettings,
-      value: boolean | string | Record<string, string> | undefined,
+      value: boolean | number | string | Record<string, string> | undefined,
     ) => {
+      setSaveError(null);
       setSettings((prev) => ({ ...prev, [key]: value as unknown as never }));
     },
     [],
   );
 
-  const handleClose = useCallback(() => {
+  const discardChanges = useCallback(() => {
     // Restore original theme when closing without saving
     // Only a revert the user can see is worth animating.
     const changed = originalSettings.theme !== settings.theme;
@@ -598,25 +672,29 @@ export function SettingsDialog({
       setTheme(originalSettings.theme, { animate: changed });
     }
 
-    // Reset custom theme state to original
-    if (originalSettings.theme === "custom" && originalSettings.custom_theme) {
-      const matchingTheme = getThemeByColors(originalSettings.custom_theme);
-      setCustomThemeState({
-        selectedThemeId: matchingTheme?.id ?? null,
-        colors: originalSettings.custom_theme,
-      });
-    }
-
-    onClose();
+    setSettings(originalSettings);
+    setSelectedLanguage(originalLanguage);
+    setCustomThemeState({
+      selectedThemeId: originalSettings.custom_theme
+        ? (getThemeByColors(originalSettings.custom_theme)?.id ?? null)
+        : null,
+      colors: originalSettings.custom_theme ?? {},
+    });
+    setSaveError(null);
+    setSaved(false);
   }, [
-    originalSettings.theme,
-    originalSettings.custom_theme,
     applyCustomTheme,
     clearCustomTheme,
-    onClose,
+    originalSettings,
+    originalLanguage,
     setTheme,
     settings.theme,
   ]);
+
+  const handleClose = useCallback(() => {
+    discardChanges();
+    onClose();
+  }, [discardChanges, onClose]);
 
   // Only clear custom theme when switching away from custom, don't apply live
   // changes. Gated on the async settings load: before it resolves the state
@@ -730,22 +808,165 @@ export function SettingsDialog({
     getPermissionDescription,
   ]);
 
-  // Check if settings have changed (excluding default browser setting)
-  const hasChanges =
+  const draftColors =
+    settings.theme === "custom"
+      ? customThemeState.colors
+      : (settings.custom_theme ?? {});
+  const savedColors = originalSettings.custom_theme ?? {};
+  const themeChanged =
     settings.theme !== originalSettings.theme ||
-    settings.api_enabled !== originalSettings.api_enabled ||
-    selectedLanguage !== originalLanguage ||
-    (settings.theme === "custom" &&
-      JSON.stringify(customThemeState.colors) !==
-        JSON.stringify(originalSettings.custom_theme ?? {})) ||
-    (settings.theme !== "custom" &&
-      JSON.stringify(settings.custom_theme ?? {}) !==
-        JSON.stringify(originalSettings.custom_theme ?? {})) ||
-    settings.disable_auto_updates !== originalSettings.disable_auto_updates ||
-    settings.fingerprint_gate_disabled !==
-      originalSettings.fingerprint_gate_disabled ||
-    settings.vpn_extension_warning_disabled !==
-      originalSettings.vpn_extension_warning_disabled;
+    Object.keys(draftColors).length !== Object.keys(savedColors).length ||
+    Object.entries(draftColors).some(
+      ([key, value]) => savedColors[key] !== value,
+    );
+  const pendingChanges = [
+    ...(themeChanged ? [t("settings.appearance.title")] : []),
+    ...(selectedLanguage !== originalLanguage
+      ? [t("settings.language.title")]
+      : []),
+    ...(
+      [
+        ["api_enabled", "settings.integrations.title"],
+        ["disable_auto_updates", "settings.disableAutoUpdates"],
+        [
+          "keep_decrypted_profiles_in_ram",
+          "settings.keepDecryptedProfilesInRam",
+        ],
+        ["fingerprint_gate_disabled", "settings.privacy.consistencyWarning"],
+        [
+          "vpn_extension_warning_disabled",
+          "settings.privacy.vpnExtensionWarning",
+        ],
+        ["require_route_for_launch", "settings.privacy.requireRoute"],
+      ] as const
+    )
+      .filter(
+        ([key]) => Boolean(settings[key]) !== Boolean(originalSettings[key]),
+      )
+      .map(([, key]) => t(key)),
+    ...((settings.record_traffic_domains ?? true) !==
+    (originalSettings.record_traffic_domains ?? true)
+      ? [t("settings.privacy.recordSites")]
+      : []),
+    ...((settings.ui_sounds ?? true) !== (originalSettings.ui_sounds ?? true)
+      ? [t("settings.appearance.sounds")]
+      : []),
+    ...((settings.trash_retention_days ?? DEFAULT_TRASH_RETENTION_DAYS) !==
+    (originalSettings.trash_retention_days ?? DEFAULT_TRASH_RETENTION_DAYS)
+      ? [t("settings.trashRetention")]
+      : []),
+  ];
+  const hasChanges = pendingChanges.length > 0;
+  const sections = [
+    ["appearance", "settings.appearance.title", ["settings.appearance"]],
+    ["language", "settings.language.title", ["settings.language"]],
+    ...(!systemInfo?.portable
+      ? [
+          [
+            "default",
+            "settings.defaultBrowser.title",
+            ["settings.defaultBrowser"],
+          ],
+        ]
+      : []),
+    ...(isMacOS
+      ? [
+          [
+            "permissions",
+            "settings.permissions.title",
+            ["settings.permissions"],
+          ],
+        ]
+      : []),
+    ["integrations", "settings.integrations.title", ["settings.integrations"]],
+    ["dns", "dnsBlocklist.title", ["dnsBlocklist"]],
+    ["encryption", "settings.encryption.title", ["settings.encryption"]],
+    [
+      "privacy",
+      "settings.privacy.title",
+      [
+        "settings.privacy",
+        "settings.trashRetention",
+        "settings.trashRetentionDescription",
+      ],
+    ],
+    [
+      "advanced",
+      "settings.advanced.title",
+      [
+        "settings.advanced",
+        "settings.disableAutoUpdates",
+        "settings.disableAutoUpdatesDescription",
+        "settings.keepDecryptedProfilesInRam",
+        "settings.keepDecryptedProfilesInRamDescription",
+      ],
+    ],
+  ] as Array<[string, string, string[]]>;
+  const needle = search.trim().toLocaleLowerCase();
+  const matchingSections = sections.filter(([, , keys]) => {
+    const text = keys
+      .map((key) => JSON.stringify(t(key, { returnObjects: true })))
+      .join(" ")
+      .toLocaleLowerCase();
+    return needle.split(/\s+/).every((word) => text.includes(word));
+  });
+  const sectionVisible = (id: string) =>
+    matchingSections.some(([key]) => key === id);
+  const visibleSectionIds = matchingSections.map(([id]) => id).join(",");
+
+  const syncActiveSection = useCallback(() => {
+    const scroller = scrollerRef.current;
+    const root = sectionsRef.current;
+    if (!scroller || !root) return;
+    const nodes = [
+      ...root.querySelectorAll<HTMLElement>("[data-settings-section]"),
+    ].filter((node) => !node.hidden);
+    if (nodes.length === 0) {
+      setActiveSection(null);
+      return;
+    }
+    const pinned = pinnedSectionRef.current;
+    if (pinned && Math.abs(scroller.scrollTop - pinned.scrollTop) < 4) {
+      setActiveSection(pinned.id);
+      return;
+    }
+    pinnedSectionRef.current = null;
+    const atBottom =
+      scroller.scrollTop + scroller.clientHeight >= scroller.scrollHeight - 2;
+    if (atBottom) {
+      setActiveSection(nodes[nodes.length - 1].dataset.settingsSection ?? null);
+      return;
+    }
+    const threshold = scroller.getBoundingClientRect().top + 12;
+    let current = nodes[0];
+    for (const node of nodes) {
+      if (node.getBoundingClientRect().top <= threshold) current = node;
+      else break;
+    }
+    setActiveSection(current.dataset.settingsSection ?? null);
+  }, []);
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the section list changes with the search filter and the settings load, and the sync must run again then
+  useEffect(() => {
+    syncActiveSection();
+  }, [syncActiveSection, visibleSectionIds, isLoading]);
+
+  useEffect(() => {
+    if (!jumpTo) return;
+    const section = sectionsRef.current?.querySelector<HTMLElement>(
+      `[data-settings-section="${jumpTo}"]`,
+    );
+    section?.scrollIntoView({ block: "start" });
+    section?.focus({ preventScroll: true });
+    if (scrollerRef.current) {
+      pinnedSectionRef.current = {
+        id: jumpTo,
+        scrollTop: scrollerRef.current.scrollTop,
+      };
+    }
+    setActiveSection(jumpTo);
+    setJumpTo(null);
+  }, [jumpTo]);
 
   return (
     <>
@@ -757,23 +978,102 @@ export function SettingsDialog({
             </DialogHeader>
           )}
 
+          <div className="mx-auto flex w-full max-w-4xl shrink-0 flex-col gap-2 pb-3">
+            <Input
+              data-slot="settings-search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => {
+                // Escape empties the filter before it can close the page.
+                if (event.key === "Escape" && search) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setSearch("");
+                }
+              }}
+              placeholder={t("appFeedback.searchSettings")}
+              aria-label={t("appFeedback.searchSettings")}
+              className="h-8"
+            />
+            <nav aria-label={t("settings.title")}>
+              <ScrollStrip
+                data-slot="settings-nav"
+                activeKey={activeSection}
+                scrollLeftLabel={t("settings.scrollSectionsLeft")}
+                scrollRightLabel={t("settings.scrollSectionsRight")}
+                stripClassName="gap-1"
+              >
+                {sections.map(([id, label]) => {
+                  const active = activeSection === id;
+                  return (
+                    <button
+                      type="button"
+                      key={id}
+                      data-slot="settings-nav-item"
+                      data-section={id}
+                      aria-current={active ? "location" : undefined}
+                      onClick={() => {
+                        setSearch("");
+                        setJumpTo(id);
+                      }}
+                      className={cn(
+                        "relative isolate shrink-0 rounded-md px-2 py-1 text-xs whitespace-nowrap transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-ring",
+                        active
+                          ? "text-accent-foreground"
+                          : "text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {active && (
+                        <motion.span
+                          aria-hidden="true"
+                          data-slot="settings-nav-indicator"
+                          layoutId={
+                            animateNav ? "settings-nav-indicator" : undefined
+                          }
+                          initial={false}
+                          transition={
+                            animateNav
+                              ? MOTION_SPRING_POSITION
+                              : { duration: 0 }
+                          }
+                          className="absolute inset-0 -z-10 rounded-md bg-accent"
+                        />
+                      )}
+                      {t(label)}
+                    </button>
+                  );
+                })}
+              </ScrollStrip>
+            </nav>
+          </div>
+
           {/* The scroller spans the full width (so the wheel works over the
               side gutters); the width cap lives on the inner column. Fusing
               them was the dead-wheel-zone bug. */}
           <div
+            ref={scrollerRef}
+            data-slot="settings-scroller"
+            onScroll={syncActiveSection}
             className={cn(
               "min-h-0 flex-1 overflow-y-auto",
               subPage ? "py-2" : "py-4",
             )}
           >
-            <div
+            <fieldset
+              ref={sectionsRef}
+              disabled={isSaving || isLoading}
               className={cn(
-                "grid gap-6",
+                "grid min-w-0 gap-6 pb-4",
                 subPage && "mx-auto w-full max-w-4xl",
               )}
             >
               {/* Appearance Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="appearance"
+                tabIndex={-1}
+                hidden={!sectionVisible("appearance")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("settings.appearance.title")}
                 </Label>
@@ -942,10 +1242,34 @@ export function SettingsDialog({
                     </div>
                   </div>
                 )}
+
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <span className="text-sm font-medium">
+                      {t("settings.appearance.sounds")}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      {t("settings.appearance.soundsDescription")}
+                    </span>
+                  </div>
+                  <AnimatedSwitch
+                    data-slot="settings-ui-sounds"
+                    aria-label={t("settings.appearance.sounds")}
+                    checked={settings.ui_sounds ?? true}
+                    onCheckedChange={(v) => {
+                      updateSetting("ui_sounds", v === true);
+                    }}
+                  />
+                </div>
               </div>
 
               {/* Language Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="language"
+                tabIndex={-1}
+                hidden={!sectionVisible("language")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("settings.language.title")}
                 </Label>
@@ -986,7 +1310,12 @@ export function SettingsDialog({
 
               {/* Default Browser Section - hidden in portable mode */}
               {!systemInfo?.portable && (
-                <div className="space-y-4">
+                <div
+                  data-settings-section="default"
+                  tabIndex={-1}
+                  hidden={!sectionVisible("default")}
+                  className="scroll-mt-2 space-y-4 focus:outline-none"
+                >
                   <div className="flex items-center justify-between">
                     <Label className="text-base font-medium">
                       {t("settings.defaultBrowser.title")}
@@ -997,6 +1326,9 @@ export function SettingsDialog({
                         : t("common.status.inactive")}
                     </Badge>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {t("appFeedback.appliesImmediately")}
+                  </p>
 
                   <LoadingButton
                     isLoading={isSettingDefault}
@@ -1022,10 +1354,18 @@ export function SettingsDialog({
 
               {/* Permissions Section - Only show on macOS */}
               {isMacOS && (
-                <div className="space-y-4">
+                <div
+                  data-settings-section="permissions"
+                  tabIndex={-1}
+                  hidden={!sectionVisible("permissions")}
+                  className="scroll-mt-2 space-y-4 focus:outline-none"
+                >
                   <Label className="text-base font-medium">
                     {t("settings.permissions.title")}
                   </Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t("appFeedback.appliesImmediately")}
+                  </p>
 
                   {isLoadingPermissions ? (
                     <div className="text-sm text-muted-foreground">
@@ -1084,7 +1424,12 @@ export function SettingsDialog({
               )}
 
               {/* Integrations Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="integrations"
+                tabIndex={-1}
+                hidden={!sectionVisible("integrations")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("settings.integrations.title")}
                 </Label>
@@ -1101,7 +1446,12 @@ export function SettingsDialog({
               </div>
 
               {/* DNS Blocklist Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="dns"
+                tabIndex={-1}
+                hidden={!sectionVisible("dns")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("dnsBlocklist.title")}
                 </Label>
@@ -1118,10 +1468,18 @@ export function SettingsDialog({
               </div>
 
               {/* Sync Encryption Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="encryption"
+                tabIndex={-1}
+                hidden={!sectionVisible("encryption")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("settings.encryption.title")}
                 </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t("appFeedback.appliesImmediately")}
+                </p>
                 <p className="text-xs text-muted-foreground">
                   {t("settings.encryption.description")}
                 </p>
@@ -1282,8 +1640,109 @@ export function SettingsDialog({
                 )}
               </div>
 
+              <div
+                data-settings-section="privacy"
+                tabIndex={-1}
+                hidden={!sectionVisible("privacy")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
+                <Label className="text-base font-medium">
+                  {t("settings.privacy.title")}
+                </Label>
+                {(
+                  [
+                    ["require_route_for_launch", "requireRoute", false],
+                    ["fingerprint_gate_disabled", "consistencyWarning", true],
+                    [
+                      "vpn_extension_warning_disabled",
+                      "vpnExtensionWarning",
+                      true,
+                    ],
+                    ["record_traffic_domains", "recordSites", false],
+                  ] as const
+                ).map(([key, label, inverted]) => (
+                  <div
+                    key={key}
+                    className="flex items-start justify-between gap-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <span className="text-sm font-medium">
+                        {t(`settings.privacy.${label}`)}
+                      </span>
+                      <span className="block text-xs text-muted-foreground">
+                        {t(`settings.privacy.${label}Description`)}
+                      </span>
+                    </div>
+                    <AnimatedSwitch
+                      aria-label={t(`settings.privacy.${label}`)}
+                      checked={
+                        inverted
+                          ? !(settings[key] ?? false)
+                          : (settings[key] ?? key === "record_traffic_domains")
+                      }
+                      onCheckedChange={(value) =>
+                        updateSetting(
+                          key,
+                          inverted ? value !== true : value === true,
+                        )
+                      }
+                    />
+                  </div>
+                ))}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <Label htmlFor="trash-retention">
+                      {t("settings.trashRetention")}
+                    </Label>
+                    <p className="text-xs text-muted-foreground">
+                      {t("settings.trashRetentionDescription")}
+                    </p>
+                  </div>
+                  <Select
+                    value={String(
+                      settings.trash_retention_days ??
+                        DEFAULT_TRASH_RETENTION_DAYS,
+                    )}
+                    onValueChange={(value) =>
+                      updateSetting("trash_retention_days", Number(value))
+                    }
+                  >
+                    <SelectTrigger
+                      id="trash-retention"
+                      className="w-40 shrink-0"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {TRASH_RETENTION_DAYS.map((days) => (
+                        <SelectItem key={days} value={String(days)}>
+                          {days === 0
+                            ? t("settings.trashRetentionOff")
+                            : t("settings.trashRetentionDays", { count: days })}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <LoadingButton
+                  isLoading={isClearingTraffic}
+                  variant="outline"
+                  className="w-full"
+                  onClick={() => void handleClearTraffic()}
+                >
+                  {t("settings.privacy.clearTraffic")}
+                </LoadingButton>
+                <p className="text-xs text-muted-foreground">
+                  {t("settings.privacy.clearTrafficDescription")}
+                </p>
+              </div>
               {/* Advanced Section */}
-              <div className="space-y-4">
+              <div
+                data-settings-section="advanced"
+                tabIndex={-1}
+                hidden={!sectionVisible("advanced")}
+                className="scroll-mt-2 space-y-4 focus:outline-none"
+              >
                 <Label className="text-base font-medium">
                   {t("settings.advanced.title")}
                 </Label>
@@ -1390,80 +1849,77 @@ export function SettingsDialog({
                 <p className="text-xs text-muted-foreground">
                   {t("settings.advanced.copyLogsDescription")}
                 </p>
-
-                <div className="flex items-center justify-between gap-3 border-t pt-3">
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium">
-                      {t("settings.privacy.consistencyWarning")}
-                    </span>
-                    <span className="block text-xs text-muted-foreground">
-                      {t("settings.privacy.consistencyWarningDescription")}
-                    </span>
-                  </div>
-                  <AnimatedSwitch
-                    aria-label={t("settings.privacy.consistencyWarning")}
-                    checked={!(settings.fingerprint_gate_disabled ?? false)}
-                    onCheckedChange={(v) => {
-                      updateSetting("fingerprint_gate_disabled", v !== true);
-                    }}
-                  />
-                </div>
-
-                <div className="flex items-start justify-between gap-x-3 rounded-lg border p-3">
-                  <div className="min-w-0 flex-1">
-                    <span className="text-sm font-medium">
-                      {t("settings.privacy.vpnExtensionWarning")}
-                    </span>
-                    <span className="block text-xs text-muted-foreground">
-                      {t("settings.privacy.vpnExtensionWarningDescription")}
-                    </span>
-                  </div>
-                  <AnimatedSwitch
-                    aria-label={t("settings.privacy.vpnExtensionWarning")}
-                    checked={
-                      !(settings.vpn_extension_warning_disabled ?? false)
-                    }
-                    onCheckedChange={(v) => {
-                      updateSetting(
-                        "vpn_extension_warning_disabled",
-                        v !== true,
-                      );
-                    }}
-                  />
-                </div>
-
-                <div className="border-t pt-3">
-                  <LoadingButton
-                    isLoading={isClearingTraffic}
-                    variant="outline"
-                    className="w-full"
-                    onClick={() => {
-                      handleClearTraffic().catch((err: unknown) => {
-                        console.error(err);
-                      });
-                    }}
-                  >
-                    {t("settings.privacy.clearTraffic")}
-                  </LoadingButton>
-                  <p className="mt-2 text-xs text-muted-foreground">
-                    {t("settings.privacy.clearTrafficDescription")}
-                  </p>
-                </div>
               </div>
 
+              {matchingSections.length === 0 && (
+                <p role="status" className="py-6 text-sm text-muted-foreground">
+                  {t("common.noResults")}
+                </p>
+              )}
               {/* System Info */}
-              {systemInfo && (
+              {systemInfo && !needle && (
                 <div className="border-t pt-2">
                   <p className="font-mono text-xs whitespace-pre-line text-muted-foreground select-all">
                     {`Donut Browser ${systemInfo.app_version}\n${systemInfo.os} ${systemInfo.arch}${systemInfo.portable ? " (portable)" : ""}`}
                   </p>
                 </div>
               )}
-            </div>
+            </fieldset>
           </div>
 
+          <div
+            data-slot="settings-feedback"
+            className="mx-auto w-full max-w-4xl shrink-0 py-2 text-xs"
+          >
+            {saveError ? (
+              <p role="alert" className="break-words text-destructive-text">
+                {saveError}
+              </p>
+            ) : (
+              <p
+                role="status"
+                className="flex min-h-5 items-center gap-2 text-muted-foreground"
+              >
+                {!hasChanges && saved && <ConfirmationMark />}
+                {isLoading
+                  ? t("common.buttons.loading")
+                  : isSaving
+                    ? t("common.buttons.saving")
+                    : hasChanges
+                      ? t("appFeedback.pendingChanges", {
+                          count: pendingChanges.length,
+                        })
+                      : saved
+                        ? t("common.buttons.saved")
+                        : t("appFeedback.noChanges")}
+              </p>
+            )}
+            {hasChanges && (
+              <details className="mt-1">
+                <summary className="cursor-pointer py-1 font-medium">
+                  {t("appFeedback.reviewChanges")}
+                </summary>
+                <ul className="max-h-28 overflow-y-auto py-1">
+                  {pendingChanges.map((label) => (
+                    <li key={label} className="py-0.5">
+                      {label}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </div>
           {subPage ? (
-            <div className="mx-auto flex w-full max-w-4xl shrink-0 items-center justify-end gap-2 border-t border-border pt-2">
+            <div className="mx-auto flex w-full max-w-4xl shrink-0 items-center justify-end gap-2 pt-2">
+              <Button
+                variant="ghost"
+                size="sm"
+                data-slot="settings-discard"
+                onClick={discardChanges}
+                disabled={!hasChanges || isSaving}
+              >
+                {t("appFeedback.discardChanges")}
+              </Button>
               <LoadingButton
                 size="sm"
                 isLoading={isSaving}

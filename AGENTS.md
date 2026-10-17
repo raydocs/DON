@@ -26,7 +26,7 @@ donutbrowser/
 │   ├── app/                          # App router (page.tsx, layout.tsx)
 │   ├── components/                   # 50+ React components (dialogs, tables, UI; includes live fingerprint audit)
 │   ├── hooks/                        # Event-driven React hooks
-│   ├── i18n/locales/                 # Translations (en, es, fr, ja, ko, pt, ru, tr, vi, zh)
+│   ├── i18n/locales/                 # Translations (de, en, es, fr, ja, ko, pt, ru, tr, vi, zh)
 │   ├── generated/                    # Build-generated third-party license inventory
 │   ├── lib/                          # Utilities (themes, toast, browser-utils, shared device preset catalog)
 │   └── types.ts                      # Shared TypeScript interfaces
@@ -41,6 +41,12 @@ donutbrowser/
 │   │   ├── proxy_storage.rs         # Proxy config persistence (JSON files)
 │   │   ├── api_server.rs            # REST API (utoipa + axum)
 │   │   ├── mcp_server.rs            # MCP protocol server
+│   │   ├── mcp_remote.rs            # Authenticated remote MCP bridge
+│   │   ├── agent_console.rs         # Agent conversations and batches
+│   │   ├── agent_schedules.rs       # Scheduled automation recipes
+│   │   ├── wayfern_identity_storage.rs # Browser identities and cross-OS storage conversion
+│   │   ├── sync/restore_points.rs   # Profile restore points
+│   │   ├── profile/trash.rs         # Soft deletion and recovery
 │   │   ├── automation_rate_limiter.rs # Shared REST/MCP automation quota
 │   │   ├── sync/                    # Cloud sync (engine, encryption, manifest, scheduler)
 │   │   ├── vpn/                     # WireGuard tunnels
@@ -67,6 +73,9 @@ donutbrowser/
 │   └── Cargo.toml                  # Rust dependencies
 ├── donut-sync/                     # NestJS sync server (self-hostable)
 │   └── src/                        # Controllers, services, auth, S3 sync
+├── cloudflare-sync-worker/         # DON-specific Cloudflare Worker + D1 + R2 sync service
+├── sdk/                            # Python and TypeScript automation clients
+├── packaging/                      # Linux package and sandbox integration
 ├── e2e/                            # Isolated native UI/sync/Wayfern E2E system
 │   ├── app/                        # Test-only Tauri harness that injects the private driver
 │   ├── lib/                        # WebDriver, CDP, fixtures, app-session helpers

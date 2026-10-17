@@ -6,15 +6,20 @@ import { FiWifi } from "react-icons/fi";
 import { GoGear } from "react-icons/go";
 import {
   LuBadgeInfo,
+  LuBot,
   LuCircleStop,
   LuCloud,
   LuCookie,
   LuInfo,
   LuKeyboard,
+  LuKeyRound,
+  LuLightbulb,
+  LuMessageSquareHeart,
   LuPlay,
   LuPlug,
   LuPlus,
   LuPuzzle,
+  LuTrash2,
   LuUser,
   LuUsers,
 } from "react-icons/lu";
@@ -63,15 +68,20 @@ interface CommandPaletteProps {
 const ICONS: Record<ShortcutId, React.ComponentType<{ className?: string }>> = {
   openPalette: LuKeyboard,
   openShortcuts: LuKeyboard,
+  openTips: LuLightbulb,
+  sendFeedback: LuMessageSquareHeart,
+  openTotp: LuKeyRound,
   importProfile: FaDownload,
   goProfiles: LuUser,
   goProxies: FiWifi,
   goExtensions: LuPuzzle,
   goGroups: LuUsers,
   goCookieBot: LuCookie,
+  goAgent: LuBot,
   goIntegrations: LuPlug,
   goAccount: LuCloud,
   goSettings: GoGear,
+  goTrash: LuTrash2,
 };
 
 function Tokens({ tokens }: { tokens: string[] }) {

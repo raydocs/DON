@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import {
   mkdir,
+  open,
   readdir,
   readFile,
   realpath,
@@ -12,6 +13,8 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { withApp } from "../lib/app.mjs";
 import {
+  CRX_EXTENSION_NAME,
+  CRX_EXTENSION_VERSION,
   extensionIconPngBase64,
   extensionZipBase64,
   wireGuardFixture,
@@ -85,6 +88,47 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       assert.equal(updatedProxy.name, "Updated Proxy");
       assert.equal(updatedProxy.updated_at >= proxy.updated_at, true);
 
+      // The provider's change-IP link: checked when set, called on request.
+      assert.match(
+        await app.invokeError("rotate_proxy_ip", { proxyId: proxy.id }),
+        /PROXY_ROTATION_URL_MISSING/,
+      );
+      assert.match(
+        await app.invokeError("set_proxy_rotation_url", {
+          proxyId: proxy.id,
+          rotationUrl: "ftp://provider.example/change-ip",
+        }),
+        /PROXY_ROTATION_URL_INVALID/,
+      );
+      const rotationUrl = `${process.env.DONUT_E2E_FIXTURE_URL}/change-ip?key=e2e`;
+      const linked = await app.invoke("set_proxy_rotation_url", {
+        proxyId: proxy.id,
+        rotationUrl: ` ${rotationUrl} `,
+      });
+      assert.equal(linked.rotation_url, rotationUrl);
+      const rotated = await app.invoke("rotate_proxy_ip", {
+        proxyId: proxy.id,
+      });
+      assert.equal(rotated.status, 200);
+      assert.equal(rotated.error, null);
+      const rotations = await app.invoke("rotate_proxy_ips", {
+        proxyIds: [proxy.id, proxy.id, "missing-proxy"],
+      });
+      assert.deepEqual(
+        rotations.map((result) => [result.proxy_id, result.status]),
+        [
+          [proxy.id, 200],
+          ["missing-proxy", null],
+        ],
+        "duplicates are called once and each proxy gets its own result",
+      );
+      assert.match(rotations[1].error, /PROXY_NOT_FOUND/);
+      const unlinked = await app.invoke("set_proxy_rotation_url", {
+        proxyId: proxy.id,
+        rotationUrl: "",
+      });
+      assert.equal(unlinked.rotation_url, null);
+
       const parsed = await app.invoke("parse_txt_proxies", {
         content: [
           "http://one.example:8080",
@@ -113,6 +157,11 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       });
       assert.equal(parsedImport.imported_count, 1);
 
+      assert.deepEqual(
+        await app.invoke("get_proxy_check_history", { proxyId: proxy.id }),
+        [],
+        "a proxy nobody has checked has no trail",
+      );
       const validityError = await app.invokeError("check_proxy_validity", {
         proxyId: proxy.id,
         proxySettings: null,
@@ -123,22 +172,85 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       });
       assert.ok(cachedValidity === null || cachedValidity.is_valid === false);
 
-      // Donut accepts one VLESS shape (REALITY + XTLS Vision over TCP). The form
-      // uses this to tell the user WHICH part of their setup is unsupported
-      // instead of implying they mistyped, so the reason must survive the IPC hop.
+      // A check that failed is still a check, and it is recorded as one. The
+      // proxy above was edited to SOCKS5 on a closed port, so the UDP probe
+      // could not reach it: the honest verdict is "unknown", never "no".
+      const trail = await app.invoke("get_proxy_check_history", {
+        proxyId: proxy.id,
+      });
+      assert.equal(trail.length, 1);
+      assert.equal(trail[0].ok, false);
+      assert.equal(trail[0].ip, null);
+      assert.equal(trail[0].udp, "unknown");
+      assert.ok(
+        typeof trail[0].latency_ms === "number" && trail[0].latency_ms >= 0,
+      );
+      assert.ok(trail[0].timestamp > 0);
+
+      // Deleting the proxy takes the trail with it; it names exit addresses.
+      const doomed = await app.invoke("create_stored_proxy", {
+        name: "Trail Owner",
+        proxySettings: {
+          proxy_type: "http",
+          host: "127.0.0.1",
+          port: 9,
+          username: null,
+          password: null,
+        },
+      });
+      await app.invokeError("check_proxy_validity", {
+        proxyId: doomed.id,
+        proxySettings: null,
+      });
+      const doomedTrail = await app.invoke("get_proxy_check_history", {
+        proxyId: doomed.id,
+      });
+      assert.equal(doomedTrail.length, 1);
+      // An HTTP proxy cannot carry a datagram at all, which is answered from
+      // the protocol without dialling anything.
+      assert.equal(doomedTrail[0].udp, "no");
+      await app.invoke("delete_stored_proxy", { proxyId: doomed.id });
+      assert.deepEqual(
+        await app.invoke("get_proxy_check_history", { proxyId: doomed.id }),
+        [],
+      );
+
+      // The form uses this to tell the user WHICH part of their setup is
+      // unsupported instead of implying they mistyped, so the reason must
+      // survive the IPC hop. A link Donut can use comes back as the type and
+      // endpoint the form shows, VMess included, which hides them in base64.
       const goodVless =
         "vless://6d6e21a1-4829-4d2b-bc7f-1b25707b61e4@example.com:443" +
         "?security=reality&flow=xtls-rprx-vision&encryption=none&type=tcp" +
         "&sni=a.com&pbk=mQB9jxUDHO7g49VaNXLEdcNQ_jLhTbLolUsMUNwb6W4&sid=00&fp=chrome";
-      assert.equal(
+      assert.deepEqual(
         await app.invoke("validate_vless_uri", { uri: goodVless }),
-        null,
+        { proxy_type: "vless", host: "example.com", port: 443 },
       );
+      const vmess = `vmess://${Buffer.from(
+        JSON.stringify({
+          add: "vm.example.com",
+          port: "8443",
+          id: "6d6e21a1-4829-4d2b-bc7f-1b25707b61e4",
+          net: "ws",
+          path: "/vm",
+          tls: "tls",
+        }),
+      ).toString("base64")}`;
+      assert.deepEqual(await app.invoke("validate_vless_uri", { uri: vmess }), {
+        proxy_type: "vmess",
+        host: "vm.example.com",
+        port: 8443,
+      });
 
       for (const [uri, reason] of [
-        [goodVless.replace("security=reality", "security=tls"), "security"],
-        [goodVless.replace("type=tcp", "type=ws"), "transport"],
-        [goodVless.replace("flow=xtls-rprx-vision", "flow=none"), "flow"],
+        [goodVless.replace("security=reality", "security=xtls"), "security"],
+        [goodVless.replace("type=tcp", "type=kcp"), "transport"],
+        [
+          goodVless.replace("flow=xtls-rprx-vision", "flow=xtls-rprx-direct"),
+          "flow",
+        ],
+        ["hysteria2://pw@hy.example.com:443/?obfs=gost", "obfs"],
       ]) {
         // invokeError returns the command's error wrapped in a message, so match
         // rather than JSON.parse the whole string.
@@ -176,6 +288,19 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       });
       assert.equal(importResult.imported_count, 1);
 
+      // A second batch under the same prefix continues the numbering. It used
+      // to restart at 1, collide with every name of the first batch, and be
+      // skipped whole as duplicates.
+      const secondBatch = await app.invoke("import_proxies_from_parsed", {
+        parsedProxies: [
+          { ...parsedProxyFields, port: parsedProxyFields.port + 1 },
+        ],
+        namePrefix: "Parsed",
+      });
+      assert.equal(secondBatch.imported_count, 1);
+      assert.equal(secondBatch.skipped_count, 0);
+      assert.equal(secondBatch.proxies[0].name, "Parsed Proxy 2");
+
       const profile = await createProfile(app);
       assert.equal(profile.name, "Entity Profile");
       assert.equal(
@@ -195,6 +320,22 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
         profileId: profile.id,
         newName: "Renamed Profile",
       });
+      // Its own name, another case, or extra spaces are not a conflict.
+      for (const [newName, stored] of [
+        ["Renamed Profile", "Renamed Profile"],
+        ["  renamed profile  ", "renamed profile"],
+        ["Renamed Profile ", "Renamed Profile"],
+      ]) {
+        assert.equal(
+          (
+            await app.invoke("rename_profile", {
+              profileId: profile.id,
+              newName,
+            })
+          ).name,
+          stored,
+        );
+      }
       await app.invoke("update_profile_tags", {
         profileId: profile.id,
         tags: ["alpha", "automation"],
@@ -224,6 +365,141 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
         profileId: profile.id,
         dnsBlocklist: "light",
       });
+      // A plain address of a known resolver is described as its encrypted
+      // endpoint, blank means the proxy resolves, and junk is refused.
+      assert.deepEqual(
+        await app.invoke("describe_dns_server", { value: "1.1.1.1" }),
+        {
+          transport: "https",
+          server: "cloudflare-dns.com",
+          encrypted: true,
+          upgraded: true,
+        },
+      );
+      assert.deepEqual(
+        await app.invoke("describe_dns_server", { value: "tcp://10.0.0.53" }),
+        {
+          transport: "tcp",
+          server: "10.0.0.53",
+          encrypted: false,
+          upgraded: false,
+        },
+      );
+      assert.equal(
+        await app.invoke("describe_dns_server", { value: "  " }),
+        null,
+      );
+      assert.match(
+        await app.invokeError("describe_dns_server", {
+          value: "udp://1.1.1.1",
+        }),
+        /DNS_SERVER_INVALID/,
+      );
+      assert.match(
+        await app.invokeError("update_profile_dns_server", {
+          profileId: profile.id,
+          dnsServer: "udp://9.9.9.9",
+        }),
+        /DNS_SERVER_INVALID/,
+      );
+      const withDns = await app.invoke("update_profile_dns_server", {
+        profileId: profile.id,
+        dnsServer: " https://dns.quad9.net/dns-query ",
+      });
+      assert.equal(withDns.dns_server, "https://dns.quad9.net/dns-query");
+
+      // Statuses: a set the person defines, one per profile, removed from
+      // every profile when deleted.
+      const warming = await app.invoke("create_profile_status", {
+        name: " Warming up ",
+        color: "#EAB308",
+      });
+      assert.equal(warming.name, "Warming up");
+      assert.equal(warming.color, "#eab308");
+      const banned = await app.invoke("create_profile_status", {
+        name: "Banned",
+        color: "#ef4444",
+      });
+      assert.match(
+        await app.invokeError("create_profile_status", {
+          name: "banned",
+          color: "#000000",
+        }),
+        /PROFILE_STATUS_EXISTS/,
+      );
+      assert.match(
+        await app.invokeError("create_profile_status", {
+          name: "Paused",
+          color: "red",
+        }),
+        /PROFILE_STATUS_COLOR_INVALID/,
+      );
+      const renamed = await app.invoke("update_profile_status", {
+        statusId: banned.id,
+        name: "Suspended",
+        color: "#ef4444",
+      });
+      assert.equal(renamed.name, "Suspended");
+      assert.deepEqual(
+        (await app.invoke("list_profile_statuses")).map((item) => item.name),
+        ["Warming up", "Suspended"],
+      );
+      assert.match(
+        await app.invokeError("set_profiles_status", {
+          profileIds: [profile.id],
+          statusId: "missing",
+        }),
+        /PROFILE_STATUS_NOT_FOUND/,
+      );
+      await app.invoke("set_profiles_status", {
+        profileIds: [profile.id],
+        statusId: banned.id,
+      });
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).find(
+          (item) => item.id === profile.id,
+        ).status_id,
+        banned.id,
+      );
+      await app.invoke("delete_profile_status", { statusId: banned.id });
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).find(
+          (item) => item.id === profile.id,
+        ).status_id,
+        null,
+        "deleting a status takes it off its profiles",
+      );
+      await app.invoke("set_profiles_status", {
+        profileIds: [profile.id],
+        statusId: warming.id,
+      });
+
+      // Start pages: tidied, web pages only, at most twenty.
+      assert.match(
+        await app.invokeError("update_profile_start_urls", {
+          profileId: profile.id,
+          startUrls: ["file:///etc/passwd"],
+        }),
+        /START_URL_INVALID/,
+      );
+      assert.match(
+        await app.invokeError("update_profile_start_urls", {
+          profileId: profile.id,
+          startUrls: Array.from(
+            { length: 21 },
+            (_, i) => `https://${i}.example/`,
+          ),
+        }),
+        /START_URLS_TOO_MANY/,
+      );
+      const withStartPages = await app.invoke("update_profile_start_urls", {
+        profileId: profile.id,
+        startUrls: [" https://mail.example/inbox ", "", "shop.example"],
+      });
+      assert.deepEqual(withStartPages.start_urls, [
+        "https://mail.example/inbox",
+        "https://shop.example/",
+      ]);
       await app.invoke("update_profile_clear_on_close", {
         profileId: profile.id,
         clearOnClose: true,
@@ -240,6 +516,12 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
         "*.internal.example",
       ]);
       assert.equal(changed.dns_blocklist, "light");
+      assert.equal(changed.dns_server, "https://dns.quad9.net/dns-query");
+      assert.equal(changed.status_id, warming.id);
+      assert.deepEqual(changed.start_urls, [
+        "https://mail.example/inbox",
+        "https://shop.example/",
+      ]);
       assert.equal(changed.clear_on_close, true);
       assert.deepEqual((await app.invoke("get_all_tags")).sort(), [
         "alpha",
@@ -306,7 +588,10 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       assert.equal(transferred.profile.group_id, null);
       assert.equal(transferred.profile.launch_hook, null);
       assert.equal(transferred.profile.password_protected, false);
-      assert.equal(transferred.profile.wayfern_config.fingerprint, null);
+      assert.equal(
+        transferred.profile.wayfern_config.fingerprint ?? null,
+        null,
+      );
       assert.notEqual(transferred.profile.proxy_id, proxy.id);
       const transferredProxy = (await app.invoke("get_stored_proxies")).find(
         (candidate) => candidate.id === transferred.profile.proxy_id,
@@ -648,9 +933,57 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       });
       assert.notEqual(clone.id, profile.id);
       assert.equal(clone.name, "Cloned Profile");
+      assert.equal(clone.dns_server, "https://dns.quad9.net/dns-query");
+      assert.equal(clone.status_id, warming.id, "a clone keeps the status");
       const counts = await app.invoke("get_groups_with_profile_counts");
       assert.equal(counts.find((item) => item.id === group.id).count, 2);
       assert.equal((await app.invoke("get_profile_groups")).length, 1);
+
+      const createDnsArgs = {
+        name: "DNS Profile",
+        browserStr: "wayfern",
+        version: "150.0.7871.100",
+        releaseType: "stable",
+        proxyId: null,
+        vpnId: null,
+        wayfernConfig: { fingerprint: "{}" },
+        groupId: null,
+        ephemeral: false,
+        dnsBlocklist: null,
+        launchHook: null,
+      };
+      assert.match(
+        await app.invokeError("create_browser_profile_new", {
+          ...createDnsArgs,
+          dnsServer: "quic://dns.example",
+        }),
+        /DNS_SERVER_INVALID/,
+      );
+      assert.match(
+        await app.invokeError("create_browser_profile_new", {
+          ...createDnsArgs,
+          startUrls: ["chrome://settings"],
+        }),
+        /START_URL_INVALID/,
+      );
+      assert.ok(
+        !(await app.invoke("list_browser_profiles")).some(
+          (item) => item.name === "DNS Profile",
+        ),
+        "a refused DNS server must not leave a profile behind",
+      );
+      const dnsProfile = await app.invoke("create_browser_profile_new", {
+        ...createDnsArgs,
+        dnsServer: "9.9.9.9",
+        startUrls: ["https://start.example/"],
+      });
+      assert.equal(dnsProfile.dns_server, "9.9.9.9");
+      assert.deepEqual(dnsProfile.start_urls, ["https://start.example/"]);
+      const cleared = await app.invoke("update_profile_dns_server", {
+        profileId: dnsProfile.id,
+        dnsServer: "",
+      });
+      assert.equal(cleared.dns_server, null);
 
       await app.invoke("delete_selected_profiles", {
         profileIds: [
@@ -658,6 +991,7 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
           clone.id,
           imported.profile_id,
           transferred.profile.id,
+          dnsProfile.id,
         ],
       });
       assert.deepEqual(await app.invoke("list_browser_profiles"), []);
@@ -835,6 +1169,103 @@ test("extensions, extension groups, VPN storage, DNS rules, and event-backed ass
       existsSync(path.join(unpackedDir, "manifest.json")),
       "importing a folder must never move or consume the user's copy of it",
     );
+
+    // Importing from a link. The fixture server answers with a real CRX3
+    // container, so this proves the importer unwraps the signed container to
+    // the ZIP the store keeps rather than filing the container itself.
+    const fixtureBase = process.env.DONUT_E2E_FIXTURE_URL;
+    assert.ok(fixtureBase, "the fixture server URL has to reach the suite");
+    const fetched = await app.invoke("fetch_extension_from_url", {
+      url: `${fixtureBase}/extension.crx`,
+    });
+    assert.equal(fetched.name, CRX_EXTENSION_NAME);
+    assert.equal(fetched.version, CRX_EXTENSION_VERSION);
+    assert.equal(fetched.from_web_store, false);
+    assert.equal(
+      fetched.file_name,
+      "extension.zip",
+      "the stored payload is the ZIP, so it must not still be called a .crx",
+    );
+    assert.deepEqual(
+      fetched.file_data.slice(0, 4),
+      [0x50, 0x4b, 0x03, 0x04],
+      "the CRX3 header has to be stripped, not stored",
+    );
+
+    const fromLink = await app.invoke("add_extension", {
+      name: "Overridden By The Manifest",
+      fileName: fetched.file_name,
+      fileData: fetched.file_data,
+    });
+    assert.equal(fromLink.name, CRX_EXTENSION_NAME);
+    assert.equal(fromLink.version, CRX_EXTENSION_VERSION);
+    assert.equal(fromLink.source_kind, "archive");
+    assert.equal(fromLink.file_type, "zip");
+
+    // Assignable like any other extension: the link is only how it arrived.
+    const linkGroup = await app.invoke("create_extension_group", {
+      name: "Downloaded Extensions",
+    });
+    assert.deepEqual(
+      (
+        await app.invoke("add_extension_to_group", {
+          groupId: linkGroup.id,
+          extensionId: fromLink.id,
+        })
+      ).extension_ids,
+      [fromLink.id],
+    );
+    await app.invoke("assign_extension_group_to_profile", {
+      profileId: profile.id,
+      extensionGroupId: linkGroup.id,
+    });
+    assert.equal(
+      (
+        await app.invoke("get_extension_group_for_profile", {
+          profileId: profile.id,
+        })
+      ).id,
+      linkGroup.id,
+    );
+
+    // A body that is not an extension is refused with the code, and nothing
+    // is stored for it.
+    assert.match(
+      await app.invokeError("fetch_extension_from_url", {
+        url: `${fixtureBase}/not-an-extension.zip`,
+      }),
+      /EXTENSION_NOT_AN_EXTENSION/,
+    );
+    for (const rejected of [
+      "not a link at all",
+      "https://example.invalid/downloads",
+      "https://example.invalid/installer.exe",
+      // 32 characters, but an extension id only uses a-p.
+      "abcdefghijklmnopabcdefghijklmnoz",
+      // Plain HTTP off loopback never crosses the wire, whatever it points at.
+      "http://files.example.invalid/pack.crx",
+    ]) {
+      assert.match(
+        await app.invokeError("fetch_extension_from_url", { url: rejected }),
+        /EXTENSION_URL_INVALID/,
+        rejected,
+      );
+    }
+    assert.match(
+      await app.invokeError("fetch_extension_from_url", {
+        url: `${fixtureBase}/absent-extension.crx`,
+      }),
+      /EXTENSION_NOT_AN_EXTENSION|EXTENSION_DOWNLOAD_FAILED/,
+    );
+    assert.equal((await app.invoke("list_extensions")).length, 1);
+
+    await app.invoke("assign_extension_group_to_profile", {
+      profileId: profile.id,
+      extensionGroupId: null,
+    });
+    await app.invoke("delete_extension_group", { groupId: linkGroup.id });
+    await app.invoke("delete_extension", { extensionId: fromLink.id });
+    assert.deepEqual(await app.invoke("list_extensions"), []);
 
     const vpn = await app.invoke("create_vpn_config_manual", {
       name: "E2E WireGuard",
@@ -1085,6 +1516,7 @@ test("cookie import/copy/export, profile encryption, and traffic-stat read/clear
       }),
       [],
     );
+    assert.deepEqual(await app.invoke("get_all_traffic_snapshots"), []);
     assert.equal(
       await app.invoke("get_profile_traffic_snapshot", {
         profileId: source.id,
@@ -1104,5 +1536,1245 @@ test("cookie import/copy/export, profile encryption, and traffic-stat read/clear
     await app.invoke("delete_selected_profiles", {
       profileIds: [source.id, target.id],
     });
+  });
+});
+
+test("a storage state file moves cookies and Local Storage into a closed profile and back out", async () => {
+  await withApp("entities-storage-state", async (app) => {
+    const profile = await createProfile(app, "Storage State");
+    assert.deepEqual(
+      await app.invoke("get_profile_local_storage_stats", {
+        profileId: profile.id,
+      }),
+      { origins: 0, items: 0 },
+      "a new profile has no Local Storage yet",
+    );
+
+    const state = {
+      cookies: [
+        {
+          name: "sid",
+          value: "storage-state-cookie",
+          domain: ".shop.example",
+          path: "/",
+          expires: 2_000_000_000,
+          httpOnly: true,
+          secure: true,
+          sameSite: "Lax",
+        },
+      ],
+      origins: [
+        {
+          origin: "https://shop.example",
+          localStorage: [
+            { name: "cart", value: "3 items" },
+            { name: "lang", value: "日本語" },
+          ],
+        },
+        // The same site spelled with its default port and a path.
+        {
+          origin: "https://SHOP.example:443/checkout",
+          localStorage: [{ name: "step", value: "2" }],
+        },
+        {
+          origin: "https://mail.example",
+          localStorage: [{ name: "token", value: "t" }],
+        },
+      ],
+    };
+    const imported = await app.invoke("import_profile_storage_state", {
+      profileId: profile.id,
+      content: JSON.stringify(state),
+    });
+    assert.equal(imported.origins, 2);
+    assert.equal(imported.items, 4);
+    assert.equal(imported.cookies_imported, 1);
+    assert.deepEqual(
+      await app.invoke("get_profile_local_storage_stats", {
+        profileId: profile.id,
+      }),
+      { origins: 2, items: 4 },
+    );
+
+    const exported = JSON.parse(
+      await app.invoke("export_profile_storage_state", {
+        profileId: profile.id,
+        includeCookies: true,
+      }),
+    );
+    const shop = exported.origins.find(
+      (o) => o.origin === "https://shop.example",
+    );
+    assert.deepEqual(
+      Object.fromEntries(shop.localStorage.map((i) => [i.name, i.value])),
+      { cart: "3 items", lang: "日本語", step: "2" },
+    );
+    const cookie = exported.cookies.find((c) => c.name === "sid");
+    assert.equal(cookie.value, "storage-state-cookie");
+    assert.equal(cookie.sameSite, "Lax");
+    assert.equal(cookie.httpOnly, true);
+    const withoutCookies = JSON.parse(
+      await app.invoke("export_profile_storage_state", {
+        profileId: profile.id,
+        includeCookies: false,
+      }),
+    );
+    assert.deepEqual(withoutCookies.cookies, []);
+
+    // A second import replaces an item by name and keeps the others.
+    await app.invoke("import_profile_storage_state", {
+      profileId: profile.id,
+      content: JSON.stringify({
+        origins: [
+          {
+            origin: "https://shop.example",
+            localStorage: [{ name: "cart", value: "empty" }],
+          },
+        ],
+      }),
+    });
+    const again = JSON.parse(
+      await app.invoke("export_profile_storage_state", {
+        profileId: profile.id,
+        includeCookies: false,
+      }),
+    );
+    const shopAgain = again.origins.find(
+      (o) => o.origin === "https://shop.example",
+    );
+    assert.equal(
+      shopAgain.localStorage.find((i) => i.name === "cart").value,
+      "empty",
+    );
+    assert.equal(shopAgain.localStorage.length, 3);
+
+    for (const [content, code] of [
+      ["not json", /STORAGE_STATE_INVALID/],
+      [
+        JSON.stringify({
+          origins: [{ origin: "file:///etc", localStorage: [] }],
+        }),
+        /LOCAL_STORAGE_ORIGIN_INVALID/,
+      ],
+    ]) {
+      assert.match(
+        await app.invokeError("import_profile_storage_state", {
+          profileId: profile.id,
+          content,
+        }),
+        code,
+      );
+    }
+
+    const ephemeral = await app.invoke("create_browser_profile_new", {
+      name: "Storage Ephemeral",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: true,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    assert.match(
+      await app.invokeError("get_profile_local_storage_stats", {
+        profileId: ephemeral.id,
+      }),
+      /LOCAL_STORAGE_EPHEMERAL/,
+    );
+  });
+});
+
+test("2FA keys stay sealed on this device, hand out codes, and go with their profile", async () => {
+  await withApp("entities-two-factor", async (app) => {
+    const secret = "JBSWY3DPEHPK3PXP";
+    const quick = await app.invoke("generate_totp_code", {
+      key: ` ${secret.toLowerCase()} `,
+    });
+    assert.match(quick.code, /^\d{6}$/);
+    assert.equal(quick.valid_until % 30, 0);
+    assert.match(
+      await app.invokeError("generate_totp_code", { key: "not a key" }),
+      /TOTP_KEY_INVALID/,
+    );
+
+    const profile = await createProfile(app, "Two Factor Profile");
+    assert.match(
+      await app.invokeError("add_profile_totp", {
+        profileId: profile.id,
+        label: "",
+        key: "otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP&counter=1",
+      }),
+      /TOTP_KEY_INVALID/,
+    );
+    const entry = await app.invoke("add_profile_totp", {
+      profileId: profile.id,
+      label: "",
+      key: `otpauth://totp/Shop:alice@example.com?secret=${secret}&issuer=Shop&digits=8`,
+    });
+    assert.equal(entry.label, "Shop", "the issuer names an unlabelled key");
+    assert.equal(entry.account, "alice@example.com");
+    assert.equal(entry.digits, 8);
+    const listed = await app.invoke("list_profile_totp", {
+      profileId: profile.id,
+    });
+    assert.equal(listed.length, 1);
+    assert.ok(
+      !JSON.stringify(listed).includes(secret),
+      "the window never receives the key",
+    );
+    const codes = await app.invoke("get_profile_totp_codes", {
+      profileId: profile.id,
+    });
+    assert.equal(codes[0].id, entry.id);
+    assert.match(codes[0].code, /^\d{8}$/);
+
+    const sealed = path.join(
+      app.dataRoot,
+      "data",
+      "data",
+      "totp",
+      `${profile.id}.dat`,
+    );
+    const onDisk = await readFile(sealed);
+    assert.ok(
+      !onDisk.toString("latin1").includes(secret) &&
+        !onDisk.toString("latin1").includes("alice"),
+      "the key file is sealed",
+    );
+    const metadata = await readFile(
+      path.join(app.dataRoot, "data", "profiles", profile.id, "metadata.json"),
+      "utf8",
+    );
+    assert.ok(
+      !metadata.includes(secret),
+      "profile metadata, which syncs, has no key",
+    );
+
+    await app.invoke("delete_profile_totp", {
+      profileId: profile.id,
+      entryId: entry.id,
+    });
+    assert.deepEqual(
+      await app.invoke("list_profile_totp", { profileId: profile.id }),
+      [],
+    );
+    assert.match(
+      await app.invokeError("delete_profile_totp", {
+        profileId: profile.id,
+        entryId: entry.id,
+      }),
+      /TOTP_ENTRY_NOT_FOUND/,
+    );
+
+    await app.invoke("add_profile_totp", {
+      profileId: profile.id,
+      label: "Mail",
+      key: secret,
+    });
+    assert.ok(existsSync(sealed));
+    await app.invoke("delete_profile", { profileId: profile.id });
+    await app.invoke("purge_trashed_profile", { profileId: profile.id });
+    assert.ok(
+      !existsSync(sealed),
+      "a purged profile takes its 2FA keys with it",
+    );
+  });
+});
+
+test("bulk edit changes only the ticked settings, checks every value first, and skips no-ops", async () => {
+  await withApp("entities-bulk-edit", async (app) => {
+    const first = await createProfile(app, "Bulk One");
+    const second = await createProfile(app, "Bulk Two");
+    const untouched = await createProfile(app, "Bulk Untouched");
+    const group = await app.invoke("create_profile_group", {
+      name: "Bulk Group",
+    });
+    const status = await app.invoke("create_profile_status", {
+      name: "Warming",
+      color: "#eab308",
+    });
+    const ids = [first.id, second.id];
+    const byId = async () =>
+      new Map(
+        (await app.invoke("list_browser_profiles")).map((p) => [p.id, p]),
+      );
+
+    for (const [patch, code] of [
+      [{ status_id: "missing" }, /PROFILE_STATUS_NOT_FOUND/],
+      [{ group_id: "missing" }, /GROUP_NOT_FOUND/],
+      [{ webrtc_mode: "leak" }, /WEBRTC_MODE_INVALID/],
+      [{ dns_blocklist: "everything" }, /DNS_BLOCKLIST_INVALID/],
+      [{ start_urls: ["file:///etc/passwd"] }, /START_URL_INVALID/],
+      [{ note: "kept?", nickname: "unknown field" }, /nickname/],
+    ]) {
+      assert.match(
+        await app.invokeError("bulk_update_profiles", {
+          profileIds: ids,
+          patch,
+        }),
+        code,
+      );
+    }
+    assert.match(
+      await app.invokeError("bulk_update_profiles", {
+        profileIds: [first.id, "00000000-0000-4000-8000-000000000000"],
+        patch: { note: "never written" },
+      }),
+      /not found/i,
+    );
+    for (const profile of (await byId()).values()) {
+      assert.equal(profile.note ?? null, null, "a refused batch changes none");
+    }
+
+    assert.equal(
+      await app.invoke("bulk_update_profiles", {
+        profileIds: ids,
+        patch: {
+          status_id: status.id,
+          tags_add: ["bulk", "shop"],
+          note: "  Bulk note  ",
+          group_id: group.id,
+          start_urls: ["shop.example"],
+          dns_blocklist: "light",
+          block_images: true,
+          webrtc_mode: "block",
+        },
+      }),
+      2,
+    );
+    let profiles = await byId();
+    for (const id of ids) {
+      const profile = profiles.get(id);
+      assert.equal(profile.status_id, status.id);
+      assert.deepEqual(profile.tags, ["bulk", "shop"]);
+      assert.equal(profile.note, "Bulk note");
+      assert.equal(profile.group_id, group.id);
+      assert.deepEqual(profile.start_urls, ["https://shop.example/"]);
+      assert.equal(profile.dns_blocklist, "light");
+      assert.equal(profile.wayfern_config.block_images, true);
+      assert.equal(profile.wayfern_config.webrtc_mode, "block");
+      assert.equal(
+        profile.wayfern_config.fingerprint,
+        "{}",
+        "the device stays unless asked",
+      );
+    }
+    const other = profiles.get(untouched.id);
+    assert.deepEqual(other.tags ?? [], []);
+    assert.equal(other.status_id ?? null, null);
+    assert.equal(other.group_id ?? null, null);
+
+    assert.equal(
+      await app.invoke("bulk_update_profiles", {
+        profileIds: ids,
+        patch: { status_id: status.id, tags_add: ["bulk"] },
+      }),
+      0,
+      "a patch that changes nothing saves nothing",
+    );
+
+    assert.equal(
+      await app.invoke("bulk_update_profiles", {
+        profileIds: ids,
+        patch: {
+          tags_remove: ["shop"],
+          note: null,
+          group_id: null,
+          new_device: true,
+        },
+      }),
+      2,
+    );
+    profiles = await byId();
+    for (const id of ids) {
+      const profile = profiles.get(id);
+      assert.deepEqual(profile.tags, ["bulk"]);
+      assert.equal(profile.note ?? null, null);
+      assert.equal(profile.group_id ?? null, null);
+      assert.equal(profile.status_id, status.id, "left out means kept");
+      assert.equal(profile.wayfern_config.fingerprint ?? null, null);
+      assert.equal(profile.wayfern_config.block_images, true);
+    }
+    assert.deepEqual((await app.invoke("get_all_tags")).sort(), ["bulk"]);
+  });
+});
+
+test("templates keep settings but never a device, and validate batch size", async () => {
+  await withApp(
+    "entities-templates",
+    async (app) => {
+      const status = await app.invoke("create_profile_status", {
+        name: "Fresh",
+        color: "#22c55e",
+      });
+      const profile = await createProfile(app, "Template Source");
+      await app.invoke("update_profile_note", {
+        profileId: profile.id,
+        note: "login for one shop",
+      });
+      await app.invoke("bulk_update_profiles", {
+        profileIds: [profile.id],
+        patch: {
+          status_id: status.id,
+          tags_add: ["shop"],
+          start_urls: ["shop.example"],
+          block_images: true,
+        },
+      });
+
+      const saved = await app.invoke("save_profile_template_from_profile", {
+        profileId: profile.id,
+        name: " Shop ",
+      });
+      assert.equal(saved.name, "Shop");
+      assert.equal(saved.settings.status_id, status.id);
+      assert.deepEqual(saved.settings.tags, ["shop"]);
+      assert.deepEqual(saved.settings.start_urls, ["https://shop.example/"]);
+      assert.equal(saved.settings.note, null, "a note belongs to its profile");
+      assert.equal(saved.settings.wayfern_config.block_images, true);
+      assert.equal(
+        saved.settings.wayfern_config.fingerprint ?? null,
+        null,
+        "a template never carries the source profile's device",
+      );
+      assert.equal(saved.settings.wayfern_config.identity_id ?? null, null);
+
+      assert.match(
+        await app.invokeError("save_profile_template_from_profile", {
+          profileId: profile.id,
+          name: "shop",
+        }),
+        /TEMPLATE_EXISTS/,
+      );
+      for (const [settings, code] of [
+        [{ proxy_id: "p", vpn_id: "v" }, /PROXY_AND_VPN_MUTUALLY_EXCLUSIVE/],
+        [{ status_id: "missing" }, /PROFILE_STATUS_NOT_FOUND/],
+        [{ start_urls: ["file:///etc/passwd"] }, /START_URL_INVALID/],
+      ]) {
+        assert.match(
+          await app.invokeError("create_profile_template", {
+            name: "Broken",
+            settings,
+          }),
+          code,
+        );
+      }
+      assert.match(
+        await app.invokeError("create_profile_template", {
+          name: "x".repeat(61),
+          settings: {},
+        }),
+        /TEMPLATE_NAME_TOO_LONG/,
+      );
+
+      const mail = await app.invoke("create_profile_template", {
+        name: "Mail",
+        settings: {
+          name_prefix: " Mail ",
+          tags: ["mail", " mail "],
+          ephemeral: true,
+          clear_on_close: true,
+          wayfern_config: { fingerprint: "{}", os: "linux" },
+        },
+      });
+      assert.equal(mail.settings.name_prefix, "Mail");
+      assert.deepEqual(mail.settings.tags, ["mail"]);
+      assert.equal(mail.settings.clear_on_close, false);
+      assert.equal(mail.settings.wayfern_config.fingerprint ?? null, null);
+      assert.deepEqual(
+        (await app.invoke("list_profile_templates")).map((t) => t.name),
+        ["Shop", "Mail"],
+      );
+
+      const renamed = await app.invoke("update_profile_template", {
+        templateId: mail.id,
+        name: "Webmail",
+        settings: { ...mail.settings, tags: ["webmail"] },
+      });
+      assert.equal(renamed.name, "Webmail");
+      assert.deepEqual(renamed.settings.tags, ["webmail"]);
+      assert.ok(renamed.updated_at >= mail.updated_at);
+      assert.match(
+        await app.invokeError("update_profile_template", {
+          templateId: mail.id,
+          name: "SHOP",
+          settings: {},
+        }),
+        /TEMPLATE_EXISTS/,
+      );
+
+      for (const count of [0, 101]) {
+        assert.match(
+          await app.invokeError("bulk_create_profiles", {
+            settings: saved.settings,
+            name: "Batch",
+            count,
+          }),
+          /BULK_CREATE_COUNT_INVALID/,
+        );
+      }
+      // Nothing to stop: cancelling with no batch running is harmless.
+      await app.invoke("cancel_bulk_create_profiles");
+
+      await app.invoke("delete_profile_template", { templateId: mail.id });
+      assert.match(
+        await app.invokeError("delete_profile_template", {
+          templateId: mail.id,
+        }),
+        /TEMPLATE_NOT_FOUND/,
+      );
+      assert.deepEqual(
+        (await app.invoke("list_profile_templates")).map((t) => t.id),
+        [saved.id],
+      );
+    },
+    { seedDownloadedBrowser: true },
+  );
+});
+
+test("deleted profiles land in the trash and come back intact on restore", async () => {
+  await withApp("entities-trash", async (app) => {
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+
+    const group = await app.invoke("create_profile_group", {
+      name: "Trash Group",
+    });
+    const created = await app.invoke("create_browser_profile_new", {
+      name: "Recoverable",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: {
+        fingerprint: "{}",
+        identity_id: "identity-e2e",
+        identity_overrides: JSON.stringify({ userAgent: "Custom UA" }),
+        location: JSON.stringify({
+          timezone: "Europe/Berlin",
+          language: "de-DE",
+        }),
+      },
+      groupId: group.id,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    await app.invoke("update_profile_tags", {
+      profileId: created.id,
+      tags: ["shop", "eu"],
+    });
+    const before = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === created.id,
+    );
+    assert.equal(before.wayfern_config.identity_id, "identity-e2e");
+    assert.deepEqual(before.tags, ["shop", "eu"]);
+    assert.equal(before.group_id, group.id);
+
+    // Real files to carry through the move, plus a cache the trash must drop.
+    const profilesDir = path.join(app.dataRoot, "data", "profiles");
+    const dataDir = path.join(profilesDir, created.id, "profile");
+    await mkdir(path.join(dataDir, "Default"), { recursive: true });
+    await writeFile(path.join(dataDir, "Default", "Cookies"), "cookie-db");
+    await mkdir(path.join(dataDir, "Cache"), { recursive: true });
+    await writeFile(path.join(dataDir, "Cache", "blob"), "cache-bytes");
+
+    await app.invoke("delete_profile", { profileId: created.id });
+    assert.equal(
+      (await app.invoke("list_browser_profiles")).some(
+        (item) => item.id === created.id,
+      ),
+      false,
+    );
+    const trashed = await app.invoke("list_trashed_profiles");
+    assert.equal(trashed.length, 1);
+    assert.equal(trashed[0].id, created.id);
+    assert.equal(trashed[0].name, "Recoverable");
+    assert.equal(trashed[0].browser, "wayfern");
+    assert.equal(trashed[0].version, "150.0.7871.100");
+    assert.equal(trashed[0].group_id, group.id);
+    assert.equal(trashed[0].password_protected, false);
+    assert.equal(trashed[0].sync_enabled, before.sync_mode !== "Disabled");
+    assert.equal(
+      trashed[0].expires_at - trashed[0].deleted_at,
+      30 * 24 * 60 * 60,
+    );
+    assert.ok(trashed[0].size_bytes > 0);
+    const trashDir = path.join(app.dataRoot, "data", "trash");
+    const entryDir = path.join(trashDir, created.id);
+    assert.ok(existsSync(path.join(entryDir, "profile.json")));
+    assert.ok(existsSync(path.join(entryDir, "manifest.json")));
+    assert.equal(
+      await readFile(
+        path.join(entryDir, "profile", "Default", "Cookies"),
+        "utf8",
+      ),
+      "cookie-db",
+    );
+    assert.equal(
+      existsSync(path.join(entryDir, "profile", "Cache")),
+      false,
+      "caches are pruned before the move",
+    );
+    assert.equal(existsSync(path.join(profilesDir, created.id)), false);
+
+    // A live profile carrying the same name pushes the restored one to a suffix.
+    const namesake = await createProfile(app, "Recoverable");
+    const restored = await app.invoke("restore_trashed_profile", {
+      profileId: created.id,
+    });
+    assert.equal(restored.id, created.id);
+    assert.equal(restored.name, "Recoverable (restored)");
+    assert.deepEqual(restored.wayfern_config, before.wayfern_config);
+    assert.deepEqual(restored.tags, before.tags);
+    assert.equal(restored.group_id, group.id);
+    assert.ok(restored.updated_at >= (before.updated_at ?? 0));
+    const live = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === created.id,
+    );
+    assert.deepEqual(live.wayfern_config, before.wayfern_config);
+    assert.deepEqual(live.tags, before.tags);
+    assert.equal(
+      await readFile(
+        path.join(profilesDir, created.id, "profile", "Default", "Cookies"),
+        "utf8",
+      ),
+      "cookie-db",
+    );
+    assert.equal(existsSync(entryDir), false);
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+    assert.match(
+      await app.invokeError("restore_trashed_profile", {
+        profileId: created.id,
+      }),
+      /TRASH_ENTRY_NOT_FOUND/,
+    );
+
+    // A group deleted while the profile sat in the trash is not resurrected.
+    await app.invoke("delete_profile", { profileId: created.id });
+    await app.invoke("delete_profile_group", { groupId: group.id });
+    const restoredWithoutGroup = await app.invoke("restore_trashed_profile", {
+      profileId: created.id,
+    });
+    assert.equal(restoredWithoutGroup.id, created.id);
+    assert.equal(restoredWithoutGroup.group_id, null);
+    assert.deepEqual(
+      restoredWithoutGroup.wayfern_config,
+      before.wayfern_config,
+    );
+
+    // Delete again, then purge: gone for good.
+    await app.invoke("delete_profile", { profileId: created.id });
+    assert.equal((await app.invoke("list_trashed_profiles")).length, 1);
+    await app.invoke("purge_trashed_profile", { profileId: created.id });
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+    assert.equal(existsSync(entryDir), false);
+    assert.equal(existsSync(path.join(profilesDir, created.id)), false);
+    assert.match(
+      await app.invokeError("purge_trashed_profile", {
+        profileId: created.id,
+      }),
+      /TRASH_ENTRY_NOT_FOUND/,
+    );
+
+    // An explicit permanent delete never lands in the trash.
+    const doomed = await createProfile(app, "Doomed");
+    await app.invoke("delete_profile", {
+      profileId: doomed.id,
+      permanent: true,
+    });
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+    assert.equal(existsSync(path.join(trashDir, doomed.id)), false);
+    assert.equal(existsSync(path.join(profilesDir, doomed.id)), false);
+
+    // A bulk delete trashes every profile; emptying the trash clears them all.
+    const bulkA = await createProfile(app, "Bulk A");
+    const bulkB = await createProfile(app, "Bulk B");
+    await app.invoke("delete_selected_profiles", {
+      profileIds: [bulkA.id, bulkB.id],
+    });
+    assert.deepEqual(
+      (await app.invoke("list_trashed_profiles"))
+        .map((entry) => entry.name)
+        .sort(),
+      ["Bulk A", "Bulk B"],
+    );
+    assert.equal(await app.invoke("empty_trash"), 2);
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+    assert.equal(existsSync(path.join(trashDir, bulkA.id)), false);
+
+    // Restore refuses an entry whose id a live profile already carries.
+    const conflictDir = path.join(trashDir, namesake.id);
+    await mkdir(conflictDir, { recursive: true });
+    await writeFile(
+      path.join(conflictDir, "profile.json"),
+      JSON.stringify(namesake),
+    );
+    await writeFile(
+      path.join(conflictDir, "manifest.json"),
+      JSON.stringify({
+        deleted_at: 1,
+        expires_at: 4_102_444_800,
+        size_bytes: 0,
+        original_name: namesake.name,
+      }),
+    );
+    assert.match(
+      await app.invokeError("restore_trashed_profile", {
+        profileId: namesake.id,
+      }),
+      /TRASH_RESTORE_CONFLICT/,
+    );
+    await app.invoke("purge_trashed_profile", { profileId: namesake.id });
+    assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+
+    await app.invoke("delete_profile", {
+      profileId: namesake.id,
+      permanent: true,
+    });
+    assert.deepEqual(await app.invoke("list_browser_profiles"), []);
+  });
+});
+
+test("Delete at once erases a profile on the spot and keeps nothing in the trash", async () => {
+  await withApp("entities-delete-at-once", async (app) => {
+    const profilesDir = path.join(app.dataRoot, "data", "profiles");
+    const trashDir = path.join(app.dataRoot, "data", "trash");
+    const secret = "secret-cookie-db";
+    const seed = async (profile) => {
+      const dir = path.join(profilesDir, profile.id, "profile", "Default");
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "Cookies"), secret);
+      return path.join(dir, "Cookies");
+    };
+
+    // Switching to "Delete at once" empties what the trash already holds.
+    const earlier = await createProfile(app, "Already Trashed");
+    await seed(earlier);
+    await app.invoke("delete_profile", { profileId: earlier.id });
+    assert.equal((await app.invoke("list_trashed_profiles")).length, 1);
+    const settings = await app.invoke("get_app_settings");
+    await app.invoke("save_app_settings", {
+      settings: { ...settings, trash_retention_days: 0 },
+    });
+    await app.waitFor(
+      async () =>
+        (await app.invoke("list_trashed_profiles")).length === 0 &&
+        !existsSync(path.join(trashDir, earlier.id)),
+      {
+        description: "the trash empties once it is switched off",
+        timeoutMs: 20_000,
+        intervalMs: 250,
+      },
+    );
+
+    const doomed = await createProfile(app, "Delete At Once");
+    const cookies = await seed(doomed);
+    // A handle opened before the delete still reads the file after the
+    // unlink, so it shows whether the bytes were overwritten first. Windows
+    // cannot remove a directory while a file in it is open.
+    const handle = process.platform === "win32" ? null : await open(cookies);
+    try {
+      await app.invoke("delete_profile", { profileId: doomed.id });
+      assert.equal(
+        existsSync(path.join(profilesDir, doomed.id)),
+        false,
+        "the profile is erased before the delete returns",
+      );
+      assert.equal(existsSync(path.join(trashDir, doomed.id)), false);
+      assert.deepEqual(await app.invoke("list_trashed_profiles"), []);
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).some(
+          (item) => item.id === doomed.id,
+        ),
+        false,
+      );
+      if (handle) {
+        const { buffer, bytesRead } = await handle.read(
+          Buffer.alloc(64),
+          0,
+          64,
+          0,
+        );
+        assert.equal(bytesRead, secret.length);
+        assert.ok(
+          buffer.subarray(0, bytesRead).every((byte) => byte === 0),
+          "the file is zeroed before it is unlinked",
+        );
+      }
+    } finally {
+      await handle?.close();
+    }
+  });
+});
+
+test("proxies distribute one to one, and group bookmarks reach the profile's Bookmarks file", async () => {
+  await withApp("entities-distribution-bookmarks", async (app) => {
+    const profiles = [];
+    for (const name of ["Fleet 1", "Fleet 2", "Fleet 3", "Fleet 4"]) {
+      profiles.push(await createProfile(app, name));
+    }
+    const proxies = [];
+    for (const [index, name] of ["Exit A", "Exit B", "Exit C"].entries()) {
+      proxies.push(
+        await app.invoke("create_stored_proxy", {
+          name,
+          proxySettings: {
+            proxy_type: "http",
+            host: "127.0.0.1",
+            port: 9001 + index,
+            username: null,
+            password: null,
+          },
+        }),
+      );
+    }
+
+    const profileIds = profiles.map((profile) => profile.id);
+    const proxyIds = proxies.map((proxy) => proxy.id);
+
+    // Four profiles, three proxies: three pairs and one profile left alone.
+    // The fourth must NEVER wrap around onto the first proxy.
+    const plan = await app.invoke("plan_proxy_distribution", {
+      profileIds,
+      proxyIds,
+      allowSharing: false,
+    });
+    assert.deepEqual(
+      plan.pairs,
+      proxyIds.map((proxyId, index) => ({
+        profile_id: profileIds[index],
+        proxy_id: proxyId,
+      })),
+    );
+    assert.deepEqual(plan.unpaired_profile_ids, [profileIds[3]]);
+    assert.deepEqual(plan.unused_proxy_ids, []);
+    assert.deepEqual(plan.shared_proxy_ids, []);
+    assert.deepEqual(plan.running_profile_ids, []);
+
+    const results = await app.invoke("distribute_proxies_to_profiles", {
+      pairs: plan.pairs,
+    });
+    assert.equal(results.length, 3);
+    assert.ok(results.every((result) => result.ok));
+
+    const afterDistribution = await app.invoke("list_browser_profiles");
+    const proxyOf = (id) =>
+      afterDistribution.find((profile) => profile.id === id).proxy_id;
+    assert.equal(proxyOf(profileIds[0]), proxyIds[0]);
+    assert.equal(proxyOf(profileIds[1]), proxyIds[1]);
+    assert.equal(proxyOf(profileIds[2]), proxyIds[2]);
+    assert.equal(proxyOf(profileIds[3]) ?? null, null);
+
+    // A proxy someone else holds is refused by default and only offered once
+    // the caller asks for sharing explicitly.
+    const strict = await app.invoke("plan_proxy_distribution", {
+      profileIds: [profileIds[3]],
+      proxyIds: [proxyIds[0]],
+      allowSharing: false,
+    });
+    assert.deepEqual(strict.pairs, []);
+    assert.deepEqual(strict.shared_proxy_ids, [proxyIds[0]]);
+    assert.deepEqual(strict.unpaired_profile_ids, [profileIds[3]]);
+
+    const permissive = await app.invoke("plan_proxy_distribution", {
+      profileIds: [profileIds[3]],
+      proxyIds: [proxyIds[0]],
+      allowSharing: true,
+    });
+    assert.deepEqual(permissive.pairs, [
+      { profile_id: profileIds[3], proxy_id: proxyIds[0] },
+    ]);
+
+    // Per-profile failures never break the batch: one good pair still lands.
+    const mixed = await app.invoke("distribute_proxies_to_profiles", {
+      pairs: [
+        { profile_id: profileIds[3], proxy_id: proxyIds[0] },
+        { profile_id: profileIds[3], proxy_id: proxyIds[1] },
+        {
+          profile_id: profileIds[0],
+          proxy_id: "00000000-0000-4000-8000-000000000000",
+        },
+      ],
+    });
+    assert.equal(mixed[0].ok, true);
+    assert.equal(mixed[1].ok, false);
+    assert.match(mixed[1].error, /PROFILE_PAIRED_TWICE/);
+    assert.equal(mixed[2].ok, false);
+    assert.match(mixed[2].error, /PROXY_NOT_FOUND/);
+    assert.equal(
+      (await app.invoke("list_browser_profiles")).find(
+        (profile) => profile.id === profileIds[3],
+      ).proxy_id,
+      proxyIds[0],
+    );
+
+    // --- group bookmarks ---
+    const group = await app.invoke("create_profile_group", {
+      name: "Client Sites",
+    });
+    assert.deepEqual(
+      await app.invoke("get_group_bookmarks", { groupId: group.id }),
+      [],
+    );
+
+    const refused = await app.invokeError("set_group_bookmarks", {
+      groupId: group.id,
+      bookmarks: [{ title: "Keys", url: "file:///etc/passwd", folder: null }],
+    });
+    assert.match(refused, /URL_SCHEME_NOT_ALLOWED/);
+    const unnamed = await app.invokeError("set_group_bookmarks", {
+      groupId: group.id,
+      bookmarks: [{ title: "  ", url: "https://ok.example", folder: null }],
+    });
+    assert.match(unnamed, /NAME_CANNOT_BE_EMPTY/);
+
+    const saved = await app.invoke("set_group_bookmarks", {
+      groupId: group.id,
+      bookmarks: [
+        { title: "Support", url: "https://support.example", folder: null },
+        { title: "Console", url: "https://console.example", folder: "Ops" },
+      ],
+    });
+    assert.equal(saved.length, 2);
+    assert.equal(saved[1].folder, "Ops");
+    assert.equal(
+      (await app.invoke("get_groups_with_profile_counts")).find(
+        (item) => item.id === group.id,
+      ).bookmark_count,
+      2,
+    );
+
+    const target = profiles[0];
+    await app.invoke("assign_profiles_to_group", {
+      profileIds: [target.id],
+      groupId: group.id,
+    });
+
+    // Seed the profile's own Bookmarks file the way a real Chromium session
+    // would have left it, so the write has something of the user's to preserve.
+    const bookmarksFile = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      target.id,
+      "profile",
+      "Default",
+      "Bookmarks",
+    );
+    await mkdir(path.dirname(bookmarksFile), { recursive: true });
+    const permanentFolder = (id, name) => ({
+      children: [],
+      date_added: "13300000000000000",
+      date_modified: "13300000000000000",
+      guid: `0000000${id}-0000-4000-8000-000000000000`,
+      id: String(id),
+      name,
+      type: "folder",
+    });
+    await writeFile(
+      bookmarksFile,
+      JSON.stringify({
+        checksum: "0".repeat(32),
+        roots: {
+          bookmark_bar: {
+            ...permanentFolder(1, "Bookmarks bar"),
+            children: [
+              {
+                date_added: "13300000000000000",
+                guid: "aaaaaaaa-0000-4000-8000-000000000000",
+                id: "9",
+                name: "My Bank",
+                type: "url",
+                url: "https://bank.example/",
+              },
+            ],
+          },
+          other: permanentFolder(2, "Other bookmarks"),
+          synced: permanentFolder(3, "Mobile bookmarks"),
+        },
+        sync_metadata: "Zm9v",
+        version: 1,
+      }),
+    );
+
+    const readBookmarks = async () =>
+      JSON.parse(await readFile(bookmarksFile, "utf8"));
+    const managedFolderOf = (document) =>
+      document.roots.bookmark_bar.children.filter(
+        (child) =>
+          child.type === "folder" &&
+          child.meta_info?.donut_managed_group_bookmarks === "1",
+      );
+
+    assert.equal(
+      await app.invoke("apply_group_bookmarks_to_profile", {
+        profileId: target.id,
+      }),
+      true,
+    );
+
+    let document = await readBookmarks();
+    let managed = managedFolderOf(document);
+    assert.equal(managed.length, 1);
+    assert.equal(managed[0].name, "Donut Group Bookmarks");
+    assert.deepEqual(
+      managed[0].children.map((child) => child.name),
+      ["Support", "Ops"],
+    );
+    assert.deepEqual(
+      managed[0].children[1].children.map((child) => child.url),
+      ["https://console.example"],
+    );
+    // The user's own bookmark, the other roots and Chromium's opaque state all
+    // survive; only the checksum is rewritten to describe the new tree.
+    assert.equal(document.roots.bookmark_bar.children[0].name, "My Bank");
+    assert.equal(document.sync_metadata, "Zm9v");
+    assert.equal(document.version, 1);
+    assert.notEqual(document.checksum, "0".repeat(32));
+    assert.match(document.checksum, /^[0-9a-f]{32}$/);
+
+    // Applying again is a no-op: the folder is not duplicated and the file is
+    // not even rewritten.
+    const firstWrite = await readFile(bookmarksFile, "utf8");
+    assert.equal(
+      await app.invoke("apply_group_bookmarks_to_profile", {
+        profileId: target.id,
+      }),
+      false,
+    );
+    assert.equal(await readFile(bookmarksFile, "utf8"), firstWrite);
+
+    // Removing a bookmark from the group removes it from the folder next time.
+    await app.invoke("set_group_bookmarks", {
+      groupId: group.id,
+      bookmarks: [
+        { title: "Support", url: "https://support.example", folder: null },
+      ],
+    });
+    assert.equal(
+      await app.invoke("apply_group_bookmarks_to_profile", {
+        profileId: target.id,
+      }),
+      true,
+    );
+    document = await readBookmarks();
+    managed = managedFolderOf(document);
+    assert.equal(managed.length, 1);
+    assert.deepEqual(
+      managed[0].children.map((child) => child.name),
+      ["Support"],
+    );
+
+    // Emptying the group takes the whole folder away and leaves the user's own.
+    await app.invoke("set_group_bookmarks", {
+      groupId: group.id,
+      bookmarks: [],
+    });
+    assert.equal(
+      await app.invoke("apply_group_bookmarks_to_profile", {
+        profileId: target.id,
+      }),
+      true,
+    );
+    document = await readBookmarks();
+    assert.deepEqual(managedFolderOf(document), []);
+    assert.deepEqual(
+      document.roots.bookmark_bar.children.map((child) => child.name),
+      ["My Bank"],
+    );
+
+    // A profile in no group is left entirely alone.
+    assert.equal(
+      await app.invoke("apply_group_bookmarks_to_profile", {
+        profileId: profileIds[1],
+      }),
+      false,
+    );
+
+    await app.invoke("delete_selected_profiles", { profileIds });
+    await app.invoke("delete_profile_group", { groupId: group.id });
+    for (const proxy of proxies) {
+      await app.invoke("delete_stored_proxy", { proxyId: proxy.id });
+    }
+  });
+});
+
+test("local launch arguments and fingerprints work without a cloud account", async () => {
+  await withApp(
+    "entities-launch-args-free",
+    async (app) => {
+      const profile = await createProfile(app, "Free Launch Arguments");
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: { ...profile.wayfern_config, launch_args: ["--disable-gpu"] },
+      });
+      assert.deepEqual(
+        (await app.invoke("list_browser_profiles"))[0].wayfern_config
+          .launch_args ?? [],
+        ["--disable-gpu"],
+      );
+      const created = await app.invoke("create_browser_profile_new", {
+        name: "Local Launch Arguments",
+        browserStr: "wayfern",
+        version: profile.version,
+        releaseType: "stable",
+        wayfernConfig: { fingerprint: "{}", launch_args: ["--disable-gpu"] },
+      });
+      assert.deepEqual(created.wayfern_config.launch_args, ["--disable-gpu"]);
+      assert.equal((await app.invoke("list_browser_profiles")).length, 2);
+
+      const metadata = path.join(
+        app.dataRoot,
+        "data",
+        "profiles",
+        profile.id,
+        "metadata.json",
+      );
+      const stored = JSON.parse(await readFile(metadata, "utf8"));
+      stored.wayfern_config.launch_args = ["--disable-gpu"];
+      stored.updated_at = 1;
+      await writeFile(metadata, JSON.stringify(stored));
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: { ...stored.wayfern_config, launch_args: [] },
+      });
+      const cleared = (await app.invoke("list_browser_profiles"))[0];
+      assert.deepEqual(cleared.wayfern_config.launch_args ?? [], []);
+      assert.ok(cleared.updated_at > 1);
+      assert.equal(
+        cleared.wayfern_config.fingerprint,
+        profile.wayfern_config.fingerprint,
+      );
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: {
+          ...cleared.wayfern_config,
+          fingerprint: '{"userAgent":"changed"}',
+        },
+      });
+      assert.equal(
+        (await app.invoke("list_browser_profiles")).find(
+          (p) => p.id === profile.id,
+        ).wayfern_config.fingerprint,
+        '{"userAgent":"changed"}',
+      );
+    },
+    { extraEnv: { WAYFERN_TEST_TOKEN: "" } },
+  );
+});
+
+test("Pro launch arguments persist, clone, validate, and update the edit time", async () => {
+  await withApp(
+    "entities-launch-args-pro",
+    async (app) => {
+      const profile = await createProfile(app, "Pro Launch Arguments");
+      const metadata = path.join(
+        app.dataRoot,
+        "data",
+        "profiles",
+        profile.id,
+        "metadata.json",
+      );
+      const stored = JSON.parse(await readFile(metadata, "utf8"));
+      stored.updated_at = 1;
+      await writeFile(metadata, JSON.stringify(stored));
+      const custom = [
+        "--disable-gpu",
+        "--autoplay-policy=no-user-gesture-required",
+      ];
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: {
+          ...stored.wayfern_config,
+          launch_args: ["  --disable-gpu  ", "", custom[1]],
+        },
+      });
+      const saved = JSON.parse(await readFile(metadata, "utf8"));
+      assert.deepEqual(saved.wayfern_config.launch_args, custom);
+      assert.ok(saved.updated_at > 1);
+      const cloned = await app.invoke("clone_profile", {
+        profileId: profile.id,
+        name: "Cloned Launch Arguments",
+      });
+      assert.deepEqual(cloned.wayfern_config.launch_args, custom);
+      saved.updated_at = 2;
+      await writeFile(metadata, JSON.stringify(saved));
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: saved.wayfern_config,
+      });
+      assert.equal(JSON.parse(await readFile(metadata, "utf8")).updated_at, 2);
+      for (const [arg, code] of [
+        ["--user-data-dir=/tmp/other", "WAYFERN_LAUNCH_ARG_RESERVED"],
+        ["--window-size 800,600", "WAYFERN_LAUNCH_ARG_INVALID"],
+        ["--renderer-cmd-prefix=/tmp/x", "WAYFERN_LAUNCH_ARG_NOT_ALLOWED"],
+        ["--renderer-process-limit=999", "WAYFERN_LAUNCH_ARG_VALUE_INVALID"],
+      ]) {
+        assert.match(
+          await app.invokeError("update_wayfern_config", {
+            profileId: profile.id,
+            config: { ...saved.wayfern_config, launch_args: [arg] },
+          }),
+          new RegExp(`"code":"${code}"`),
+        );
+        assert.deepEqual(
+          JSON.parse(await readFile(metadata, "utf8")).wayfern_config
+            .launch_args,
+          custom,
+        );
+      }
+      await app.invoke("update_wayfern_config", {
+        profileId: profile.id,
+        config: { ...saved.wayfern_config, launch_args: [] },
+      });
+      assert.deepEqual(
+        JSON.parse(await readFile(metadata, "utf8")).wayfern_config
+          .launch_args ?? [],
+        [],
+      );
+      assert.deepEqual(
+        (await app.invoke("list_browser_profiles")).find(
+          (p) => p.id === cloned.id,
+        ).wayfern_config.launch_args,
+        custom,
+      );
+    },
+    { extraEnv: { WAYFERN_TEST_TOKEN: "e2e-local-launch-args" } },
+  );
+});
+
+test("DON local profile creation stays unlimited across legacy quota data and restart", async () => {
+  await withApp("entities-generation-allowance", async (app) => {
+    const initial = await app.invoke("get_profile_creation_allowance");
+    assert.equal(initial.enforcement, "soft");
+    assert.ok(initial.per_hour > Number.MAX_SAFE_INTEGER);
+    assert.equal(initial.used, 0);
+    assert.equal(initial.retry_after_secs, null);
+
+    const now = Math.floor(Date.now() / 1000);
+    await app.close();
+    await writeFile(
+      path.join(app.dataRoot, "data", "settings", "profile_generations.json"),
+      JSON.stringify({
+        generations: {
+          local: [
+            now - 4_000,
+            ...Array.from({ length: 8 }, (_, i) => now - 600 + i),
+          ],
+          // Another account's generations and ones older than an hour do
+          // not count against this device's signed-out allowance.
+          "someone-else": [now - 60],
+        },
+      }),
+    );
+    await app.start();
+
+    const full = await app.invoke("get_profile_creation_allowance");
+    assert.deepEqual(full, initial);
   });
 });

@@ -60,7 +60,7 @@ pub fn locale_selector() -> Option<&'static LocaleSelector> {
     .get_or_init(|| match LocaleSelector::new() {
       Ok(s) => Some(s),
       Err(e) => {
-        log::warn!("Failed to build the CLDR locale selector: {e}");
+        log::warn!("CLDR locale selector build failed err=\"{e}\"");
         None
       }
     })
@@ -167,7 +167,7 @@ impl LocaleSelector {
         }
         Ok(Event::Eof) => break,
         Err(e) => {
-          log::warn!("Error parsing territory XML: {}", e);
+          log::warn!("Territory XML parse failed err=\"{e}\"");
           break;
         }
         _ => {}
@@ -265,6 +265,114 @@ fn normalize_locale(locale: &str) -> Locale {
   Locale { language, region }
 }
 
+/// What the bundled MaxMind data says about an exit address, beyond the
+/// city and country a check already reports.
+///
+/// Everything here is read from the databases already on disk. A proxy check
+/// must not hand the exit address to a third-party lookup service: that would
+/// tell an outside party which addresses this machine is testing, which is the
+/// opposite of what the proxy is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExitInsight {
+  pub timezone: Option<String>,
+  /// The ISP, the registered organisation, or the autonomous system's
+  /// organisation, whichever the installed databases carry. `None` means "not
+  /// known", never "none".
+  pub organization: Option<String>,
+}
+
+/// Read timezone and organisation for `ip` out of the local databases.
+///
+/// Never fails: a missing database, an unroutable address or a record without
+/// the field all resolve to `None`, because "unknown" is the honest answer and
+/// a check should still report everything else it learned.
+pub fn lookup_exit_insight(ip: &str) -> ExitInsight {
+  let Ok(ip_addr) = IpAddr::from_str(ip) else {
+    return ExitInsight::default();
+  };
+
+  let mut insight = ExitInsight::default();
+
+  if let Ok(path) = GeoIPDownloader::get_mmdb_file_path() {
+    if let Ok(reader) = Reader::open_readfile(&path) {
+      if let Ok(lookup) = reader.lookup(ip_addr) {
+        if let Ok(Some(city)) = lookup.decode::<geoip2::City>() {
+          insight.timezone = city.location.time_zone.map(|tz| tz.to_string());
+        }
+      }
+      // The City database carries no organisation, but the same reader decodes
+      // one when the file in place is an ISP or Enterprise database instead.
+      if let Ok(lookup) = reader.lookup(ip_addr) {
+        if let Ok(Some(isp)) = lookup.decode::<geoip2::Isp>() {
+          insight.organization = first_non_empty([
+            isp.isp,
+            isp.organization,
+            isp.autonomous_system_organization,
+          ]);
+        }
+      }
+    }
+  }
+
+  if insight.organization.is_none() {
+    insight.organization = lookup_asn_organization(ip_addr);
+  }
+
+  insight
+}
+
+/// City, country and country code for `ip`, read from the local City
+/// database. Proxy checks used to ask ip-api.com over plain HTTP, which showed
+/// that service and everyone on the path which exit address this machine was
+/// testing. `None` wherever the database has no answer.
+pub fn lookup_place(ip: &str) -> (Option<String>, Option<String>, Option<String>) {
+  let Ok(ip_addr) = IpAddr::from_str(ip) else {
+    return (None, None, None);
+  };
+  let Some(path) = GeoIPDownloader::get_mmdb_file_path()
+    .ok()
+    .filter(|path| path.exists())
+  else {
+    return (None, None, None);
+  };
+  let Ok(reader) = Reader::open_readfile(&path) else {
+    return (None, None, None);
+  };
+  let Ok(Some(city)) = reader
+    .lookup(ip_addr)
+    .and_then(|lookup| lookup.decode::<geoip2::City>())
+  else {
+    return (None, None, None);
+  };
+  (
+    first_non_empty([city.city.names.english]),
+    first_non_empty([city.country.names.english]),
+    first_non_empty([city.country.iso_code]).map(|code| code.to_uppercase()),
+  )
+}
+
+/// The autonomous system's organisation, from the ASN database that ships
+/// alongside the city one. Absent on an install that has only ever fetched the
+/// city database, which is why the caller treats `None` as "unknown".
+fn lookup_asn_organization(ip_addr: IpAddr) -> Option<String> {
+  let path = GeoIPDownloader::get_asn_mmdb_file_path().ok()?;
+  if !path.exists() {
+    return None;
+  }
+  let reader = Reader::open_readfile(&path).ok()?;
+  let asn: geoip2::Asn = reader.lookup(ip_addr).ok()?.decode().ok()??;
+  first_non_empty([asn.autonomous_system_organization])
+}
+
+fn first_non_empty<const N: usize>(candidates: [Option<&str>; N]) -> Option<String> {
+  candidates
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|value| !value.is_empty())
+    .map(|value| value.to_string())
+}
+
 pub fn get_geolocation(ip: &str) -> Result<Geolocation, GeolocationError> {
   let mmdb_path =
     GeoIPDownloader::get_mmdb_file_path().map_err(|_| GeolocationError::DatabaseNotFound)?;
@@ -306,7 +414,10 @@ pub fn get_geolocation(ip: &str) -> Result<Geolocation, GeolocationError> {
     .ok_or_else(|| GeolocationError::LocationNotFound("No country code".to_string()))?
     .to_uppercase();
 
-  let selector = LocaleSelector::new()?;
+  // The CLDR data is parsed once for the process, not on every lookup.
+  let selector = locale_selector().ok_or_else(|| {
+    GeolocationError::LocationNotFound("CLDR locale data is unavailable".to_string())
+  })?;
   let locale = selector.from_region(&iso_code)?;
 
   Ok(Geolocation {
@@ -441,6 +552,26 @@ async fn fetch_online_geolocation(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn an_invalid_address_has_no_place() {
+    assert_eq!(lookup_place("not-an-ip"), (None, None, None));
+  }
+
+  /// Exit addresses stay on this machine. A lookup service would learn which
+  /// proxies the user tests, and plain HTTP would tell everyone on the path.
+  #[test]
+  fn proxy_checks_do_not_send_the_exit_address_to_a_lookup_service() {
+    for (name, source) in [
+      ("proxy_manager.rs", include_str!("proxy_manager.rs")),
+      ("lib.rs", include_str!("lib.rs")),
+    ] {
+      assert!(
+        !source.contains("ip-api.com"),
+        "{name} sends the exit address to ip-api.com; use geolocation::lookup_place"
+      );
+    }
+  }
 
   #[test]
   fn test_locale_selector_creation() {

@@ -2368,6 +2368,15 @@ pub async fn check_for_app_updates() -> Result<Option<AppUpdateInfo>, String> {
     return Ok(None);
   }
 
+  if crate::app_dirs::is_portable()
+    || crate::settings_manager::SettingsManager::instance()
+      .load_settings()
+      .map(|settings| settings.disable_auto_updates)
+      .unwrap_or(false)
+  {
+    return Ok(None);
+  }
+
   log::info!("Checking the private DON release repository for app updates");
   AppAutoUpdater::instance()
     .check_for_updates()

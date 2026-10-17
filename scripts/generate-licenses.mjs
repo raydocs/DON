@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -40,6 +40,8 @@ const LEGACY_LICENSE_EXPRESSIONS = new Map([
   ["MIT/Apache-2.0", "Apache-2.0 OR MIT"],
   ["MIT OR Apache-2.0", "Apache-2.0 OR MIT"],
   ["Unlicense/MIT", "MIT OR Unlicense"],
+  // The bundled Geist fonts name their license in words.
+  ["SIL OPEN FONT LICENSE", "OFL-1.1"],
 ]);
 
 const HOST_ONLY_PNPM_NATIVE_PREFIXES = [
@@ -156,14 +158,18 @@ function commandOutput(command, args) {
   // spawn batch files without a shell (CVE-2024-27980), so `execFileSync`
   // fails with EINVAL there. Every argument below is a literal from this file,
   // so routing that one call through cmd.exe interpolates nothing.
-  const needsShell = process.platform === "win32" && command === "pnpm";
-  return execFileSync(needsShell ? "pnpm.cmd" : command, args, {
+  // One command string rather than an argument list: Node deprecates
+  // passing arguments alongside `shell: true` (DEP0190).
+  const options = {
     cwd: PROJECT_ROOT,
     encoding: "utf8",
     maxBuffer: MAX_COMMAND_OUTPUT,
-    shell: needsShell,
     windowsHide: true,
-  });
+  };
+  if (process.platform === "win32" && command === "pnpm") {
+    return execSync(["pnpm.cmd", ...args].join(" "), options);
+  }
+  return execFileSync(command, args, options);
 }
 
 function generateInventory() {

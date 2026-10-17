@@ -1,23 +1,40 @@
-//! The e2e harness app links Tauri code that calls `TaskDialogIndirect`, which
-//! only exists in comctl32 v6. Without the v6 manifest the exe crashes at
-//! startup with STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) on Windows — the main
-//! app gets its manifest from `src-tauri/build.rs`, this crate needs its own.
-
 fn main() {
-  #[cfg(target_os = "windows")]
-  {
-    use std::path::PathBuf;
+    // The harness links Donut as a library, and a dependency's link arguments
+    // never reach this binary. Without the Common Controls v6 manifest Windows
+    // loads comctl32 v5, and the app dies at startup with
+    // STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139) before WebDriver can attach.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let manifest_dir = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
+        let manifest = manifest_dir
+            .parent()
+            .and_then(|e2e| e2e.parent())
+            .expect("e2e/app sits two levels below the repository root")
+            .join("src-tauri")
+            .join("app.manifest");
+        // A plain backslash path: mt.exe rejects the \\?\ form canonicalize gives.
+        let manifest = manifest.to_str().unwrap().replace('/', "\\");
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{manifest}");
+        println!("cargo:rerun-if-changed={manifest}");
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-    let manifest_path = PathBuf::from(&manifest_dir).join("../../src-tauri/app.manifest");
-    if !manifest_path.exists() {
-      println!("cargo:warning=app.manifest not found, skipping manifest embedding");
-      return;
+        // Donut links the C runtime statically, and tauri-build puts a stub
+        // msvcrt.lib on the library path every dependent sees. Its link
+        // arguments stay with Donut, so without these the stub hides the real
+        // runtime and the link fails with unresolved CRT symbols.
+        for lib in [
+            "libvcruntimed.lib",
+            "vcruntime.lib",
+            "vcruntimed.lib",
+            "libcmtd.lib",
+            "msvcrt.lib",
+            "msvcrtd.lib",
+            "libucrt.lib",
+            "libucrtd.lib",
+        ] {
+            println!("cargo:rustc-link-arg=/NODEFAULTLIB:{lib}");
+        }
+        for lib in ["libcmt.lib", "libvcruntime.lib", "ucrt.lib"] {
+            println!("cargo:rustc-link-arg=/DEFAULTLIB:{lib}");
+        }
     }
-    // Use the path directly (avoid canonicalize which adds \\?\ prefix that mt.exe rejects)
-    let manifest_str = manifest_path.to_str().unwrap().replace('/', "\\");
-    println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
-    println!("cargo:rustc-link-arg=/MANIFESTINPUT:{manifest_str}");
-    println!("cargo:rerun-if-changed=../../src-tauri/app.manifest");
-  }
 }

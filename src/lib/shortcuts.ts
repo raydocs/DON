@@ -31,15 +31,20 @@ export interface ShortcutDef {
 export type ShortcutId =
   | "openPalette"
   | "openShortcuts"
+  | "openTips"
+  | "sendFeedback"
+  | "openTotp"
   | "importProfile"
   | "goProfiles"
   | "goProxies"
   | "goExtensions"
   | "goGroups"
   | "goCookieBot"
+  | "goAgent"
   | "goIntegrations"
   | "goAccount"
-  | "goSettings";
+  | "goSettings"
+  | "goTrash";
 
 export const SHORTCUTS: ShortcutDef[] = [
   // Actions
@@ -56,6 +61,32 @@ export const SHORTCUTS: ShortcutDef[] = [
     group: "actions",
     key: "/",
     mod: true,
+  },
+  {
+    // Mod+Shift+H, "hints". Plain Mod+H hides the window on macOS.
+    id: "openTips",
+    labelKey: "shortcuts.openTips",
+    group: "actions",
+    key: "h",
+    mod: true,
+    shift: true,
+  },
+  {
+    // Mod+Shift+F, "feedback". Plain Mod+F stays free for find.
+    id: "sendFeedback",
+    labelKey: "shortcuts.sendFeedback",
+    group: "actions",
+    key: "f",
+    mod: true,
+    shift: true,
+  },
+  {
+    id: "openTotp",
+    labelKey: "shortcuts.openTotp",
+    group: "actions",
+    key: "o",
+    mod: true,
+    shift: true,
   },
   {
     id: "importProfile",
@@ -102,6 +133,16 @@ export const SHORTCUTS: ShortcutDef[] = [
     mod: true,
   },
   {
+    // Mod+J: the agent has no free mnemonic left — b is the cookie bot, a is
+    // the account, g is groups — so an unclaimed key it is, rather than
+    // stealing a chord the platform already means something by.
+    id: "goAgent",
+    labelKey: "shortcuts.goAgent",
+    group: "navigation",
+    key: "j",
+    mod: true,
+  },
+  {
     id: "goIntegrations",
     labelKey: "shortcuts.goIntegrations",
     group: "navigation",
@@ -124,6 +165,16 @@ export const SHORTCUTS: ShortcutDef[] = [
     group: "navigation",
     key: ",",
     mod: true,
+  },
+  {
+    // Mod+Shift+T, the "reopen what I just closed" chord: the trash is where
+    // a deleted profile comes back from. Plain Mod+T stays free.
+    id: "goTrash",
+    labelKey: "shortcuts.goTrash",
+    group: "navigation",
+    key: "t",
+    mod: true,
+    shift: true,
   },
 ];
 

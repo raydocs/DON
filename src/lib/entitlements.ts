@@ -8,33 +8,65 @@ const UNLOCKED: Entitlements = {
   active: true,
   browserAutomation: true,
   crossOsFingerprints: true,
-  cloudBackup: true,
-  teamCollaboration: true,
-  cookieBot: true,
-  remoteInteractive: true,
+  cloudBackup: false,
+  teamCollaboration: false,
+  cookieBot: false,
+  remoteInteractive: false,
+  remoteControl: false,
+  scheduledAutomation: true,
   profileLimit: Number.MAX_SAFE_INTEGER,
   requestsPerHour: 1_000_000,
-  remoteBrowserHours: Number.MAX_SAFE_INTEGER,
+  remoteBrowserHours: 0,
 };
 
 /**
- * The user's effective entitlements. DON always returns a full unlock so
- * fingerprint editing, automation, and cookie bot work without a paid plan.
+ * Local DON features are unlocked; remote capabilities come from the server.
  */
 export function getEntitlements(
-  _user?: CloudUser | null | undefined,
+  user?: CloudUser | null | undefined,
 ): Entitlements {
-  return { ...UNLOCKED };
+  const server = user?.entitlements;
+  return {
+    ...UNLOCKED,
+    cloudBackup: Boolean(server?.active && server.cloudBackup),
+    teamCollaboration: Boolean(server?.active && server.teamCollaboration),
+    cookieBot: Boolean(server?.active && server.cookieBot),
+    remoteInteractive: Boolean(server?.active && server.remoteInteractive),
+    remoteControl: Boolean(server?.active && server.remoteControl),
+    remoteBrowserHours: server?.remoteBrowserHours ?? 0,
+  };
+}
+
+export function effectivePlanOf(user: CloudUser | null | undefined): string {
+  return user?.effectivePlan ?? user?.plan ?? "free";
+}
+
+export function canUseScheduledAutomation(
+  _user: CloudUser | null | undefined,
+): boolean {
+  return true;
 }
 
 /**
- * Whether this user may enrol profiles in Cookie Bot. DON removes the paid
- * plan gate, but the bot still runs on the cloud service and needs a signed-in
- * account. Keeping signed-out sessions idle avoids retrying cloud requests that
- * cannot succeed.
+ * Cookie Bot runs on the cloud service and needs a server-authorized account.
  */
 export function canUseCookieBot(user?: CloudUser | null | undefined): boolean {
-  return Boolean(user);
+  return getEntitlements(user).cookieBot;
+}
+
+/**
+ * Whether this user may drive this desktop from donutbrowser.com.
+ *
+ * The bridge itself does not read this, the server decides who may send work,
+ * and a cached entitlement that is a refresh cycle out of date must not be what
+ * refuses a customer their own machine. This is what the UI reads to explain
+ * WHY a connected desktop cannot be driven.
+ */
+export function canUseRemoteControl(
+  user: CloudUser | null | undefined,
+): boolean {
+  const entitlements = getEntitlements(user);
+  return entitlements.active && entitlements.remoteControl;
 }
 
 /**
@@ -43,4 +75,23 @@ export function canUseCookieBot(user?: CloudUser | null | undefined): boolean {
  */
 export function isTeamOwner(user: CloudUser | null | undefined): boolean {
   return Boolean(user?.teamRole === "owner" && user.teamId);
+}
+
+/**
+ * A team seat that may open the team's profiles and keep what a session
+ * changes, but not change the team's profiles, proxies or groups.
+ */
+export function isTeamLauncher(user: CloudUser | null | undefined): boolean {
+  return Boolean(user?.teamId) && user?.teamRole === "launcher";
+}
+
+/** Owners and admins read the team's activity log. The cloud checks again. */
+export function canViewTeamActivity(
+  user: CloudUser | null | undefined,
+): boolean {
+  return (
+    getEntitlements(user).teamCollaboration &&
+    Boolean(user?.teamId) &&
+    (user?.teamRole === "owner" || user?.teamRole === "admin")
+  );
 }

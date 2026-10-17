@@ -1,13 +1,7 @@
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, create_dir_all};
-use std::path::PathBuf;
-
-use aes_gcm::{
-  aead::{Aead, KeyInit},
-  Aes256Gcm, Key, Nonce,
-};
-use argon2::{password_hash::SaltString, Argon2, PasswordHasher};
-use rand::RngExt;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TableSortingSettings {
@@ -22,6 +16,124 @@ impl Default for TableSortingSettings {
       direction: "asc".to_string(),
     }
   }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TableSort {
+  pub id: String,
+  pub desc: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum TableDensity {
+  #[default]
+  Compact,
+  Comfortable,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
+pub struct TablePreferences {
+  pub visibility: BTreeMap<String, bool>,
+  pub sizing: BTreeMap<String, f64>,
+  pub sorting: Vec<TableSort>,
+  pub density: TableDensity,
+}
+
+impl Default for TablePreferences {
+  fn default() -> Self {
+    Self {
+      visibility: BTreeMap::new(),
+      sizing: BTreeMap::new(),
+      sorting: vec![TableSort {
+        id: "name".into(),
+        desc: false,
+      }],
+      density: TableDensity::Compact,
+    }
+  }
+}
+
+fn table_preferences_valid(table_id: &str, preferences: &TablePreferences) -> bool {
+  let valid_id = |id: &str| {
+    !id.is_empty() && id.len() <= 64 && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+  };
+  let mut sort_ids = HashSet::new();
+  matches!(
+    table_id,
+    "profiles" | "proxies" | "vpns" | "extensions" | "extensionGroups" | "groups"
+  ) && preferences.visibility.len() <= 64
+    && preferences.sizing.len() <= 64
+    && preferences.sorting.len() <= 16
+    && preferences.visibility.keys().all(|id| valid_id(id))
+    && preferences
+      .sizing
+      .iter()
+      .all(|(id, width)| valid_id(id) && width.is_finite() && (28.0..=1600.0).contains(width))
+    && preferences
+      .sorting
+      .iter()
+      .all(|sort| valid_id(&sort.id) && sort_ids.insert(&sort.id))
+}
+
+#[tauri::command]
+pub fn get_table_preferences(table_id: String) -> Result<TablePreferences, String> {
+  let default = TablePreferences::default();
+  if !table_preferences_valid(&table_id, &default) {
+    return Err(serde_json::json!({"code": "TABLE_PREFERENCES_INVALID"}).to_string());
+  }
+  let manager = SettingsManager::instance();
+  let path = manager
+    .get_settings_dir()
+    .join(format!("table_{table_id}.json"));
+  let load = || -> Result<TablePreferences, Box<dyn std::error::Error>> {
+    if path.exists() {
+      let preferences = serde_json::from_slice::<TablePreferences>(&fs::read(path)?)?;
+      if !table_preferences_valid(&table_id, &preferences) {
+        return Err("Invalid saved table preferences".into());
+      }
+      return Ok(preferences);
+    }
+    let mut preferences = default;
+    if table_id == "profiles" {
+      let legacy = manager.load_table_sorting()?;
+      preferences.sorting = vec![TableSort {
+        id: legacy.column,
+        desc: legacy.direction == "desc",
+      }];
+    }
+    Ok(preferences)
+  };
+  load().map_err(|error| {
+    log::warn!("Table preferences load failed table={table_id} err=\"{error}\"");
+    serde_json::json!({"code": "TABLE_PREFERENCES_LOAD_FAILED"}).to_string()
+  })
+}
+
+#[tauri::command]
+pub fn save_table_preferences(
+  table_id: String,
+  preferences: TablePreferences,
+) -> Result<(), String> {
+  if !table_preferences_valid(&table_id, &preferences) {
+    return Err(serde_json::json!({"code": "TABLE_PREFERENCES_INVALID"}).to_string());
+  }
+  static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  let persist = || -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = WRITE_LOCK
+      .lock()
+      .map_err(|_| "Table preferences lock failed")?;
+    let directory = SettingsManager::instance().get_settings_dir();
+    create_dir_all(&directory)?;
+    let json = serde_json::to_vec_pretty(&preferences)?;
+    write_whole(&directory.join(format!("table_{table_id}.json")), &json)?;
+    Ok(())
+  };
+  persist().map_err(|error| {
+    log::warn!("Table preferences save failed table={table_id} err=\"{error}\"");
+    serde_json::json!({"code": "TABLE_PREFERENCES_SAVE_FAILED"}).to_string()
+  })
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -40,14 +152,25 @@ pub struct AppSettings {
   pub api_token: Option<String>, // Displayed token for user to copy
   #[serde(default)]
   pub sync_server_url: Option<String>, // URL of the sync server
+  /// The customer's own donut-sync a signed-in paid account syncs with,
+  /// instead of Donut cloud (`sync::account_server`). Owned by
+  /// `set_account_sync_server`, never by a settings save.
+  #[serde(default)]
+  pub account_sync_server_url: Option<String>,
   #[serde(default)]
   pub mcp_enabled: bool, // Enable MCP (Model Context Protocol) server
   #[serde(default)]
-  pub mcp_port: Option<u16>, // Port for MCP server (default 51080)
+  pub mcp_port: Option<u16>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mcp_token: Option<String>,
   #[serde(default)]
-  pub mcp_token: Option<String>, // Displayed token for user to copy (not persisted, loaded from encrypted file)
+  pub mcp_remote_enabled: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub mcp_remote_key: Option<String>,
   #[serde(default)]
-  pub language: Option<String>, // ISO 639-1: "en", "es", "pt", "fr", "zh", "ja", "ko", "ru", or None for system default
+  pub mcp_remote_key_id: Option<String>,
+  #[serde(default)]
+  pub language: Option<String>, // ISO 639-1: "en", "es", "pt", "fr", "de", "zh", "ja", "ko", "ru", "tr", "vi", or None for system default
   #[serde(default)]
   pub window_resize_warning_dismissed: bool,
   /// Stop blocking launches whose proxy exit disagrees with the fingerprint.
@@ -67,6 +190,52 @@ pub struct AppSettings {
   /// copy is always re-encrypted regardless of this flag.
   #[serde(default)]
   pub keep_decrypted_profiles_in_ram: bool,
+  /// Feature tips. Whether one tip the user has not seen yet may open by
+  /// itself shortly after launch. Off is the user's choice, made in the tips
+  /// dialog.
+  #[serde(default = "default_tips_auto_show")]
+  pub tips_auto_show: bool,
+  /// Ids of the tips that have been shown, in the automatic or the browse
+  /// flow, so the automatic flow never repeats one.
+  #[serde(default)]
+  pub tips_seen: Vec<String>,
+  /// Unix seconds of the last tip that opened by itself.
+  #[serde(default)]
+  pub tips_last_auto_shown_at: Option<u64>,
+  /// Unix seconds before which no tip opens by itself. Drawn once, when an
+  /// automatic tip opens, a random 2 to 5 days later, so a restart keeps the
+  /// same wait.
+  #[serde(default)]
+  pub tips_next_auto_show_at: Option<u64>,
+  /// Unix seconds when the person last sent feedback from the app. Only the
+  /// feedback command writes it; the feedback tip is not offered once set.
+  #[serde(default)]
+  pub feedback_sent_at: Option<u64>,
+  /// Cloud user ids that have had the paid-plan welcome.
+  #[serde(default)]
+  pub paid_welcome_seen_for: Vec<String>,
+  /// The plan status last observed per cloud user id, `"free"` or `"paid"`.
+  /// A change from free to paid is what earns the paid-plan welcome.
+  #[serde(default)]
+  pub cloud_plan_memory: std::collections::HashMap<String, String>,
+  /// Refuse every launch that would reach the internet without a proxy or
+  /// VPN: a profile with no route, and one whose proxy or VPN is gone.
+  #[serde(default)]
+  pub require_route_for_launch: bool,
+  /// Days a deleted profile can still be restored. 0 destroys it at once.
+  #[serde(default = "default_trash_retention_days")]
+  pub trash_retention_days: u32,
+  /// Record which sites each profile visits in its traffic stats. Off keeps
+  /// byte counts only, so nothing on disk lists where a profile went.
+  #[serde(default = "default_record_traffic_domains")]
+  pub record_traffic_domains: bool,
+  /// Soft interface sounds for presses, toggles and results.
+  #[serde(default = "default_ui_sounds")]
+  pub ui_sounds: bool,
+  /// The optional MCP toolsets written into clients' endpoint URLs. Empty is
+  /// every tool.
+  #[serde(default)]
+  pub mcp_toolsets: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
@@ -83,6 +252,36 @@ fn default_api_port() -> u16 {
   10108
 }
 
+fn default_tips_auto_show() -> bool {
+  true
+}
+
+pub const DEFAULT_TRASH_RETENTION_DAYS: u32 = 30;
+/// The longest retention the Settings page offers.
+pub const MAX_TRASH_RETENTION_DAYS: u32 = 90;
+
+fn default_trash_retention_days() -> u32 {
+  DEFAULT_TRASH_RETENTION_DAYS
+}
+
+fn default_record_traffic_domains() -> bool {
+  true
+}
+
+fn default_ui_sounds() -> bool {
+  true
+}
+
+/// The automatic tip flow waits a random gap between two tips, drawn from
+/// this range (both ends included), so tips arrive now and then instead of on
+/// a fixed day and a busy day of restarts never turns into a tip per launch.
+pub const TIPS_AUTO_GAP_MIN_SECS: u64 = 2 * 24 * 60 * 60;
+pub const TIPS_AUTO_GAP_MAX_SECS: u64 = 5 * 24 * 60 * 60;
+
+/// The plan status remembered per cloud user.
+const PLAN_STATUS_PAID: &str = "paid";
+const PLAN_STATUS_FREE: &str = "free";
+
 impl Default for AppSettings {
   fn default() -> Self {
     Self {
@@ -93,9 +292,13 @@ impl Default for AppSettings {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
+      account_sync_server_url: None,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
+      mcp_remote_enabled: false,
+      mcp_remote_key: None,
+      mcp_remote_key_id: None,
       language: None,
       window_resize_warning_dismissed: false,
       fingerprint_gate_disabled: false,
@@ -104,11 +307,46 @@ impl Default for AppSettings {
       // DON fork: never auto-pull official Donut releases.
       disable_auto_updates: true,
       keep_decrypted_profiles_in_ram: false,
+      tips_auto_show: true,
+      tips_seen: Vec::new(),
+      tips_last_auto_shown_at: None,
+      tips_next_auto_show_at: None,
+      feedback_sent_at: None,
+      paid_welcome_seen_for: Vec::new(),
+      cloud_plan_memory: std::collections::HashMap::new(),
+      require_route_for_launch: false,
+      trash_retention_days: DEFAULT_TRASH_RETENTION_DAYS,
+      record_traffic_domains: true,
+      ui_sounds: true,
+      mcp_toolsets: Vec::new(),
     }
   }
 }
 
+/// The remote MCP credential as it is kept on this machine.
+#[derive(Debug, Clone)]
+pub struct StoredMcpRemoteKey {
+  /// The plaintext `dmk_` key.
+  pub key: String,
+  /// The server-side id, when the store that wrote the key also recorded it.
+  pub id: Option<String>,
+}
+
 pub struct SettingsManager;
+
+/// Write `content` to `path` in one step: to a sibling first, then renamed
+/// into place. A reader that opens the file mid-write, and there are several
+/// at startup, sees the old settings or the new ones, never an empty file
+/// that parses as the defaults.
+fn write_whole(path: &std::path::Path, content: &[u8]) -> std::io::Result<()> {
+  let staging = path.with_extension("json.tmp");
+  fs::write(&staging, content)?;
+  if let Err(e) = fs::rename(&staging, path) {
+    let _ = fs::remove_file(&staging);
+    return Err(e);
+  }
+  Ok(())
+}
 
 impl SettingsManager {
   pub(crate) fn new() -> Self {
@@ -145,7 +383,7 @@ impl SettingsManager {
     match serde_json::from_str::<AppSettings>(&content) {
       Ok(settings) => Ok(settings),
       Err(e) => {
-        log::warn!("Warning: Failed to parse settings file, using defaults: {e}");
+        log::warn!("Settings file unparsable; using defaults err=\"{e}\"");
         Ok(AppSettings::default())
       }
     }
@@ -155,9 +393,17 @@ impl SettingsManager {
     let settings_dir = self.get_settings_dir();
     create_dir_all(&settings_dir)?;
 
+    // The remote MCP credential works from anywhere on the internet and has
+    // its own encrypted file; a struct loaded for the frontend carries it, so
+    // it is dropped at the one place the JSON gets written rather than at
+    // every caller that happens to hold such a struct.
+    let mut on_disk = settings.clone();
+    on_disk.mcp_remote_key = None;
+    on_disk.mcp_token = None;
+
     let settings_file = self.get_settings_file();
-    let json = serde_json::to_string_pretty(settings)?;
-    fs::write(settings_file, json)?;
+    let json = serde_json::to_string_pretty(&on_disk)?;
+    write_whole(&settings_file, json.as_bytes())?;
 
     Ok(())
   }
@@ -184,20 +430,55 @@ impl SettingsManager {
 
     let sorting_file = self.get_table_sorting_file();
     let json = serde_json::to_string_pretty(sorting)?;
-    fs::write(sorting_file, json)?;
+    write_whole(&sorting_file, json.as_bytes())?;
 
     Ok(())
   }
 
-  fn get_vault_password() -> String {
-    env!("DONUT_BROWSER_VAULT_PASSWORD").to_string()
+  /// Seal `secret` into `file`.
+  ///
+  /// One implementation for every secret this manager keeps on disk, in
+  /// `crate::vault`: the API, MCP and sync tokens and the remote MCP
+  /// credential share the layout, and only the five-byte header tells them
+  /// apart.
+  fn encrypt_to_file(
+    file: &std::path::Path,
+    header: &[u8; 5],
+    secret: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    crate::vault::seal(file, &Self::magic(header), secret)?;
+    Ok(())
   }
 
-  pub async fn generate_api_token(
-    &self,
-    app_handle: &tauri::AppHandle,
-  ) -> Result<String, Box<dyn std::error::Error>> {
-    // Generate a secure random token (base64 encoded for URL safety)
+  /// Read back a secret written by `encrypt_to_file`.
+  ///
+  /// A missing file, a foreign header or a layout this version does not know
+  /// all read as "no secret" rather than an error, so a stale or damaged file
+  /// never blocks the feature it belongs to; the caller simply mints again.
+  fn decrypt_from_file(
+    file: &std::path::Path,
+    header: &[u8; 5],
+  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    Ok(crate::vault::open(file, &Self::magic(header))?)
+  }
+
+  /// The header plus the layout version every file of this manager carries.
+  fn magic(header: &[u8; 5]) -> [u8; 6] {
+    let mut magic = [0u8; 6];
+    magic[..5].copy_from_slice(header);
+    magic[5] = 2;
+    magic
+  }
+
+  fn remove_secret_file(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if file.exists() {
+      std::fs::remove_file(file)?;
+    }
+    Ok(())
+  }
+
+  /// A fresh 256-bit token, base64url so it is safe in a URL path.
+  fn random_token() -> String {
     let token_bytes: [u8; 32] = {
       use rand::Rng;
       let mut rng = rand::rng();
@@ -206,201 +487,26 @@ impl SettingsManager {
       bytes
     };
     use base64::{engine::general_purpose, Engine as _};
-    let token = general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
-
-    // Store token securely
-    self.store_api_token(app_handle, &token).await?;
-
-    Ok(token)
+    general_purpose::URL_SAFE_NO_PAD.encode(token_bytes)
   }
 
-  pub async fn store_api_token(
-    &self,
-    _app_handle: &tauri::AppHandle,
-    token: &str,
-  ) -> Result<(), Box<dyn std::error::Error>> {
-    // Store token in an encrypted file using Argon2 + AES-GCM
-    let token_file = self.get_settings_dir().join("api_token.dat");
-
-    // Create directory if it doesn't exist
-    if let Some(parent) = token_file.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-
-    let vault_password = Self::get_vault_password();
-
-    // Generate a random salt for Argon2
-    let salt_bytes: [u8; 16] = rand::rng().random();
-    let salt =
-      SaltString::encode_b64(&salt_bytes).map_err(|e| format!("Failed to encode salt: {e}"))?;
-
-    // Use Argon2 to derive a 32-byte key from the vault password
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-
-    // Take first 32 bytes for AES-256 key
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-
-    // Generate a random nonce
-    let nonce_bytes: [u8; 12] = rand::rng().random();
-    let nonce = Nonce::from(nonce_bytes);
-
-    // Encrypt the token
-    let ciphertext = cipher
-      .encrypt(&nonce, token.as_bytes())
-      .map_err(|e| format!("Encryption failed: {e}"))?;
-
-    // Create file data with header, salt, nonce, and encrypted data
-    let mut file_data = Vec::new();
-    file_data.extend_from_slice(b"DBAPI"); // 5-byte header
-    file_data.push(2u8); // Version 2 (Argon2 + AES-GCM)
-
-    // Store salt length and salt
-    let salt_str = salt.as_str();
-    file_data.push(salt_str.len() as u8);
-    file_data.extend_from_slice(salt_str.as_bytes());
-
-    // Store nonce (12 bytes for AES-GCM)
-    file_data.extend_from_slice(&nonce);
-
-    // Store ciphertext length and ciphertext
-    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    file_data.extend_from_slice(&ciphertext);
-
-    std::fs::write(&token_file, file_data)?;
-    crate::app_dirs::restrict_to_owner(std::path::Path::new(&token_file));
-    Ok(())
+  fn api_token_file(&self) -> PathBuf {
+    self.get_settings_dir().join("api_token.dat")
   }
 
-  pub async fn get_api_token(
-    &self,
-    _app_handle: &tauri::AppHandle,
-  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("api_token.dat");
-
-    if !token_file.exists() {
-      return Ok(None);
-    }
-
-    let file_data = std::fs::read(token_file)?;
-
-    // Validate header
-    if file_data.len() < 6 || &file_data[0..5] != b"DBAPI" {
-      return Ok(None);
-    }
-
-    let version = file_data[5];
-
-    // Only support Argon2 + AES-GCM (version 2)
-    if version != 2 {
-      return Ok(None);
-    }
-
-    // Argon2 + AES-GCM decryption
-    let mut offset = 6;
-
-    // Read salt
-    if offset >= file_data.len() {
-      return Ok(None);
-    }
-    let salt_len = file_data[offset] as usize;
-    offset += 1;
-
-    if offset + salt_len > file_data.len() {
-      return Ok(None);
-    }
-    let salt_bytes = &file_data[offset..offset + salt_len];
-    let salt_str = std::str::from_utf8(salt_bytes).map_err(|_| "Invalid salt encoding")?;
-    let salt = SaltString::from_b64(salt_str).map_err(|_| "Invalid salt format")?;
-    offset += salt_len;
-
-    // Read nonce (12 bytes)
-    if offset + 12 > file_data.len() {
-      return Ok(None);
-    }
-    let nonce_bytes: [u8; 12] = file_data[offset..offset + 12]
-      .try_into()
-      .map_err(|_| "Invalid nonce length")?;
-    let nonce = Nonce::from(nonce_bytes);
-    offset += 12;
-
-    // Read ciphertext
-    if offset + 4 > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext_len = u32::from_le_bytes([
-      file_data[offset],
-      file_data[offset + 1],
-      file_data[offset + 2],
-      file_data[offset + 3],
-    ]) as usize;
-    offset += 4;
-
-    if offset + ciphertext_len > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext = &file_data[offset..offset + ciphertext_len];
-
-    // Derive key using Argon2
-    let vault_password = Self::get_vault_password();
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-
-    // Decrypt the token
-    let plaintext = cipher
-      .decrypt(&nonce, ciphertext)
-      .map_err(|_| "Decryption failed")?;
-
-    match String::from_utf8(plaintext) {
-      Ok(token) => Ok(Some(token)),
-      Err(_) => Ok(None),
-    }
+  fn sync_token_file(&self) -> PathBuf {
+    self.get_settings_dir().join("sync_token.dat")
   }
 
-  pub async fn remove_api_token(
-    &self,
-    _app_handle: &tauri::AppHandle,
-  ) -> Result<(), Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("api_token.dat");
-
-    if token_file.exists() {
-      std::fs::remove_file(token_file)?;
-    }
-
-    Ok(())
+  fn mcp_remote_key_file(&self) -> PathBuf {
+    self.get_settings_dir().join("mcp_remote_key.dat")
   }
 
   pub async fn generate_mcp_token(
     &self,
     app_handle: &tauri::AppHandle,
   ) -> Result<String, Box<dyn std::error::Error>> {
-    let token_bytes: [u8; 32] = {
-      use rand::Rng;
-      let mut rng = rand::rng();
-      let mut bytes = [0u8; 32];
-      rng.fill_bytes(&mut bytes);
-      bytes
-    };
-    use base64::{engine::general_purpose, Engine as _};
-    let token = general_purpose::URL_SAFE_NO_PAD.encode(token_bytes);
+    let token = Self::random_token();
     self.store_mcp_token(app_handle, &token).await?;
     Ok(token)
   }
@@ -410,142 +516,49 @@ impl SettingsManager {
     _app_handle: &tauri::AppHandle,
     token: &str,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("mcp_token.dat");
-
-    if let Some(parent) = token_file.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-
-    let vault_password = Self::get_vault_password();
-    let salt_bytes: [u8; 16] = rand::rng().random();
-    let salt =
-      SaltString::encode_b64(&salt_bytes).map_err(|e| format!("Failed to encode salt: {e}"))?;
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce_bytes: [u8; 12] = rand::rng().random();
-    let nonce = Nonce::from(nonce_bytes);
-    let ciphertext = cipher
-      .encrypt(&nonce, token.as_bytes())
-      .map_err(|e| format!("Encryption failed: {e}"))?;
-
-    let mut file_data = Vec::new();
-    file_data.extend_from_slice(b"DBMCP"); // 5-byte header for MCP token
-    file_data.push(2u8); // Version 2 (Argon2 + AES-GCM)
-    let salt_str = salt.as_str();
-    file_data.push(salt_str.len() as u8);
-    file_data.extend_from_slice(salt_str.as_bytes());
-    file_data.extend_from_slice(&nonce);
-    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    file_data.extend_from_slice(&ciphertext);
-
-    std::fs::write(&token_file, file_data)?;
-    crate::app_dirs::restrict_to_owner(std::path::Path::new(&token_file));
-    Ok(())
+    Self::encrypt_to_file(
+      &self.get_settings_dir().join("mcp_token.dat"),
+      b"DBMCP",
+      token,
+    )
   }
 
   pub async fn get_mcp_token(
     &self,
     _app_handle: &tauri::AppHandle,
   ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("mcp_token.dat");
-
-    if !token_file.exists() {
-      return Ok(None);
-    }
-
-    let file_data = std::fs::read(token_file)?;
-
-    if file_data.len() < 6 || &file_data[0..5] != b"DBMCP" {
-      return Ok(None);
-    }
-
-    let version = file_data[5];
-    if version != 2 {
-      return Ok(None);
-    }
-
-    let mut offset = 6;
-    if offset >= file_data.len() {
-      return Ok(None);
-    }
-    let salt_len = file_data[offset] as usize;
-    offset += 1;
-
-    if offset + salt_len > file_data.len() {
-      return Ok(None);
-    }
-    let salt_bytes = &file_data[offset..offset + salt_len];
-    let salt_str = std::str::from_utf8(salt_bytes).map_err(|_| "Invalid salt encoding")?;
-    let salt = SaltString::from_b64(salt_str).map_err(|_| "Invalid salt format")?;
-    offset += salt_len;
-
-    if offset + 12 > file_data.len() {
-      return Ok(None);
-    }
-    let nonce_bytes: [u8; 12] = file_data[offset..offset + 12]
-      .try_into()
-      .map_err(|_| "Invalid nonce length")?;
-    let nonce = Nonce::from(nonce_bytes);
-    offset += 12;
-
-    if offset + 4 > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext_len = u32::from_le_bytes([
-      file_data[offset],
-      file_data[offset + 1],
-      file_data[offset + 2],
-      file_data[offset + 3],
-    ]) as usize;
-    offset += 4;
-
-    if offset + ciphertext_len > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext = &file_data[offset..offset + ciphertext_len];
-
-    let vault_password = Self::get_vault_password();
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-    let plaintext = cipher
-      .decrypt(&nonce, ciphertext)
-      .map_err(|_| "Decryption failed")?;
-
-    match String::from_utf8(plaintext) {
-      Ok(token) => Ok(Some(token)),
-      Err(_) => Ok(None),
-    }
+    Self::decrypt_from_file(&self.get_settings_dir().join("mcp_token.dat"), b"DBMCP")
   }
 
-  pub async fn remove_mcp_token(
+  pub async fn generate_api_token(
+    &self,
+    app_handle: &tauri::AppHandle,
+  ) -> Result<String, Box<dyn std::error::Error>> {
+    let token = Self::random_token();
+    self.store_api_token(app_handle, &token).await?;
+    Ok(token)
+  }
+
+  pub async fn store_api_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+    token: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    Self::encrypt_to_file(&self.api_token_file(), b"DBAPI", token)
+  }
+
+  pub async fn get_api_token(
+    &self,
+    _app_handle: &tauri::AppHandle,
+  ) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    Self::decrypt_from_file(&self.api_token_file(), b"DBAPI")
+  }
+
+  pub async fn remove_api_token(
     &self,
     _app_handle: &tauri::AppHandle,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("mcp_token.dat");
-
-    if token_file.exists() {
-      std::fs::remove_file(token_file)?;
-    }
-
-    Ok(())
+    Self::remove_secret_file(&self.api_token_file())
   }
 
   pub async fn store_sync_token(
@@ -553,141 +566,66 @@ impl SettingsManager {
     _app_handle: &tauri::AppHandle,
     token: &str,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("sync_token.dat");
-
-    if let Some(parent) = token_file.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-
-    let vault_password = Self::get_vault_password();
-    let salt_bytes: [u8; 16] = rand::rng().random();
-    let salt =
-      SaltString::encode_b64(&salt_bytes).map_err(|e| format!("Failed to encode salt: {e}"))?;
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-    let nonce_bytes: [u8; 12] = rand::rng().random();
-    let nonce = Nonce::from(nonce_bytes);
-    let ciphertext = cipher
-      .encrypt(&nonce, token.as_bytes())
-      .map_err(|e| format!("Encryption failed: {e}"))?;
-
-    let mut file_data = Vec::new();
-    file_data.extend_from_slice(b"DBSYN"); // 5-byte header for sync
-    file_data.push(2u8); // Version 2 (Argon2 + AES-GCM)
-    let salt_str = salt.as_str();
-    file_data.push(salt_str.len() as u8);
-    file_data.extend_from_slice(salt_str.as_bytes());
-    file_data.extend_from_slice(&nonce);
-    file_data.extend_from_slice(&(ciphertext.len() as u32).to_le_bytes());
-    file_data.extend_from_slice(&ciphertext);
-
-    std::fs::write(&token_file, file_data)?;
-    crate::app_dirs::restrict_to_owner(std::path::Path::new(&token_file));
-    Ok(())
+    Self::encrypt_to_file(&self.sync_token_file(), b"DBSYN", token)
   }
 
   pub async fn get_sync_token(
     &self,
     _app_handle: &tauri::AppHandle,
   ) -> Result<Option<String>, Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("sync_token.dat");
-
-    if !token_file.exists() {
-      return Ok(None);
-    }
-
-    let file_data = std::fs::read(token_file)?;
-
-    if file_data.len() < 6 || &file_data[0..5] != b"DBSYN" {
-      return Ok(None);
-    }
-
-    let version = file_data[5];
-    if version != 2 {
-      return Ok(None);
-    }
-
-    let mut offset = 6;
-    if offset >= file_data.len() {
-      return Ok(None);
-    }
-    let salt_len = file_data[offset] as usize;
-    offset += 1;
-
-    if offset + salt_len > file_data.len() {
-      return Ok(None);
-    }
-    let salt_bytes = &file_data[offset..offset + salt_len];
-    let salt_str = std::str::from_utf8(salt_bytes).map_err(|_| "Invalid salt encoding")?;
-    let salt = SaltString::from_b64(salt_str).map_err(|_| "Invalid salt format")?;
-    offset += salt_len;
-
-    if offset + 12 > file_data.len() {
-      return Ok(None);
-    }
-    let nonce_bytes: [u8; 12] = file_data[offset..offset + 12]
-      .try_into()
-      .map_err(|_| "Invalid nonce length")?;
-    let nonce = Nonce::from(nonce_bytes);
-    offset += 12;
-
-    if offset + 4 > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext_len = u32::from_le_bytes([
-      file_data[offset],
-      file_data[offset + 1],
-      file_data[offset + 2],
-      file_data[offset + 3],
-    ]) as usize;
-    offset += 4;
-
-    if offset + ciphertext_len > file_data.len() {
-      return Ok(None);
-    }
-    let ciphertext = &file_data[offset..offset + ciphertext_len];
-
-    let vault_password = Self::get_vault_password();
-    let argon2 = Argon2::default();
-    let password_hash = argon2
-      .hash_password(vault_password.as_bytes(), &salt)
-      .map_err(|e| format!("Argon2 key derivation failed: {e}"))?;
-    let hash_value = password_hash.hash.unwrap();
-    let hash_bytes = hash_value.as_bytes();
-    let key_bytes: [u8; 32] = hash_bytes[..32]
-      .try_into()
-      .map_err(|_| "Invalid key length")?;
-    let key = Key::<Aes256Gcm>::from(key_bytes);
-    let cipher = Aes256Gcm::new(&key);
-    let plaintext = cipher
-      .decrypt(&nonce, ciphertext)
-      .map_err(|_| "Decryption failed")?;
-
-    match String::from_utf8(plaintext) {
-      Ok(token) => Ok(Some(token)),
-      Err(_) => Ok(None),
-    }
+    Self::decrypt_from_file(&self.sync_token_file(), b"DBSYN")
   }
 
   pub async fn remove_sync_token(
     &self,
     _app_handle: &tauri::AppHandle,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let token_file = self.get_settings_dir().join("sync_token.dat");
+    Self::remove_secret_file(&self.sync_token_file())
+  }
 
-    if token_file.exists() {
-      std::fs::remove_file(token_file)?;
+  /// Keep the remote MCP credential: the `dmk_` key in its own encrypted file
+  /// and the server-side key id in the settings JSON, so a later rotation can
+  /// name the key it is retiring.
+  ///
+  /// The plaintext is deliberately NOT part of the settings JSON:
+  /// `save_settings` strips it, and `get_app_settings` is the one reader that
+  /// loads it back for the frontend, the way the API token is.
+  pub fn store_mcp_remote_key(
+    &self,
+    key: &str,
+    key_id: &str,
+  ) -> Result<(), Box<dyn std::error::Error>> {
+    Self::encrypt_to_file(&self.mcp_remote_key_file(), b"DBMRK", key)?;
+    let mut settings = self.load_settings()?;
+    settings.mcp_remote_key_id = Some(key_id.to_string());
+    self.save_settings(&settings)
+  }
+
+  /// The stored remote MCP credential, if any: the plaintext key and the id
+  /// the server knows it by.
+  ///
+  /// Read with the id from the JSON and the key from its file, so the two
+  /// cannot disagree: a key file without an id (an interrupted store) still
+  /// yields the key, and an id without a key file yields nothing at all.
+  pub fn get_mcp_remote_key(
+    &self,
+  ) -> Result<Option<StoredMcpRemoteKey>, Box<dyn std::error::Error>> {
+    let Some(key) = Self::decrypt_from_file(&self.mcp_remote_key_file(), b"DBMRK")? else {
+      return Ok(None);
+    };
+    let id = self.load_settings()?.mcp_remote_key_id;
+    Ok(Some(StoredMcpRemoteKey { key, id }))
+  }
+
+  /// Drop the remote MCP credential from this machine. Does not revoke it:
+  /// that is the caller's job, because only the caller knows whether it still
+  /// has a session to revoke with.
+  pub fn remove_mcp_remote_key(&self) -> Result<(), Box<dyn std::error::Error>> {
+    Self::remove_secret_file(&self.mcp_remote_key_file())?;
+    let mut settings = self.load_settings()?;
+    if settings.mcp_remote_key_id.take().is_some() {
+      self.save_settings(&settings)?;
     }
-
     Ok(())
   }
 
@@ -722,10 +660,12 @@ pub async fn get_app_settings(app_handle: tauri::AppHandle) -> Result<AppSetting
     .await
     .map_err(|e| format!("Failed to load API token: {e}"))?;
 
-  settings.mcp_token = manager
-    .get_mcp_token(&app_handle)
-    .await
-    .map_err(|e| format!("Failed to load MCP token: {e}"))?;
+  // Same posture as the API token: shown so the fx export line can be
+  // copied, never persisted (see `SettingsManager::save_settings`).
+  settings.mcp_remote_key = manager
+    .get_mcp_remote_key()
+    .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?
+    .map(|stored| stored.key);
 
   Ok(settings)
 }
@@ -736,6 +676,13 @@ pub async fn save_app_settings(
   mut settings: AppSettings,
 ) -> Result<AppSettings, String> {
   let manager = SettingsManager::instance();
+
+  // The remote MCP credential is minted by `rotate_mcp_remote_credential` and
+  // by nothing else. A settings read hands the frontend the plaintext (for the
+  // fx export line) and the frontend echoes the whole struct back, so the
+  // field is simply not the frontend's to write: whatever arrived is dropped
+  // here and the stored key is what the answer below carries.
+  settings.mcp_remote_key = None;
 
   // Handle API token
   if settings.api_enabled {
@@ -767,50 +714,38 @@ pub async fn save_app_settings(
     settings.api_token = None;
   }
 
-  // Handle MCP token
-  if settings.mcp_enabled {
-    if let Some(ref token) = settings.mcp_token {
-      manager
-        .store_mcp_token(&app_handle, token)
-        .await
-        .map_err(|e| format!("Failed to store MCP token: {e}"))?;
-    } else {
-      // Check if a token already exists on disk before generating a new one
-      let existing = manager.get_mcp_token(&app_handle).await.ok().flatten();
-      if let Some(t) = existing {
-        settings.mcp_token = Some(t);
-      } else {
-        let token = manager
-          .generate_mcp_token(&app_handle)
-          .await
-          .map_err(|e| format!("Failed to generate MCP token: {e}"))?;
-        settings.mcp_token = Some(token);
-      }
-    }
-  }
-
-  if !settings.mcp_enabled {
-    manager
-      .remove_mcp_token(&app_handle)
-      .await
-      .map_err(|e| format!("Failed to remove MCP token: {e}"))?;
-    settings.mcp_token = None;
-  }
-
-  // Preserve server-managed flags that the frontend may not have up-to-date.
-  // Read directly from file to avoid load_settings' save-on-load behavior.
+  // Preserve the fields the frontend does not own. Read directly from the
+  // file to avoid load_settings' save-on-load behavior.
+  //
+  // `mcp_remote_enabled` is flipped ONLY by `start_mcp_remote_bridge` and
+  // `stop_mcp_remote_bridge`, which also start and stop the bridge task. A
+  // settings save that carried the flag could switch the internet-facing
+  // bridge on for the next launch without ever going through the sign-in and
+  // terms gates those commands enforce, or switch it off on disk while the
+  // task kept running. The key id is bookkeeping for the rotation path and is
+  // never the frontend's to write.
+  settings.trash_retention_days = settings.trash_retention_days.min(MAX_TRASH_RETENTION_DAYS);
+  let mut previous_retention = None;
   if let Ok(content) = std::fs::read_to_string(manager.get_settings_file()) {
     if let Ok(current) = serde_json::from_str::<AppSettings>(&content) {
+      previous_retention = Some(current.trash_retention_days);
       settings.window_resize_warning_dismissed = current.window_resize_warning_dismissed;
+      settings.mcp_remote_enabled = current.mcp_remote_enabled;
+      settings.mcp_remote_key_id = current.mcp_remote_key_id;
+      settings.feedback_sent_at = current.feedback_sent_at;
+      settings.account_sync_server_url = current.account_sync_server_url;
     }
+  } else {
+    settings.mcp_remote_enabled = false;
+    settings.mcp_remote_key_id = None;
+    settings.account_sync_server_url = None;
   }
 
   let mut persist_settings = settings.clone();
   persist_settings.api_token = None;
-  persist_settings.mcp_token = None;
 
-  log::info!(
-    "[settings] Saving settings: theme={}, custom_theme_keys={}",
+  log::debug!(
+    "Settings saved theme={} custom_theme_keys={}",
     persist_settings.theme,
     persist_settings
       .custom_theme
@@ -823,40 +758,47 @@ pub async fn save_app_settings(
     .save_settings(&persist_settings)
     .map_err(|e| format!("Failed to save settings: {e}"))?;
 
+  // A shorter retention applies to what is already in the trash. Sweep now
+  // rather than at the next six-hourly pass, so "delete after 1 day" does not
+  // keep a month-old profile until then.
+  if previous_retention != Some(settings.trash_retention_days) {
+    tauri::async_runtime::spawn_blocking(|| {
+      crate::profile::ProfileManager::instance().purge_expired_trash();
+    });
+  }
+
+  // Answer with what a fresh read would show, the stored credential included,
+  // so a page that keeps the answer as its settings does not lose the fx
+  // export line on every save.
+  settings.mcp_remote_key = manager
+    .get_mcp_remote_key()
+    .map_err(|e| crate::backend_error_with_detail("INTERNAL_ERROR", e))?
+    .map(|stored| stored.key);
+
   Ok(settings)
 }
 
-/// Read the most recent N log files concatenated into a single string,
-/// suitable for paste-into-issue-tracker. Newest entries appear LAST so the
-/// reader sees fresh context at the bottom of the buffer. Capped at 5 MB to
-/// keep clipboard payloads sane.
-#[tauri::command]
-pub async fn read_log_files(app_handle: tauri::AppHandle) -> Result<String, String> {
-  let dir = crate::app_dirs::log_dir(&app_handle);
-  if !dir.exists() {
-    return Err("Log directory does not exist yet".to_string());
-  }
+const TRUNCATED_MARK: &str = "[…truncated — older content elided…]\n";
 
-  let mut entries: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(&dir)
-    .map_err(|e| format!("Failed to read log dir: {e}"))?
-    .filter_map(|r| r.ok())
-    .filter_map(|e| {
-      let p = e.path();
-      let m = e.metadata().ok()?.modified().ok()?;
-      let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("");
-      if p.is_file() && (ext == "log" || ext == "txt") {
-        Some((p, m))
-      } else {
-        None
-      }
+/// The newest log files, redacted, each under a `===== name =====` header and
+/// in chronological order so the freshest lines are at the bottom. At most
+/// `max_bytes`: the oldest file that only fits in part keeps its last whole
+/// lines.
+pub(crate) fn recent_logs(dir: &Path, max_bytes: usize) -> std::io::Result<String> {
+  let mut entries: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(dir)?
+    .filter_map(Result::ok)
+    .filter_map(|entry| {
+      let path = entry.path();
+      let modified = entry.metadata().ok()?.modified().ok()?;
+      let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+      (path.is_file() && (ext == "log" || ext == "txt")).then_some((path, modified))
     })
     .collect();
+  entries.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
 
-  entries.sort_by_key(|(_, m)| *m);
-
-  const MAX_BYTES: usize = 5 * 1024 * 1024;
-  let mut out = String::with_capacity(64 * 1024);
-  for (path, _) in entries.iter().rev() {
+  let mut sections = Vec::new();
+  let mut used = 0;
+  for (path, _) in entries {
     let header = format!(
       "===== {} =====\n",
       path
@@ -864,38 +806,51 @@ pub async fn read_log_files(app_handle: tauri::AppHandle) -> Result<String, Stri
         .and_then(|name| name.to_str())
         .unwrap_or("log")
     );
-    if out.len() + header.len() >= MAX_BYTES {
+    let Ok(raw) = std::fs::read(&path) else {
+      continue;
+    };
+    let mut content = crate::log_redaction::text(&String::from_utf8_lossy(&raw));
+    if !content.ends_with('\n') {
+      content.push('\n');
+    }
+    let room = max_bytes.saturating_sub(used + header.len());
+    if content.len() > room {
+      let tail = last_lines(&content, room.saturating_sub(TRUNCATED_MARK.len()));
+      if !tail.is_empty() {
+        sections.push(format!("{header}{TRUNCATED_MARK}{tail}"));
+      }
       break;
     }
-    out.push_str(&header);
-    if let Ok(content) = std::fs::read_to_string(path) {
-      let take = MAX_BYTES.saturating_sub(out.len());
-      if take == 0 {
-        break;
-      }
-      if content.len() > take {
-        // Tail truncation — keep the END of older files so newest data is preserved.
-        out.push_str("[…truncated — older content elided…]\n");
-        out.push_str(&content[content.len() - take + 64..]);
-      } else {
-        out.push_str(&content);
-      }
-      if !out.ends_with('\n') {
-        out.push('\n');
-      }
-    }
+    used += header.len() + content.len();
+    sections.push(format!("{header}{content}"));
   }
-
-  // Reverse the per-file order so chronological newest is at the bottom.
-  // (We pushed newest-first above to budget the tail; flip now.)
-  let mut sections: Vec<&str> = out.split("===== ").filter(|s| !s.is_empty()).collect();
   sections.reverse();
-  let final_out = sections
-    .into_iter()
-    .map(|s| format!("===== {s}"))
-    .collect::<String>();
+  Ok(sections.concat())
+}
 
-  Ok(crate::log_redaction::text(&final_out))
+/// The whole lines at the end of `text` that fit in `max_bytes`.
+fn last_lines(text: &str, max_bytes: usize) -> &str {
+  if text.len() <= max_bytes {
+    return text;
+  }
+  let start = text.len() - max_bytes;
+  // A newline byte is always a character boundary, so this never splits one.
+  match text.as_bytes()[start..].iter().position(|&b| b == b'\n') {
+    Some(offset) => &text[start + offset + 1..],
+    None => "",
+  }
+}
+
+/// Read the most recent log files concatenated into a single string,
+/// suitable for paste-into-issue-tracker. Capped at 5 MB to keep clipboard
+/// payloads sane.
+#[tauri::command]
+pub async fn read_log_files(app_handle: tauri::AppHandle) -> Result<String, String> {
+  let dir = crate::app_dirs::log_dir(&app_handle);
+  if !dir.exists() {
+    return Err("Log directory does not exist yet".to_string());
+  }
+  recent_logs(&dir, 5 * 1024 * 1024).map_err(|e| format!("Failed to read log dir: {e}"))
 }
 
 /// Reveal the log directory in the OS file manager.
@@ -909,24 +864,36 @@ pub async fn open_log_directory(app_handle: tauri::AppHandle) -> Result<(), Stri
 
   #[cfg(target_os = "macos")]
   {
-    std::process::Command::new("open")
+    let child = std::process::Command::new("open")
       .arg(&path)
       .spawn()
       .map_err(|e| format!("Failed to open log dir: {e}"))?;
+    log::info!(
+      "Process spawned pid={} purpose=\"reveal log dir\" tool=open",
+      child.id()
+    );
   }
   #[cfg(target_os = "windows")]
   {
-    std::process::Command::new("explorer")
+    let child = std::process::Command::new("explorer")
       .arg(&path)
       .spawn()
       .map_err(|e| format!("Failed to open log dir: {e}"))?;
+    log::info!(
+      "Process spawned pid={} purpose=\"reveal log dir\" tool=explorer",
+      child.id()
+    );
   }
   #[cfg(target_os = "linux")]
   {
-    std::process::Command::new("xdg-open")
+    let child = std::process::Command::new("xdg-open")
       .arg(&path)
       .spawn()
       .map_err(|e| format!("Failed to open log dir: {e}"))?;
+    log::info!(
+      "Process spawned pid={} purpose=\"reveal log dir\" tool=xdg-open",
+      child.id()
+    );
   }
   Ok(())
 }
@@ -1045,6 +1012,197 @@ pub async fn complete_onboarding() -> Result<(), String> {
     .map_err(|e| format!("Failed to save settings: {e}"))
 }
 
+/// What the tips dialog needs to decide what to open and what to skip.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct TipsState {
+  pub auto_show: bool,
+  pub seen: Vec<String>,
+  pub last_auto_shown_at: Option<u64>,
+  /// Unix seconds from which the next automatic tip may open, or `None`
+  /// before the first one.
+  pub next_auto_show_at: Option<u64>,
+  /// Whether the automatic flow may open a tip right now: it is switched on
+  /// and the wait after the last automatic tip is over.
+  pub auto_due: bool,
+}
+
+impl TipsState {
+  fn of(settings: &AppSettings, now: u64) -> Self {
+    // Settings written before the random gap existed carry only the time of
+    // the last automatic tip; the shortest gap applies to those.
+    let next_auto_show_at = settings.tips_next_auto_show_at.or_else(|| {
+      settings
+        .tips_last_auto_shown_at
+        .map(|last| last.saturating_add(TIPS_AUTO_GAP_MIN_SECS))
+    });
+    Self {
+      auto_show: settings.tips_auto_show,
+      seen: settings.tips_seen.clone(),
+      last_auto_shown_at: settings.tips_last_auto_shown_at,
+      next_auto_show_at,
+      auto_due: settings.tips_auto_show && next_auto_show_at.is_none_or(|next| now >= next),
+    }
+  }
+}
+
+/// When the next automatic tip may open, after one opened at `now`. `roll` is
+/// any random number; it selects a gap from `TIPS_AUTO_GAP_MIN_SECS` to
+/// `TIPS_AUTO_GAP_MAX_SECS`.
+fn next_auto_tip_at(now: u64, roll: u64) -> u64 {
+  let span = TIPS_AUTO_GAP_MAX_SECS - TIPS_AUTO_GAP_MIN_SECS + 1;
+  now.saturating_add(TIPS_AUTO_GAP_MIN_SECS + roll % span)
+}
+
+/// Serialises every read-modify-write of the tips fields. Two tips shown in
+/// quick succession are two concurrent commands, and without this the second
+/// load could precede the first save and drop it.
+static TIPS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn unix_now() -> u64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map(|d| d.as_secs())
+    .unwrap_or(0)
+}
+
+/// Remembers a tip as shown. `auto` marks it as the tip that opened by
+/// itself, which starts a new random wait (see `next_auto_tip_at`) unless
+/// one is still running, so a repeated report of the same tip draws nothing.
+fn record_tip_seen(settings: &mut AppSettings, tip_id: &str, auto: bool, now: u64, roll: u64) {
+  if !settings.tips_seen.iter().any(|id| id == tip_id) {
+    settings.tips_seen.push(tip_id.to_string());
+  }
+  if auto {
+    settings.tips_last_auto_shown_at = Some(now);
+    if settings
+      .tips_next_auto_show_at
+      .is_none_or(|next| next <= now)
+    {
+      settings.tips_next_auto_show_at = Some(next_auto_tip_at(now, roll));
+    }
+  }
+}
+
+/// Records the plan status seen for a cloud account and answers whether the
+/// paid-plan welcome is due for it.
+///
+/// The welcome is for an account that just became paid: one this desktop last
+/// saw as free, or one it sees for the first time right after the user signed
+/// in (they bought a plan on the website and came back). An account that was
+/// already paid the last time anybody looked, or that turns up paid in an old
+/// session after an app update, is not new to its plan and is recorded as
+/// greeted without a dialog.
+fn paid_welcome_due(
+  settings: &mut AppSettings,
+  user_id: &str,
+  paid: bool,
+  fresh_login: bool,
+) -> bool {
+  let status = if paid {
+    PLAN_STATUS_PAID
+  } else {
+    PLAN_STATUS_FREE
+  };
+  let previous = settings
+    .cloud_plan_memory
+    .insert(user_id.to_string(), status.to_string());
+  if !paid {
+    return false;
+  }
+  if settings
+    .paid_welcome_seen_for
+    .iter()
+    .any(|id| id == user_id)
+  {
+    return false;
+  }
+  let due = match previous.as_deref() {
+    Some(PLAN_STATUS_FREE) => true,
+    Some(_) => false,
+    None => fresh_login,
+  };
+  settings.paid_welcome_seen_for.push(user_id.to_string());
+  due
+}
+
+#[tauri::command]
+pub async fn get_tips_state() -> Result<TipsState, String> {
+  let manager = SettingsManager::instance();
+  let settings = manager
+    .load_settings()
+    .map_err(|e| format!("Failed to load settings: {e}"))?;
+  Ok(TipsState::of(&settings, unix_now()))
+}
+
+#[tauri::command]
+pub async fn mark_tip_seen(tip_id: String, auto: bool) -> Result<TipsState, String> {
+  let _serial = TIPS_WRITE
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let manager = SettingsManager::instance();
+  let mut settings = manager
+    .load_settings()
+    .map_err(|e| format!("Failed to load settings: {e}"))?;
+  let now = unix_now();
+  record_tip_seen(&mut settings, &tip_id, auto, now, rand::random::<u64>());
+  manager
+    .save_settings(&settings)
+    .map_err(|e| format!("Failed to save settings: {e}"))?;
+  Ok(TipsState::of(&settings, now))
+}
+
+/// Remember that the person has sent feedback, so the feedback tip is not
+/// offered again.
+pub(crate) fn note_feedback_sent() {
+  let _serial = TIPS_WRITE
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let manager = SettingsManager::instance();
+  let saved = manager.load_settings().and_then(|mut settings| {
+    settings.feedback_sent_at = Some(unix_now());
+    manager.save_settings(&settings)
+  });
+  if let Err(e) = saved {
+    log::warn!("Feedback sent time not saved err=\"{e}\"");
+  }
+}
+
+#[tauri::command]
+pub async fn set_tips_auto_show(enabled: bool) -> Result<TipsState, String> {
+  let _serial = TIPS_WRITE
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let manager = SettingsManager::instance();
+  let mut settings = manager
+    .load_settings()
+    .map_err(|e| format!("Failed to load settings: {e}"))?;
+  settings.tips_auto_show = enabled;
+  manager
+    .save_settings(&settings)
+    .map_err(|e| format!("Failed to save settings: {e}"))?;
+  Ok(TipsState::of(&settings, unix_now()))
+}
+
+#[tauri::command]
+pub async fn observe_cloud_plan(
+  user_id: String,
+  paid: bool,
+  fresh_login: bool,
+) -> Result<bool, String> {
+  let _serial = TIPS_WRITE
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner());
+  let manager = SettingsManager::instance();
+  let mut settings = manager
+    .load_settings()
+    .map_err(|e| format!("Failed to load settings: {e}"))?;
+  let due = paid_welcome_due(&mut settings, &user_id, paid, fresh_login);
+  manager
+    .save_settings(&settings)
+    .map_err(|e| format!("Failed to save settings: {e}"))?;
+  Ok(due)
+}
+
 #[tauri::command]
 pub fn get_system_language() -> String {
   sys_locale::get_locale()
@@ -1096,9 +1254,8 @@ pub fn get_system_info() -> SystemInfo {
 }
 
 // Global singleton instance
-lazy_static::lazy_static! {
-  static ref SETTINGS_MANAGER: SettingsManager = SettingsManager::new();
-}
+static SETTINGS_MANAGER: std::sync::LazyLock<SettingsManager> =
+  std::sync::LazyLock::new(SettingsManager::new);
 
 #[cfg(test)]
 mod tests {
@@ -1115,6 +1272,134 @@ mod tests {
   #[test]
   fn test_settings_manager_creation() {
     let (_manager, _temp_dir, _guard) = create_test_settings_manager();
+  }
+
+  #[test]
+  fn tips_state_defaults_to_automatic_and_due() {
+    let settings = AppSettings::default();
+    let state = TipsState::of(&settings, 1_000_000);
+    assert!(state.auto_show);
+    assert!(state.seen.is_empty());
+    assert_eq!(state.last_auto_shown_at, None);
+    assert_eq!(state.next_auto_show_at, None);
+    assert!(state.auto_due, "a fresh install owes its first tip");
+  }
+
+  #[test]
+  fn the_gap_between_automatic_tips_is_two_to_five_days() {
+    const DAY: u64 = 24 * 60 * 60;
+    let now = 1_000;
+    assert_eq!(next_auto_tip_at(now, 0), now + 2 * DAY);
+    let span = TIPS_AUTO_GAP_MAX_SECS - TIPS_AUTO_GAP_MIN_SECS + 1;
+    assert_eq!(next_auto_tip_at(now, span - 1), now + 5 * DAY);
+    assert_eq!(next_auto_tip_at(now, span), now + 2 * DAY, "the roll wraps");
+    for roll in [1, 7, DAY, 3 * DAY + 11, u64::MAX / 3, u64::MAX] {
+      let next = next_auto_tip_at(now, roll);
+      assert!(
+        (now + 2 * DAY..=now + 5 * DAY).contains(&next),
+        "roll {roll} gave a gap of {} seconds",
+        next - now
+      );
+    }
+    assert_eq!(next_auto_tip_at(u64::MAX - 1, 5), u64::MAX, "no overflow");
+  }
+
+  #[test]
+  fn tips_seen_dedupes_and_paces_the_automatic_flow() {
+    const DAY: u64 = 24 * 60 * 60;
+    let mut settings = AppSettings::default();
+    record_tip_seen(&mut settings, "dns", false, 100, 0);
+    record_tip_seen(&mut settings, "dns", false, 200, 0);
+    assert_eq!(settings.tips_seen, vec!["dns".to_string()]);
+    assert_eq!(
+      settings.tips_last_auto_shown_at, None,
+      "a browsed tip must not start a wait"
+    );
+    assert_eq!(settings.tips_next_auto_show_at, None);
+
+    // A roll of one day past the minimum: this tip's gap is three days.
+    record_tip_seen(&mut settings, "proxy", true, 1_000, DAY);
+    assert_eq!(settings.tips_last_auto_shown_at, Some(1_000));
+    let next = 1_000 + 3 * DAY;
+    assert_eq!(settings.tips_next_auto_show_at, Some(next));
+    let state = TipsState::of(&settings, next - 1);
+    assert_eq!(state.next_auto_show_at, Some(next));
+    assert!(!state.auto_due, "the next automatic tip waits out the gap");
+    assert!(TipsState::of(&settings, next).auto_due);
+
+    // The same automatic tip reported again, or a browsed one, while the gap
+    // runs does not draw a new one.
+    record_tip_seen(&mut settings, "proxy", true, 1_500, 0);
+    record_tip_seen(&mut settings, "groups", false, 1_600, 0);
+    assert_eq!(settings.tips_next_auto_show_at, Some(next));
+
+    // Once the gap is over, the next automatic tip draws a fresh one.
+    record_tip_seen(&mut settings, "groups", true, next + 10, 0);
+    assert_eq!(
+      settings.tips_next_auto_show_at,
+      Some(next + 10 + TIPS_AUTO_GAP_MIN_SECS)
+    );
+
+    settings.tips_auto_show = false;
+    assert!(
+      !TipsState::of(&settings, next + 10 * DAY).auto_due,
+      "switched off means never due"
+    );
+  }
+
+  #[test]
+  fn settings_from_before_the_random_gap_wait_the_shortest_gap() {
+    let settings: AppSettings =
+      serde_json::from_str(r#"{ "tips_last_auto_shown_at": 1000 }"#).expect("old settings parse");
+    assert_eq!(settings.tips_next_auto_show_at, None);
+    let state = TipsState::of(&settings, 1_000 + TIPS_AUTO_GAP_MIN_SECS - 1);
+    assert_eq!(
+      state.next_auto_show_at,
+      Some(1_000 + TIPS_AUTO_GAP_MIN_SECS)
+    );
+    assert!(!state.auto_due);
+    assert!(TipsState::of(&settings, 1_000 + TIPS_AUTO_GAP_MIN_SECS).auto_due);
+  }
+
+  #[test]
+  fn paid_welcome_is_due_once_when_an_account_turns_paid() {
+    let mut settings = AppSettings::default();
+    assert!(!paid_welcome_due(&mut settings, "u1", false, true));
+    assert!(
+      settings.paid_welcome_seen_for.is_empty(),
+      "a free account is not greeted, so nothing is recorded"
+    );
+    assert!(
+      paid_welcome_due(&mut settings, "u1", true, false),
+      "free to paid is the upgrade the welcome exists for"
+    );
+    assert!(!paid_welcome_due(&mut settings, "u1", true, true), "once");
+    assert_eq!(settings.paid_welcome_seen_for, vec!["u1".to_string()]);
+  }
+
+  #[test]
+  fn paid_welcome_greets_a_fresh_sign_in_but_not_an_old_paid_session() {
+    let mut settings = AppSettings::default();
+    assert!(
+      paid_welcome_due(&mut settings, "bought-on-web", true, true),
+      "first sight right after signing in: they came back from checkout"
+    );
+
+    assert!(
+      !paid_welcome_due(&mut settings, "long-paid", true, false),
+      "an app update on a machine that was already paid is not a new plan"
+    );
+    assert!(
+      !paid_welcome_due(&mut settings, "long-paid", true, true),
+      "and it is recorded as greeted, so it never fires later"
+    );
+    assert_eq!(
+      settings
+        .cloud_plan_memory
+        .get("long-paid")
+        .map(String::as_str),
+      Some(PLAN_STATUS_PAID)
+    );
   }
 
   #[test]
@@ -1175,9 +1460,13 @@ mod tests {
       api_port: 10108,
       api_token: None,
       sync_server_url: None,
+      account_sync_server_url: None,
       mcp_enabled: false,
       mcp_port: None,
       mcp_token: None,
+      mcp_remote_enabled: false,
+      mcp_remote_key: None,
+      mcp_remote_key_id: None,
       language: None,
       window_resize_warning_dismissed: false,
       fingerprint_gate_disabled: false,
@@ -1185,6 +1474,18 @@ mod tests {
       onboarding_completed: false,
       disable_auto_updates: false,
       keep_decrypted_profiles_in_ram: false,
+      tips_auto_show: true,
+      tips_seen: Vec::new(),
+      tips_last_auto_shown_at: None,
+      tips_next_auto_show_at: None,
+      feedback_sent_at: None,
+      paid_welcome_seen_for: Vec::new(),
+      cloud_plan_memory: std::collections::HashMap::new(),
+      require_route_for_launch: true,
+      trash_retention_days: 7,
+      record_traffic_domains: false,
+      ui_sounds: false,
+      mcp_toolsets: vec!["network".to_string()],
     };
 
     let save_result = manager.save_settings(&test_settings);
@@ -1202,6 +1503,81 @@ mod tests {
       loaded_settings.theme, "dark",
       "Loaded theme should match saved"
     );
+    assert!(loaded_settings.require_route_for_launch);
+    assert_eq!(loaded_settings.trash_retention_days, 7);
+    assert!(!loaded_settings.record_traffic_domains);
+    assert!(!loaded_settings.ui_sounds);
+  }
+
+  #[test]
+  fn settings_written_before_the_privacy_options_keep_the_old_behaviour() {
+    let settings: AppSettings = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+    assert!(!settings.require_route_for_launch);
+    assert_eq!(settings.trash_retention_days, DEFAULT_TRASH_RETENTION_DAYS);
+    assert!(settings.record_traffic_domains);
+    assert!(settings.ui_sounds, "sounds are on until turned off");
+  }
+
+  #[test]
+  fn the_remote_key_round_trips_and_never_reaches_the_settings_json() {
+    let (manager, _temp_dir, _guard) = create_test_settings_manager();
+
+    assert!(manager.get_mcp_remote_key().unwrap().is_none());
+
+    manager
+      .store_mcp_remote_key("dmk_abcdefghijklmnop", "key-1")
+      .unwrap();
+    let stored = manager.get_mcp_remote_key().unwrap().expect("stored");
+    assert_eq!(stored.key, "dmk_abcdefghijklmnop");
+    assert_eq!(stored.id.as_deref(), Some("key-1"));
+
+    // The id is bookkeeping and belongs in the JSON; the key is a credential
+    // that works from anywhere on the internet and must not.
+    let json = std::fs::read_to_string(manager.get_settings_file()).unwrap();
+    assert!(json.contains("\"mcp_remote_key_id\": \"key-1\""), "{json}");
+    assert!(!json.contains("dmk_abcdefghijklmnop"), "{json}");
+    assert!(!json.contains("\"mcp_remote_key\""), "{json}");
+
+    // A struct loaded for the frontend carries the plaintext (the fx export
+    // line needs it), so the write path is what keeps it off the disk: saving
+    // such a struct must not plant the key in the JSON.
+    let mut settings = manager.load_settings().unwrap();
+    settings.mcp_remote_key = Some("dmk_abcdefghijklmnop".to_string());
+    manager.save_settings(&settings).unwrap();
+    let json = std::fs::read_to_string(manager.get_settings_file()).unwrap();
+    assert!(!json.contains("dmk_"), "{json}");
+    assert!(!json.contains("\"mcp_remote_key\""), "{json}");
+    assert_eq!(
+      manager
+        .load_settings()
+        .unwrap()
+        .mcp_remote_key_id
+        .as_deref(),
+      Some("key-1")
+    );
+
+    manager.remove_mcp_remote_key().unwrap();
+    assert!(manager.get_mcp_remote_key().unwrap().is_none());
+    assert!(manager.load_settings().unwrap().mcp_remote_key_id.is_none());
+  }
+
+  #[test]
+  fn a_key_file_without_an_id_still_yields_the_key() {
+    // An interrupted store, or a settings file rewritten by an older build
+    // that did not know the field: the credential is still on disk and still
+    // valid, so it must still be usable. Only the id is missing, and the
+    // rotation path treats a missing id as "nothing to revoke".
+    let (manager, _temp_dir, _guard) = create_test_settings_manager();
+    manager
+      .store_mcp_remote_key("dmk_zzzzzzzzzzzz", "key-2")
+      .unwrap();
+    let mut settings = manager.load_settings().unwrap();
+    settings.mcp_remote_key_id = None;
+    manager.save_settings(&settings).unwrap();
+
+    let stored = manager.get_mcp_remote_key().unwrap().expect("stored");
+    assert_eq!(stored.key, "dmk_zzzzzzzzzzzz");
+    assert!(stored.id.is_none());
   }
 
   #[test]
@@ -1296,5 +1672,66 @@ mod tests {
         .ends_with("table_sorting.json"),
       "Sorting file should end with table_sorting.json"
     );
+  }
+
+  fn write_log(dir: &Path, name: &str, body: &[u8], age_secs: u64) {
+    let path = dir.join(name);
+    std::fs::write(&path, body).unwrap();
+    let modified = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+    std::fs::File::options()
+      .write(true)
+      .open(&path)
+      .unwrap()
+      .set_modified(modified)
+      .unwrap();
+  }
+
+  #[test]
+  fn recent_logs_put_the_newest_file_last_and_redact_it() {
+    let dir = TempDir::new().unwrap();
+    write_log(dir.path(), "DonutBrowser_old.log", b"old line\n", 600);
+    write_log(
+      dir.path(),
+      "DonutBrowser.log",
+      b"new line user=me@example.com",
+      0,
+    );
+    write_log(dir.path(), "notes.json", b"skipped", 0);
+
+    let logs = recent_logs(dir.path(), 1024).unwrap();
+    assert_eq!(
+      logs,
+      "===== DonutBrowser_old.log =====\nold line\n===== DonutBrowser.log =====\nnew line user=<redacted-email>\n"
+    );
+  }
+
+  #[test]
+  fn recent_logs_keep_whole_lines_within_the_budget() {
+    let dir = TempDir::new().unwrap();
+    let mut old = Vec::new();
+    for i in 0..200 {
+      old.extend_from_slice(format!("older é line {i}\n").as_bytes());
+    }
+    old.extend_from_slice(&[0xff, 0xfe, b'\n']);
+    write_log(dir.path(), "a.log", &old, 600);
+    write_log(dir.path(), "b.log", b"newest\n", 0);
+
+    let logs = recent_logs(dir.path(), 400).unwrap();
+    assert!(logs.len() <= 400, "{} bytes", logs.len());
+    assert!(logs.ends_with("===== b.log =====\nnewest\n"), "{logs}");
+    let older = logs
+      .strip_prefix("===== a.log =====\n[…truncated — older content elided…]\n")
+      .expect("the older file is cut, not dropped");
+    assert!(older.lines().all(|line| line.starts_with("older é line ")
+      || line == "\u{fffd}\u{fffd}"
+      || line.starts_with("=====")
+      || line == "newest"));
+  }
+
+  #[test]
+  fn recent_logs_of_an_empty_directory_are_empty() {
+    let dir = TempDir::new().unwrap();
+    assert_eq!(recent_logs(dir.path(), 1024).unwrap(), "");
+    assert!(recent_logs(&dir.path().join("missing"), 1024).is_err());
   }
 }

@@ -1,8 +1,80 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { appFromEnvironment, withApp } from "../lib/app.mjs";
+
+test("table views persist separately, migrate the old sort, and reject invalid settings", async () => {
+  await withApp("smoke-table-views", async (app) => {
+    await app.invoke("save_table_sorting_settings", {
+      sorting: { column: "created_at", direction: "desc" },
+    });
+    assert.deepEqual(
+      (await app.invoke("get_table_preferences", { tableId: "profiles" }))
+        .sorting,
+      [{ id: "created_at", desc: true }],
+    );
+    const preferences = {
+      visibility: { note: false, tags: true },
+      sizing: { name: 280 },
+      sorting: [
+        { id: "name", desc: true },
+        { id: "sync", desc: false },
+      ],
+      density: "comfortable",
+    };
+    await app.invoke("save_table_preferences", {
+      tableId: "proxies",
+      preferences,
+    });
+    assert.deepEqual(
+      await app.invoke("get_table_preferences", { tableId: "proxies" }),
+      preferences,
+    );
+    assert.equal(
+      (await app.invoke("get_table_preferences", { tableId: "groups" }))
+        .density,
+      "compact",
+    );
+    for (const args of [
+      { tableId: "../outside", preferences },
+      {
+        tableId: "proxies",
+        preferences: { ...preferences, sizing: { name: -1 } },
+      },
+      {
+        tableId: "proxies",
+        preferences: {
+          ...preferences,
+          sorting: [
+            { id: "name", desc: true },
+            { id: "name", desc: false },
+          ],
+        },
+      },
+    ])
+      assert.match(
+        await app.invokeError("save_table_preferences", args),
+        /TABLE_PREFERENCES_INVALID/,
+      );
+    assert.match(
+      await app.invokeError("get_table_preferences", { tableId: "../outside" }),
+      /TABLE_PREFERENCES_INVALID/,
+    );
+    await app.restart();
+    assert.deepEqual(
+      await app.invoke("get_table_preferences", { tableId: "proxies" }),
+      preferences,
+    );
+    const saved = JSON.parse(
+      await readFile(
+        path.join(app.dataRoot, "data", "settings", "table_proxies.json"),
+        "utf8",
+      ),
+    );
+    assert.deepEqual(saved, preferences);
+  });
+});
 
 test("fresh app renders, completes onboarding, persists settings, and never touches real app roots", async () => {
   await withApp(
@@ -70,11 +142,102 @@ test("fresh app renders, completes onboarding, persists settings, and never touc
       assert.ok(system && typeof system === "object");
       assert.equal(typeof (await app.invoke("read_log_files")), "string");
 
+      // Feature tips: what was seen, the random 2-5 day wait between
+      // automatic tips, and the decision behind the paid-plan welcome all
+      // live in the settings file.
+      const tips = await app.invoke("get_tips_state");
+      assert.equal(tips.auto_show, true);
+      assert.deepEqual(tips.seen, []);
+      assert.equal(tips.next_auto_show_at, null);
+      assert.equal(tips.auto_due, true, "a fresh install owes its first tip");
+      const marked = await app.invoke("mark_tip_seen", {
+        tipId: "dnsBlocklist",
+        auto: true,
+      });
+      assert.deepEqual(marked.seen, ["dnsBlocklist"]);
+      assert.equal(typeof marked.last_auto_shown_at, "number");
+      const gap = marked.next_auto_show_at - marked.last_auto_shown_at;
+      assert.ok(
+        gap >= 2 * 24 * 60 * 60 && gap <= 5 * 24 * 60 * 60,
+        `the next automatic tip waits 2 to 5 days, not ${gap} seconds`,
+      );
+      assert.equal(marked.auto_due, false, "the wait has only started");
+      const browsed = await app.invoke("mark_tip_seen", {
+        tipId: "proxyCheck",
+        auto: false,
+      });
+      assert.deepEqual(browsed.seen, ["dnsBlocklist", "proxyCheck"]);
+      assert.equal(
+        browsed.last_auto_shown_at,
+        marked.last_auto_shown_at,
+        "a browsed tip must not restart the pacing",
+      );
+      assert.equal(browsed.next_auto_show_at, marked.next_auto_show_at);
+      const quiet = await app.invoke("set_tips_auto_show", { enabled: false });
+      assert.equal(quiet.auto_show, false);
+      assert.equal(quiet.auto_due, false);
+      assert.equal(
+        await app.invoke("observe_cloud_plan", {
+          userId: "acct-free",
+          paid: false,
+          freshLogin: true,
+        }),
+        false,
+        "a free account is never greeted",
+      );
+      assert.equal(
+        await app.invoke("observe_cloud_plan", {
+          userId: "acct-free",
+          paid: true,
+          freshLogin: false,
+        }),
+        true,
+        "free to paid is the upgrade the welcome exists for",
+      );
+      assert.equal(
+        await app.invoke("observe_cloud_plan", {
+          userId: "acct-free",
+          paid: true,
+          freshLogin: true,
+        }),
+        false,
+        "and it is greeted once",
+      );
+      assert.equal(
+        await app.invoke("observe_cloud_plan", {
+          userId: "acct-web",
+          paid: true,
+          freshLogin: true,
+        }),
+        true,
+        "a paid account first seen right after signing in came from checkout",
+      );
+      assert.equal(
+        await app.invoke("observe_cloud_plan", {
+          userId: "acct-old",
+          paid: true,
+          freshLogin: false,
+        }),
+        false,
+        "a paid account in an old session is not new to its plan",
+      );
+
       await app.restart();
       const afterRestart = await app.invoke("get_app_settings");
       assert.equal(afterRestart.theme, "dark");
       assert.equal(afterRestart.language, "en");
       assert.equal(afterRestart.onboarding_completed, true);
+      assert.deepEqual(afterRestart.tips_seen, ["dnsBlocklist", "proxyCheck"]);
+      assert.equal(afterRestart.tips_auto_show, false);
+      assert.equal(
+        afterRestart.tips_next_auto_show_at,
+        marked.next_auto_show_at,
+        "the drawn wait survives a restart",
+      );
+      assert.deepEqual((await app.invoke("get_tips_state")).seen, [
+        "dnsBlocklist",
+        "proxyCheck",
+      ]);
 
       const settingsFile = path.join(
         app.dataRoot,
@@ -84,7 +247,6 @@ test("fresh app renders, completes onboarding, persists settings, and never touc
       );
       const persisted = JSON.parse(await readFile(settingsFile, "utf8"));
       assert.equal(persisted.api_token, null);
-      assert.equal(persisted.mcp_token, null);
     },
     { onboardingCompleted: false },
   );
@@ -133,6 +295,7 @@ test("keyboard command palette and major navigation surfaces are operable throug
 
     const input = await app.session.findCss("[cmdk-input]");
     await app.session.sendKeys(input, "settings");
+    await app.waitForText("Go to Settings");
     const body = await app.bodyText();
     assert.match(body, /Settings/i);
 
@@ -189,6 +352,28 @@ test("tray labels, hide-to-tray, and confirmed quit follow the native lifecycle"
     );
     app.session = null;
     await exitingSession.close().catch(() => {});
+
+    // Agents read this file: each session opens with its facts, closes with
+    // what outlives it, and no line repeats the crate name.
+    const logDir = path.join(app.dataRoot, "logs");
+    const logText = (
+      await Promise.all(
+        (
+          await readdir(logDir)
+        )
+          .filter((name) => name.endsWith(".log"))
+          .map((name) => readFile(path.join(logDir, name), "utf8")),
+      )
+    ).join("\n");
+    assert.match(
+      logText,
+      /\[app\]\[INFO\] Donut started version=\S+ os="[^"]+" arch=\S+ pid=\d+ /,
+    );
+    assert.match(
+      logText,
+      /\[app\]\[INFO\] Donut exiting browsers=\[\] proxy_workers=\[\] vpn_workers=\[\] xray_workers=\[\]/,
+    );
+    assert.doesNotMatch(logText, /donutbrowser_lib::/);
   } catch (error) {
     await app.capture("failure");
     throw error;

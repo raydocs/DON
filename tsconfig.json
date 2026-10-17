@@ -35,7 +35,6 @@
   ],
   "exclude": [
     "node_modules",
-    "nodecar",
     "src-tauri/target",
     "donut-sync",
     "cloudflare-sync-worker"

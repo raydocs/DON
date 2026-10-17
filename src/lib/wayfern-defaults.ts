@@ -7,7 +7,11 @@ export function resolveWayfernWebRtcMode(
     if (config.webrtc_mode === "proxy" || config.webrtc_mode === "off") {
       return config.webrtc_mode;
     }
-    if (config.webrtc_mode === "real") return "real";
+    if (config.webrtc_mode === "real" || config.webrtc_mode === "auto") {
+      return "real";
+    }
+    if (config.webrtc_mode === "block") return "off";
+    if (config.webrtc_mode === "tcp_only") return "proxy";
     return "proxy";
   }
   if (config?.block_webrtc === true) return "proxy";

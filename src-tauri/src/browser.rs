@@ -9,6 +9,8 @@ pub struct ProxySettings {
   pub port: u16,
   pub username: Option<String>,
   pub password: Option<String>,
+  /// The share link of a `vless`, `vmess`, `trojan` or `hysteria2` proxy. It
+  /// holds the whole server configuration; the name predates the other three.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub vless_uri: Option<String>,
 }
@@ -156,7 +158,6 @@ mod linux {
   #[allow(dead_code)]
   pub fn prepare_executable(executable_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // On Linux, ensure the executable has proper permissions
-    log::info!("Setting execute permissions for: {:?}", executable_path);
 
     let metadata = std::fs::metadata(executable_path)?;
     let mut permissions = metadata.permissions();
@@ -167,10 +168,7 @@ mod linux {
 
     std::fs::set_permissions(executable_path, permissions)?;
 
-    log::info!(
-      "Execute permissions set successfully for: {:?}",
-      executable_path
-    );
+    log::debug!("Execute permission set path={}", executable_path.display());
     Ok(())
   }
 }
@@ -493,6 +491,10 @@ pub struct GithubAsset {
   pub updated_at: Option<String>,
 }
 
+// Global singleton instance
+static BROWSER_FACTORY: std::sync::LazyLock<BrowserFactory> =
+  std::sync::LazyLock::new(BrowserFactory::new);
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -737,11 +739,15 @@ mod tests {
       last_sync: None,
       host_os: None,
       ephemeral: false,
+      temporary: false,
       extension_group_id: None,
       proxy_bypass_rules: Vec::new(),
       created_by_id: None,
       created_by_email: None,
       dns_blocklist: None,
+      dns_server: None,
+      status_id: None,
+      start_urls: Vec::new(),
       password_protected: false,
       clear_on_close: false,
       created_at: None,
@@ -756,9 +762,4 @@ mod tests {
         .join("profile")
     );
   }
-}
-
-// Global singleton instance
-lazy_static::lazy_static! {
-  static ref BROWSER_FACTORY: BrowserFactory = BrowserFactory::new();
 }

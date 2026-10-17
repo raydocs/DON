@@ -5,6 +5,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use utoipa::ToSchema;
 
+use crate::app_dirs::is_plain_path_part;
 use crate::events;
 
 /// Where an extension's payload came from. `archive` is a user-supplied
@@ -24,6 +25,9 @@ fn default_source_kind() -> String {
 pub struct Extension {
   pub id: String,
   pub name: String,
+  /// The archive's identity, kept separately from the user's editable name.
+  #[serde(default)]
+  pub manifest_name: Option<String>,
   pub file_name: String,
   pub file_type: String,
   pub browser_compatibility: Vec<String>,
@@ -289,7 +293,7 @@ fn extract_manifest_metadata(file_data: &[u8], file_type: &str) -> ManifestMetad
   }
 }
 
-fn manifest_metadata(
+pub(crate) fn manifest_metadata(
   manifest: &serde_json::Value,
   source: &ManifestSource<'_>,
 ) -> ManifestMetadata {
@@ -431,6 +435,19 @@ pub(crate) fn path_is_load_extension_safe(path: &Path) -> bool {
 
 fn err_code(code: &str) -> Box<dyn std::error::Error> {
   serde_json::json!({ "code": code }).to_string().into()
+}
+
+/// A filesystem path named by an automation client (REST or MCP).
+///
+/// Automation loads an extension from whatever folder or archive the caller
+/// names, so the location is the caller's to choose. What a request may not
+/// do is climb: a `..` component is refused before the path is touched, and
+/// the path is then used exactly as given.
+pub fn client_named_path(raw: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+  if raw.contains("..") {
+    return Err(err_code("EXTENSION_PATH_INVALID"));
+  }
+  Ok(PathBuf::from(raw))
 }
 
 /// Validate that `dir` is a loadable unpacked extension and return its parsed
@@ -651,7 +668,7 @@ impl ExtensionManager {
     source_kind: String,
   ) -> Result<Extension, Box<dyn std::error::Error>> {
     let browser_compatibility = determine_browser_compatibility(&file_type);
-    if browser_compatibility.is_empty() {
+    if browser_compatibility.is_empty() || !is_plain_path_part(&file_name) {
       return Err(err_code("EXTENSION_UNSUPPORTED_FILE_TYPE"));
     }
     let now = now_secs();
@@ -661,7 +678,8 @@ impl ExtensionManager {
 
     let ext = Extension {
       id: uuid::Uuid::new_v4().to_string(),
-      name: Self::resolve_name(name, manifest_name)?,
+      name: Self::resolve_name(name, manifest_name.clone())?,
+      manifest_name,
       file_name: file_name.clone(),
       file_type,
       browser_compatibility,
@@ -697,7 +715,9 @@ impl ExtensionManager {
     dir: &Path,
     manifest: &serde_json::Value,
   ) -> Result<Extension, Box<dyn std::error::Error>> {
-    let absolute = dir.canonicalize()?;
+    // dunce, not std: on Windows std returns the `\\?\C:\...` form, which the
+    // Extensions page would show and `--load-extension` would be handed.
+    let absolute = dunce::canonicalize(dir)?;
     if !path_is_load_extension_safe(&absolute) {
       return Err(err_code("EXTENSION_PATH_HAS_COMMA"));
     }
@@ -708,7 +728,8 @@ impl ExtensionManager {
 
     let ext = Extension {
       id: uuid::Uuid::new_v4().to_string(),
-      name: Self::resolve_name(name, manifest_name)?,
+      name: Self::resolve_name(name, manifest_name.clone())?,
+      manifest_name,
       file_name: absolute
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -766,10 +787,11 @@ impl ExtensionManager {
     fs::write(metadata_path, json)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if ext.sync_enabled {
+      crate::team_activity::record("extension.add", &ext.id, Some(&ext.name), None);
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let id = ext.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -782,6 +804,9 @@ impl ExtensionManager {
   }
 
   pub fn get_extension(&self, id: &str) -> Result<Extension, Box<dyn std::error::Error>> {
+    if !is_plain_path_part(id) {
+      return Err(format!("Extension with id '{id}' not found").into());
+    }
     let metadata_path = self.get_metadata_path(id);
     if !metadata_path.exists() {
       return Err(format!("Extension with id '{id}' not found").into());
@@ -925,7 +950,7 @@ impl ExtensionManager {
     explicit_name_provided: bool,
   ) -> Result<(), Box<dyn std::error::Error>> {
     let browser_compatibility = determine_browser_compatibility(&file_type);
-    if browser_compatibility.is_empty() {
+    if browser_compatibility.is_empty() || !is_plain_path_part(&file_name) {
       return Err(err_code("EXTENSION_UNSUPPORTED_FILE_TYPE"));
     }
 
@@ -969,7 +994,7 @@ impl ExtensionManager {
     manifest: &serde_json::Value,
     explicit_name_provided: bool,
   ) -> Result<(), Box<dyn std::error::Error>> {
-    let absolute = dir.canonicalize()?;
+    let absolute = dunce::canonicalize(dir)?;
     if !path_is_load_extension_safe(&absolute) {
       return Err(err_code("EXTENSION_PATH_HAS_COMMA"));
     }
@@ -1032,6 +1057,7 @@ impl ExtensionManager {
     if let Some(h) = homepage_url {
       ext.homepage_url = Some(h);
     }
+    ext.manifest_name = manifest_name.clone();
     if let Some(mn) = manifest_name {
       if !explicit_name_provided && !mn.trim().is_empty() {
         ext.name = mn;
@@ -1047,10 +1073,11 @@ impl ExtensionManager {
     fs::write(metadata_path, json)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if ext.sync_enabled {
+      crate::team_activity::record("extension.update", &ext.id, Some(&ext.name), None);
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let eid = ext.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1082,21 +1109,24 @@ impl ExtensionManager {
     self.save_groups_data(&groups_data)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if ext.sync_enabled {
+      crate::team_activity::record("extension.delete", &ext.id, Some(&ext.name), None);
       let ext_id = id.to_string();
       let app_handle_clone = app_handle.clone();
       tauri::async_runtime::spawn(async move {
         match crate::sync::SyncEngine::create_from_settings(&app_handle_clone).await {
           Ok(engine) => {
             if let Err(e) = engine.delete_extension(&ext_id).await {
-              log::warn!("Failed to delete extension {} from sync: {}", ext_id, e);
+              log::warn!("Remote extension delete failed extension={ext_id} err=\"{e}\"");
             }
           }
           Err(e) => {
-            log::debug!("Sync not configured, skipping remote deletion: {}", e);
+            log::debug!(
+              "Remote extension delete skipped: sync not configured extension={ext_id} err=\"{e}\""
+            );
           }
         }
       });
@@ -1157,10 +1187,11 @@ impl ExtensionManager {
     self.save_groups_data(&data)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if group.sync_enabled {
+      crate::team_activity::record("extension.group_create", &group.id, Some(&group.name), None);
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let id = group.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1230,10 +1261,16 @@ impl ExtensionManager {
     self.save_groups_data(&data)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if updated.sync_enabled {
+      crate::team_activity::record(
+        "extension.group_update",
+        &updated.id,
+        Some(&updated.name),
+        None,
+      );
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let gid = updated.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1281,6 +1318,7 @@ impl ExtensionManager {
     }
 
     if was_sync_enabled {
+      crate::team_activity::record("extension.group_delete", id, None, None);
       let group_id_owned = id.to_string();
       let app_handle_clone = app_handle.clone();
       tauri::async_runtime::spawn(async move {
@@ -1288,21 +1326,21 @@ impl ExtensionManager {
           Ok(engine) => {
             if let Err(e) = engine.delete_extension_group(&group_id_owned).await {
               log::warn!(
-                "Failed to delete extension group {} from sync: {}",
-                group_id_owned,
-                e
+                "Remote extension group delete failed extension_group={group_id_owned} err=\"{e}\""
               );
             }
           }
           Err(e) => {
-            log::debug!("Sync not configured, skipping remote deletion: {}", e);
+            log::debug!(
+              "Remote extension group delete skipped: sync not configured extension_group={group_id_owned} err=\"{e}\""
+            );
           }
         }
       });
     }
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     Ok(())
@@ -1332,10 +1370,16 @@ impl ExtensionManager {
     self.save_groups_data(&data)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if updated.sync_enabled {
+      crate::team_activity::record(
+        "extension.group_update",
+        &updated.id,
+        Some(&updated.name),
+        crate::team_activity::fields(&["extensions"]),
+      );
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let gid = updated.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1366,10 +1410,16 @@ impl ExtensionManager {
     self.save_groups_data(&data)?;
 
     if let Err(e) = events::emit_empty("extensions-changed") {
-      log::error!("Failed to emit extensions-changed event: {e}");
+      log::warn!("Event emit failed event=extensions-changed err=\"{e}\"");
     }
 
     if updated.sync_enabled {
+      crate::team_activity::record(
+        "extension.group_update",
+        &updated.id,
+        Some(&updated.name),
+        crate::team_activity::fields(&["extensions"]),
+      );
       if let Some(scheduler) = crate::sync::get_global_scheduler() {
         let gid = updated.id.clone();
         tauri::async_runtime::spawn(async move {
@@ -1387,6 +1437,9 @@ impl ExtensionManager {
     &self,
     ext: &Extension,
   ) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_plain_path_part(&ext.id) || !is_plain_path_part(&ext.file_name) {
+      return Err(format!("Extension '{}' has an unsafe id or file name", ext.id).into());
+    }
     let metadata_path = self.get_metadata_path(&ext.id);
     if let Some(parent) = metadata_path.parent() {
       fs::create_dir_all(parent)?;
@@ -1404,6 +1457,9 @@ impl ExtensionManager {
   }
 
   pub fn delete_extension_internal(&self, id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if !is_plain_path_part(id) {
+      return Err(format!("Extension with id '{id}' not found").into());
+    }
     let ext_dir = self.get_extension_dir(id);
     if ext_dir.exists() {
       fs::remove_dir_all(&ext_dir)?;
@@ -1725,16 +1781,15 @@ impl ExtensionManager {
           let linked_path = PathBuf::from(linked);
           if !linked_path.join("manifest.json").exists() {
             log::warn!(
-              "Skipping linked extension '{}': {} is no longer an extension folder",
-              ext.name,
-              linked
+              "Linked extension skipped: folder has no manifest.json extension={} path=\"{linked}\"",
+              ext.id
             );
             continue;
           }
           if !path_is_load_extension_safe(&linked_path) {
             log::warn!(
-              "Skipping linked extension '{}': path contains a comma, which --load-extension cannot express",
-              ext.name
+              "Linked extension skipped: path has a comma --load-extension cannot express extension={}",
+              ext.id
             );
             continue;
           }
@@ -1753,7 +1808,7 @@ impl ExtensionManager {
               extension_paths.push(unpack_dir.to_string_lossy().to_string());
             }
             Err(e) => {
-              log::warn!("Failed to unpack extension '{}': {}", ext.name, e);
+              log::warn!("Extension unpack failed extension={} err=\"{e}\"", ext.id);
             }
           }
         }
@@ -1774,7 +1829,7 @@ impl ExtensionManager {
     let dir = Self::unpacked_dir_for_profile(profile_id);
     if dir.exists() {
       if let Err(e) = fs::remove_dir_all(&dir) {
-        log::warn!("Failed to clean staged extensions for profile {profile_id}: {e}");
+        log::warn!("Staged extension cleanup failed profile={profile_id} err=\"{e}\"");
       }
     }
   }
@@ -1901,7 +1956,8 @@ impl ExtensionManager {
 
     let (manifest_name, version, description, author, homepage_url) = metadata;
     let mut updated = ext.clone();
-    let mut changed = false;
+    let mut changed = updated.manifest_name != manifest_name;
+    updated.manifest_name = manifest_name.clone();
 
     // The name is user-editable, so it is only touched when what is stored is
     // an unresolved placeholder.
@@ -1977,9 +2033,8 @@ impl ExtensionManager {
 }
 
 // Global instance
-lazy_static::lazy_static! {
-  pub static ref EXTENSION_MANAGER: Mutex<ExtensionManager> = Mutex::new(ExtensionManager::new());
-}
+pub static EXTENSION_MANAGER: std::sync::LazyLock<Mutex<ExtensionManager>> =
+  std::sync::LazyLock::new(|| Mutex::new(ExtensionManager::new()));
 
 // Tauri commands
 
@@ -2404,7 +2459,11 @@ mod tests {
 
     let mgr = ExtensionManager::new();
     let source = write_unpacked_fixture(&tmp.path().join("linked-extension"), "Linked Fixture");
-    let canonical = source.canonicalize().unwrap().to_string_lossy().to_string();
+    let canonical = dunce::canonicalize(&source)
+      .unwrap()
+      .to_string_lossy()
+      .to_string();
+    assert!(!canonical.starts_with(r"\\?\"), "{canonical}");
     let ext = mgr
       .add_unpacked_extension("Ignored".to_string(), &source, true)
       .unwrap();
@@ -2530,11 +2589,87 @@ mod tests {
       .unwrap();
 
     assert_eq!(ext.name, "uBlock Origin Lite");
+    assert_eq!(ext.manifest_name.as_deref(), Some("uBlock Origin Lite"));
     assert_eq!(
       ext.description.as_deref(),
       Some("An efficient content blocker.")
     );
     assert_eq!(ext.version.as_deref(), Some("1.2.3"));
+  }
+
+  #[test]
+  fn manifest_identity_backfill_preserves_an_explicit_name_and_edit_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(tmp.path().to_path_buf());
+    let mgr = ExtensionManager::new();
+    let mut ext = mgr
+      .add_extension(
+        "fallback".to_string(),
+        "ublock.zip".to_string(),
+        localized_extension_zip(),
+      )
+      .unwrap();
+    ext.name = "My blocker".to_string();
+    ext.manifest_name = None;
+    mgr.update_extension_internal(&ext).unwrap();
+    mgr.ensure_icons_extracted();
+    let restored = mgr.get_extension(&ext.id).unwrap();
+    assert_eq!(restored.name, "My blocker");
+    assert_eq!(
+      restored.manifest_name.as_deref(),
+      Some("uBlock Origin Lite")
+    );
+    assert_eq!(restored.updated_at, ext.updated_at);
+  }
+
+  #[test]
+  fn ids_and_file_names_from_sync_or_rest_cannot_leave_the_extension_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(tmp.path().to_path_buf());
+    let mgr = ExtensionManager::new();
+    let ext = mgr
+      .add_extension(
+        "fallback".to_string(),
+        "ublock.zip".to_string(),
+        localized_extension_zip(),
+      )
+      .unwrap();
+    let canary = tmp.path().join("canary.txt");
+    std::fs::write(&canary, "still here").unwrap();
+
+    // What a crafted sync object would upsert.
+    for (id, file_name) in [
+      ("..", "ublock.zip"),
+      ("../..", "ublock.zip"),
+      (ext.id.as_str(), "../../../escaped.zip"),
+      (ext.id.as_str(), "/tmp/escaped.zip"),
+      (ext.id.as_str(), ".."),
+    ] {
+      let mut crafted = ext.clone();
+      crafted.id = id.to_string();
+      crafted.file_name = file_name.to_string();
+      assert!(
+        mgr.update_extension_internal(&crafted).is_err(),
+        "{id} / {file_name}"
+      );
+    }
+
+    // A remote tombstone for `..` must not reach the parent directory.
+    assert!(mgr.get_extension("..").is_err());
+    assert!(mgr.delete_extension_internal("..").is_err());
+    assert!(canary.exists());
+
+    // The REST and UI add paths refuse a file name with path parts too.
+    for file_name in ["../escaped.zip", "nested/ublock.zip"] {
+      assert!(mgr
+        .add_extension(
+          "x".to_string(),
+          file_name.to_string(),
+          localized_extension_zip()
+        )
+        .is_err());
+    }
+    assert!(!tmp.path().join("escaped.zip").exists());
   }
 
   #[test]
