@@ -1236,7 +1236,7 @@ fn force_kill_process(pid: u32) {
 }
 
 /// Wait up to `limit` for `pid` to leave the process table.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 async fn wait_for_exit(pid: u32, limit: Duration) -> bool {
   wait_for_owned_exit(pid, crate::proxy_storage::process_start_time(pid), limit).await
 }
