@@ -103,6 +103,43 @@ async function assertCommandErrorCode(app, command, code, args = {}) {
   assert.match(error, new RegExp(`"code":"${code}"`));
 }
 
+test("route exit observations expose only unknown cache state for unrouted profiles", async () => {
+  await withApp("integrations-exit-observations", async (app) => {
+    assert.deepEqual(await app.invoke("get_profile_exit_observations"), []);
+    const profile = await app.invoke("create_browser_profile_new", {
+      name: "Exit observation contract",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    const expected = [
+      {
+        profile_id: profile.id,
+        proxy_id: null,
+        ip: null,
+        observed_at: null,
+        fresh: false,
+      },
+    ];
+    // Exact equality rejects extra fields, including route URLs and secrets.
+    assert.deepEqual(
+      await app.invoke("get_profile_exit_observations"),
+      expected,
+    );
+    assert.deepEqual(
+      await app.invoke("get_profile_exit_observations"),
+      expected,
+    );
+  });
+});
+
 test("authenticated REST API serves its complete OpenAPI contract and CRUD lifecycle", async () => {
   await withApp("integrations-rest", async (app) => {
     await seedTerms(app);
@@ -595,6 +632,38 @@ test("authenticated REST API serves its complete OpenAPI contract and CRUD lifec
       dnsBlocklist: null,
       launchHook: null,
     });
+    const updateUrl = `${base}/v1/profiles/${launchProfile.id}`;
+    const update = (body) =>
+      jsonRequest(updateUrl, { method: "PUT", token: saved.api_token, body });
+    assert.equal(
+      (await update({ proxy_id: proxyId, note: "Keep on omission" })).response
+        .status,
+      200,
+    );
+    assert.equal(
+      (await update({ tags: ["rest"] })).value.profile.proxy_id,
+      proxyId,
+    );
+    assert.equal(
+      (await update({ proxy_id: null })).value.profile.proxy_id,
+      null,
+    );
+    const metadataPath = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      launchProfile.id,
+      "metadata.json",
+    );
+    const beforeInvalid = await readFile(metadataPath);
+    const invalidUpdate = await update({
+      name: "Must not persist",
+      dns_server: "https://",
+    });
+    assert.equal(invalidUpdate.response.status, 400);
+    assert.deepEqual(await readFile(metadataPath), beforeInvalid);
+    assert.equal((await update({ note: null })).response.status, 200);
+    assert.equal(JSON.parse(await readFile(metadataPath)).note, null);
     const launchGroup = await jsonRequest(`${base}/v1/extension-groups`, {
       method: "POST",
       token: saved.api_token,
@@ -786,9 +855,97 @@ test("authenticated REST API serves its complete OpenAPI contract and CRUD lifec
   });
 });
 
+test("local MCP inspection mode refuses mutations and cross-origin requests", async () => {
+  await withApp("integrations-mcp-inspect", async (app) => {
+    await seedTerms(app);
+    const settings = await app.invoke("get_app_settings");
+    await app.invoke("save_app_settings", {
+      settings: { ...settings, mcp_read_only: true },
+    });
+    const port = await app.invoke("start_mcp_server");
+    const config = await app.invoke("get_mcp_config");
+    const url = `http://127.0.0.1:${port}/mcp`;
+    const headers = { Authorization: `Bearer ${config.token}` };
+    const body = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-11-25",
+        capabilities: {},
+        clientInfo: { name: "inspect-fixture", version: "1" },
+      },
+    };
+    assert.equal(
+      (
+        await jsonRequest(url, {
+          method: "POST",
+          headers: { ...headers, Origin: "https://untrusted.example" },
+          body,
+        })
+      ).response.status,
+      403,
+    );
+    assert.equal(
+      (await jsonRequest(url, { method: "POST", token: "incorrect", body }))
+        .response.status,
+      401,
+    );
+    const initialized = await jsonRequest(url, {
+      method: "POST",
+      headers,
+      body,
+    });
+    assert.equal(initialized.response.status, 200);
+    headers["mcp-session-id"] =
+      initialized.response.headers.get("mcp-session-id");
+    const rpc = (method, params) =>
+      jsonRequest(url, {
+        method: "POST",
+        headers,
+        body: { jsonrpc: "2.0", id: 2, method, params },
+      });
+    const tools = (await rpc("tools/list", {})).value.result.tools.map(
+      (tool) => tool.name,
+    );
+    assert.deepEqual(
+      tools.sort(),
+      [
+        "list_profiles",
+        "get_profile_status",
+        "list_groups",
+        "list_tags",
+        "list_profile_statuses",
+      ].sort(),
+    );
+    const before = await app.invoke("get_stored_proxies");
+    const refused = await rpc("tools/call", {
+      name: "create_proxy",
+      arguments: {
+        name: "Must not exist",
+        proxy_type: "http",
+        host: "127.0.0.1",
+        port: 9999,
+      },
+    });
+    assert.match(refused.value.error.message, /inspection-only/);
+    assert.deepEqual(await app.invoke("get_stored_proxies"), before);
+    assert.equal(
+      (await rpc("tools/call", { name: "list_profiles", arguments: {} })).value
+        .error,
+      undefined,
+    );
+    await app.invoke("stop_mcp_server");
+  });
+});
+
 test("DON local MCP keeps authenticated discovery, proxy and extension tools available", async () => {
   await withApp("integrations-local-mcp", async (app) => {
     await seedTerms(app);
+    const settings = await app.invoke("get_app_settings");
+    await app.invoke("save_app_settings", {
+      settings: { ...settings, mcp_read_only: false },
+    });
     await assertCommandErrorCode(
       app,
       "stop_mcp_server",
@@ -880,6 +1037,54 @@ test("DON local MCP keeps authenticated discovery, proxy and extension tools ava
     assert.equal(listed.response.status, 200);
     assert.equal(listed.value.error, undefined);
     assert.ok(listed.value.result);
+    const fixture = await app.invoke("create_browser_profile_new", {
+      name: "MCP Update Fixture",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    const metadataPath = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      fixture.id,
+      "metadata.json",
+    );
+    const beforeInvalid = await readFile(metadataPath);
+    assert.ok(
+      (
+        await call("update_profile", {
+          profile_id: fixture.id,
+          name: "Must not persist",
+          proxy_id: "missing",
+        })
+      ).value.error,
+    );
+    assert.deepEqual(await readFile(metadataPath), beforeInvalid);
+    assert.equal(
+      (await call("update_profile", { profile_id: fixture.id, note: "Keep" }))
+        .value.error,
+      undefined,
+    );
+    assert.equal(
+      (await call("update_profile", { profile_id: fixture.id, tags: ["mcp"] }))
+        .value.error,
+      undefined,
+    );
+    assert.equal(JSON.parse(await readFile(metadataPath)).note, "Keep");
+    assert.equal(
+      (await call("update_profile", { profile_id: fixture.id, note: null }))
+        .value.error,
+      undefined,
+    );
+    assert.equal(JSON.parse(await readFile(metadataPath)).note, null);
     const created = await call("create_proxy", {
       name: "Local MCP VLESS",
       proxy_type: "vless",
@@ -1577,8 +1782,13 @@ test("offline cloud, update, team-lock, and synchronizer contracts are determini
   await withApp(
     "integrations-contracts",
     async (app) => {
-      // DON's authenticated local service is independent of the remote bridge
-      // and can manage local data before Wayfern has been installed.
+      // Local access needs no cloud account, but still respects local terms.
+      await assertCommandErrorCode(
+        app,
+        "start_mcp_server",
+        "WAYFERN_TERMS_REQUIRED",
+      );
+      await seedTerms(app);
       assert.ok((await app.invoke("start_mcp_server")) > 0);
       assert.equal(await app.invoke("get_mcp_server_status"), true);
       await app.invoke("stop_mcp_server");
@@ -1661,12 +1871,7 @@ test("offline cloud, update, team-lock, and synchronizer contracts are determini
         { code: "DONUT-E2E-INVALID-CODE" },
       );
       await assertContract(app, "cloud_refresh_profile", {
-        // Preserve the fork's local-unlock identity, not an upstream sign-in
-        // requirement. This is not evidence of a real server-authorized user.
-        answers: (user) => {
-          assert.equal(user.id, "don-cloudflare-owner");
-          assert.equal(user.entitlements.remoteControl, false);
-        },
+        refusedWith: /ACCOUNT_SYNC_SIGN_IN_REQUIRED/,
       });
       await assertContract(app, "cloud_get_countries", {
         refusedWith: /not logged in/i,

@@ -31,6 +31,9 @@ impl ConfigEntity for ProfileStatus {
   fn updated_at(&self) -> u64 {
     self.updated_at
   }
+  fn set_updated_at(&mut self, updated_at: u64) {
+    self.updated_at = updated_at;
+  }
   fn store() -> &'static ConfigStore<Self> {
     &STORE
   }
@@ -118,7 +121,7 @@ pub fn update(status_id: &str, name: &str, color: &str) -> Result<ProfileStatus,
     if status.name != name || status.color != color {
       status.name = name;
       status.color = color;
-      status.updated_at = crate::proxy_manager::now_secs();
+      status.updated_at = crate::proxy_manager::now_secs().max(status.updated_at.saturating_add(1));
     }
     Ok(status.clone())
   })?;
@@ -129,11 +132,7 @@ pub fn update(status_id: &str, name: &str, color: &str) -> Result<ProfileStatus,
 
 /// Deletes the status and takes it off every profile that had it.
 pub fn delete(status_id: &str) -> Result<(), String> {
-  let removed = STORE.mutate(|statuses| {
-    let before = statuses.len();
-    statuses.retain(|s| s.id != status_id);
-    Ok(statuses.len() != before)
-  })?;
+  let removed = STORE.delete_local(status_id)?;
   if !removed {
     return Err(code("PROFILE_STATUS_NOT_FOUND"));
   }
@@ -230,6 +229,14 @@ mod tests {
 
     delete(&active.id).unwrap();
     assert!(!exists(&active.id));
+    let persisted: serde_json::Value = serde_json::from_slice(
+      &std::fs::read(crate::app_dirs::data_subdir().join("profile_statuses.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["pending_deletes"][0]["id"], active.id);
+    assert!(persisted["pending_deletes"][0]["generation"]
+      .as_str()
+      .is_some());
     assert!(delete(&active.id)
       .unwrap_err()
       .contains("PROFILE_STATUS_NOT_FOUND"));

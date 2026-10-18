@@ -1726,7 +1726,9 @@ export function WayfernConfigForm({
     <SoftFields>
       <div className={`@container space-y-6 ${className}`}>
         <div className="space-y-3">
-          <Label>{t("devicePresets.title")}</Label>
+          <Label htmlFor="advanced-device-preset">
+            {t("devicePresets.title")}
+          </Label>
           <Select
             value={config.device_preset ?? "none"}
             disabled={readOnly}
@@ -1743,7 +1745,7 @@ export function WayfernConfigForm({
               );
             }}
           >
-            <SelectTrigger>
+            <SelectTrigger id="advanced-device-preset">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

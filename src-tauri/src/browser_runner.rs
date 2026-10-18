@@ -160,6 +160,7 @@ fn load_latest_profile(
     .map_err(|error| std::io::Error::other(error.to_string()).into())
 }
 
+#[cfg(test)]
 async fn wait_for_process_exit_with<F>(timeout: Duration, is_running: F) -> bool
 where
   F: Fn() -> bool,
@@ -174,32 +175,6 @@ where
       return false;
     }
     tokio::time::sleep(Duration::from_millis(25).min(deadline - now)).await;
-  }
-}
-
-async fn wait_for_process_exit(pid: u32) -> bool {
-  wait_for_process_exit_with(Duration::from_millis(500), || {
-    crate::proxy_storage::is_process_running(pid)
-  })
-  .await
-}
-
-async fn force_kill_wayfern_process(
-  pid: u32,
-  profile_path: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-  #[cfg(target_os = "macos")]
-  {
-    crate::platform_browser::macos::kill_browser_process_impl(pid, Some(profile_path)).await
-  }
-  #[cfg(target_os = "linux")]
-  {
-    crate::platform_browser::linux::kill_browser_process_impl(pid, Some(profile_path)).await
-  }
-  #[cfg(target_os = "windows")]
-  {
-    let _ = profile_path;
-    crate::platform_browser::windows::kill_browser_process_impl(pid).await
   }
 }
 
@@ -328,7 +303,8 @@ impl BrowserRunner {
     profile_id: Option<&str>,
   ) -> Result<Option<ProxySettings>, String> {
     let proxy_id = match proxy_id {
-      Some(id) => id,
+      Some(id) if !id.is_empty() => id,
+      Some(_) => return Ok(None),
       None => return Ok(None),
     };
 
@@ -339,10 +315,14 @@ impl BrowserRunner {
     // For cloud-derived proxies, inject profile-specific sid for sticky sessions
     if let Some(pid) = profile_id {
       if PROXY_MANAGER.is_cloud_or_derived(proxy_id) {
-        return Ok(PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid));
+        return crate::launch_gate::require_assigned_proxy(
+          PROXY_MANAGER.resolve_proxy_for_profile(proxy_id, pid),
+        )
+        .map(Some);
       }
     }
-    Ok(PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+    crate::launch_gate::require_assigned_proxy(PROXY_MANAGER.get_proxy_settings_by_id(proxy_id))
+      .map(Some)
   }
 
   /// Whether this launch may keep a list of the sites it reaches. Never for a
@@ -1372,105 +1352,26 @@ impl BrowserRunner {
         crate::ephemeral_dirs::get_effective_profile_path(profile, &profiles_dir);
       let profile_path_str = profile_data_path.to_string_lossy();
 
-      // Stop the proxy associated with this profile first
       let profile_id_str = profile.id.to_string();
-      if let Err(e) = PROXY_MANAGER
-        .stop_proxy_by_profile_id(app_handle.clone(), &profile_id_str)
-        .await
-      {
-        log::warn!("Proxy worker stop failed profile={profile_id_str} err=\"{e}\"");
-      }
-      if let Err(error) =
-        crate::xray_worker_runner::stop_xray_worker_by_profile_id(&profile_id_str).await
-      {
-        log::warn!("Xray worker stop failed profile={profile_id_str} err=\"{error}\"");
-      }
-
-      let mut process_actually_stopped = false;
-      match self
+      if let Some(wayfern_process) = self
         .wayfern_manager
         .find_wayfern_by_profile(&profile_path_str)
         .await
       {
-        Some(wayfern_process) => {
-          match self.wayfern_manager.stop_wayfern(&wayfern_process.id).await {
-            Ok(_) => {
-              if let Some(pid) = wayfern_process.processId {
-                process_actually_stopped = wait_for_process_exit(pid).await;
-                if process_actually_stopped {
-                  log::info!(
-                    "Successfully stopped Wayfern process: {} (PID: {:?}) - verified process is dead",
-                    wayfern_process.id,
-                    pid
-                  );
-                } else {
-                  log::warn!(
-                    "Browser still running after stop, force killing profile={} pid={pid}",
-                    profile.id
-                  );
-                  if let Err(error) = force_kill_wayfern_process(pid, &profile_path_str).await {
-                    log::error!("Failed to force kill Wayfern process {}: {}", pid, error);
-                  } else {
-                    process_actually_stopped = wait_for_process_exit(pid).await;
-                    if process_actually_stopped {
-                      log::info!(
-                        "Successfully force killed Wayfern process {} (PID: {:?})",
-                        wayfern_process.id,
-                        pid
-                      );
-                    }
-                  }
-                }
-              } else {
-                process_actually_stopped = true;
-              }
-            }
-            Err(e) => {
-              log::warn!(
-                "Browser stop failed, force killing profile={} pid={:?} err=\"{e}\"",
-                profile.id,
-                wayfern_process.processId
-              );
-              // Try to force kill if we have a PID
-              if let Some(pid) = wayfern_process.processId {
-                log::info!(
-                  "Attempting force kill after stop_wayfern error for PID: {}",
-                  pid
-                );
-                if let Err(kill_error) = force_kill_wayfern_process(pid, &profile_path_str).await {
-                  log::error!(
-                    "Failed to force kill Wayfern process {}: {}",
-                    pid,
-                    kill_error
-                  );
-                } else {
-                  process_actually_stopped = wait_for_process_exit(pid).await;
-                }
-              }
-            }
-          }
-        }
-        None => {
-          log::debug!("No running browser to stop profile={}", profile.id);
-          process_actually_stopped = true;
-        }
+        self
+          .wayfern_manager
+          .stop_wayfern(&wayfern_process.id)
+          .await?;
       }
 
-      // If process wasn't confirmed stopped, return an error
-      if !process_actually_stopped {
-        log::warn!(
-          "Browser stop failed, process still alive profile={} pid={:?}",
-          profile.id,
-          profile.process_id
-        );
-        return Err(
-          format!(
-            "Failed to stop Wayfern process for profile {} - process may still be running",
-            profile.name
-          )
-          .into(),
-        );
-      }
+      // Routes belong to the live browser, including while it flushes its
+      // session. Keep metadata/watch ownership until route cleanup succeeds.
+      PROXY_MANAGER
+        .stop_proxy_by_profile_id(app_handle.clone(), &profile_id_str)
+        .await?;
+      crate::xray_worker_runner::stop_xray_worker_by_profile_id(&profile_id_str)
+        .await
+        .map_err(|error| error.to_string())?;
 
       // Clear the process ID from the profile and save immediately so that
       // subsequent calls to update_profile_version (which re-reads from disk)
@@ -2153,7 +2054,7 @@ pub async fn kill_browser_profile(
         log::warn!("Event emit failed event=profile-running-changed err=\"{e}\"");
       }
 
-      Err(format!("Failed to kill browser: {e}"))
+      Err(crate::wrap_backend_error(e, "Failed to kill browser"))
     }
   }
 }
@@ -2183,6 +2084,39 @@ static BROWSER_RUNNER: std::sync::LazyLock<BrowserRunner> =
 mod tests {
   use super::*;
   use tempfile::TempDir;
+
+  #[tokio::test]
+  async fn launch_resolver_rejects_a_missing_proxy_even_with_a_vpn() {
+    let profile = BrowserProfile {
+      proxy_id: Some(format!("missing-{}", uuid::Uuid::new_v4())),
+      vpn_id: Some("must-not-fall-back-to-vpn".into()),
+      ..Default::default()
+    };
+    let error = BrowserRunner::instance()
+      .resolve_launch_proxy(&profile)
+      .await
+      .unwrap_err();
+    let parsed: serde_json::Value = serde_json::from_str(&error).unwrap();
+    assert_eq!(parsed["code"], "PROFILE_ROUTE_UNAVAILABLE");
+  }
+
+  #[tokio::test]
+  async fn launch_resolver_leaves_direct_and_vpn_only_profiles_without_a_proxy() {
+    for proxy_id in [None, Some(String::new())] {
+      for vpn_id in [None, Some("vpn-only".into())] {
+        let profile = BrowserProfile {
+          proxy_id: proxy_id.clone(),
+          vpn_id,
+          ..Default::default()
+        };
+        assert!(BrowserRunner::instance()
+          .resolve_launch_proxy(&profile)
+          .await
+          .unwrap()
+          .is_none());
+      }
+    }
+  }
 
   fn profile_with_timezone(timezone: &str) -> BrowserProfile {
     BrowserProfile {

@@ -561,7 +561,7 @@ fn write_transfer_archive(
   let file = File::create(archive_path)
     .map_err(|error| format!("failed to create profile-share archive: {error}"))?;
   let mut archive = zip::ZipWriter::new(file).set_auto_large_file();
-  let base_options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+  let base_options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default()
     .compression_method(zip::CompressionMethod::Deflated)
     .unix_permissions(0o600);
   archive
@@ -665,17 +665,17 @@ fn extract_transfer_archive(
     let entry = archive
       .by_index(index)
       .map_err(|error| format!("failed to inspect profile-share entry: {error}"))?;
-    if entry.is_dir()
-      || entry.enclosed_name().is_none()
-      || !archive_paths.insert(entry.name().to_string())
+    let name = entry
+      .name()
+      .map_err(|error| format!("invalid profile-share entry name: {error}"))?;
+    if entry.is_dir() || entry.enclosed_name().is_none() || !archive_paths.insert(name.to_string())
     {
       return Err("profile-share archive contains an invalid entry".to_string());
     }
-    if entry.name() == "transfer.json" {
+    if name == "transfer.json" {
       continue;
     }
-    let relative = entry
-      .name()
+    let relative = name
       .strip_prefix("profile/")
       .filter(|path| is_safe_transfer_path(path))
       .ok_or_else(|| "profile-share archive contains an unexpected entry".to_string())?;
@@ -698,10 +698,13 @@ fn extract_transfer_archive(
       let mut entry = archive
         .by_index(index)
         .map_err(|error| format!("failed to read profile-share entry: {error}"))?;
-      if entry.name() == "transfer.json" {
+      let name = entry
+        .name()
+        .map_err(|error| format!("invalid profile-share entry name: {error}"))?;
+      if name == "transfer.json" {
         continue;
       }
-      let relative = entry.name().strip_prefix("profile/").unwrap().to_string();
+      let relative = name.strip_prefix("profile/").unwrap().to_string();
       let manifest_entry = expected.get(relative.as_str()).unwrap();
       let destination = destination_profile_dir.join(&relative);
       if let Some(parent) = destination.parent() {
@@ -1181,7 +1184,7 @@ mod tests {
   fn write_test_archive(path: &Path, package: &TransferPackage, entries: &[(&str, &[u8])]) {
     let file = File::create(path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+    let options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
     zip.start_file("transfer.json", options).unwrap();
     zip
       .write_all(&serde_json::to_vec(package).unwrap())

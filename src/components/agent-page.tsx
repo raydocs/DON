@@ -26,6 +26,7 @@ import {
 import { AgentProfiles } from "@/components/agent-profiles";
 import { AgentRecipes } from "@/components/agent-recipes";
 import { AgentSchedules } from "@/components/agent-schedules";
+import { BrowserAgent } from "@/components/browser-agent";
 import { AnimatedSwitch } from "@/components/ui/animated-switch";
 import {
   AnimatedTabs,
@@ -64,6 +65,7 @@ import { cn } from "@/lib/utils";
 import type { BrowserProfile, CloudUser } from "@/types";
 
 export type AgentTab =
+  | "browser"
   | "conversation"
   | "profiles"
   | "activity"
@@ -71,6 +73,7 @@ export type AgentTab =
   | "schedules";
 
 const TABS: AgentTab[] = [
+  "browser",
   "conversation",
   "profiles",
   "activity",
@@ -586,7 +589,9 @@ export function AgentPage({
                     value={tab}
                     data-testid={`agent-tab-${tab}`}
                   >
-                    {t(`agent.tabs.${tab}`)}
+                    {tab === "browser"
+                      ? t("browserAgent.title")
+                      : t(`agent.tabs.${tab}`)}
                     {tab === "conversation" &&
                       agentConsole.openRequests.length > 0 && (
                         <span className="rounded-full bg-warning/15 px-1.5 text-xs tabular-nums text-warning-text">
@@ -596,6 +601,13 @@ export function AgentPage({
                   </AnimatedTabsTrigger>
                 ))}
               </AnimatedTabsList>
+
+              <AnimatedTabsContent
+                value="browser"
+                className="mt-3 min-h-0 flex-1 flex-col data-[state=active]:flex"
+              >
+                <BrowserAgent profiles={profiles} />
+              </AnimatedTabsContent>
 
               <AnimatedTabsContent
                 value="conversation"

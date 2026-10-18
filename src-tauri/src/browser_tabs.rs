@@ -132,6 +132,32 @@ pub async fn list(profile: &BrowserProfile) -> Result<Vec<BrowserTab>, String> {
   Ok(tabs)
 }
 
+/// Pin a local task to one exact tab. Never fall back to another page or cloud.
+pub(crate) async fn task_target(
+  profile: &BrowserProfile,
+  tab_id: &str,
+) -> Result<crate::cdp_target::CdpTarget, String> {
+  let port = port_of(profile).await?;
+  let targets = targets(port).await?;
+  let socket = targets
+    .iter()
+    .find(|t| t["id"].as_str() == Some(tab_id) && t["type"] == "page")
+    .and_then(|t| t["webSocketDebuggerUrl"].as_str())
+    .ok_or_else(|| code("BROWSER_TAB_NOT_FOUND"))?;
+  let url = url::Url::parse(socket).map_err(unreachable)?;
+  if url.scheme() != "ws"
+    || url.host_str() != Some("127.0.0.1")
+    || url.port() != Some(port)
+    || !url.username().is_empty()
+    || url.password().is_some()
+  {
+    return Err(code("BROWSER_TABS_UNAVAILABLE"));
+  }
+  Ok(crate::cdp_target::CdpTarget::Local {
+    ws_url: socket.to_string(),
+  })
+}
+
 /// Open `url` in a new tab, pick it, and bring it to the front.
 pub async fn open(profile: &BrowserProfile, url: &str) -> Result<BrowserTab, String> {
   let port = port_of(profile).await?;

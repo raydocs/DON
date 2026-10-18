@@ -56,7 +56,7 @@ const suiteFiles = {
   ui: ["ui.test.mjs", "motion.test.mjs"],
   entities: ["entities.test.mjs"],
   network: ["network.test.mjs"],
-  integrations: ["integrations.test.mjs"],
+  integrations: ["integrations.test.mjs", "browser-agent.test.mjs"],
   sync: ["sync.test.mjs"],
   browser: ["browser.test.mjs"],
   full: [
@@ -68,6 +68,7 @@ const suiteFiles = {
     "entities.test.mjs",
     "network.test.mjs",
     "integrations.test.mjs",
+    "browser-agent.test.mjs",
     "sync.test.mjs",
     "browser.test.mjs",
   ],

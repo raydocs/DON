@@ -1,55 +1,50 @@
 "use client";
 
 import { invoke } from "@tauri-apps/api/core";
-import { useCallback, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import {
-  LuCircleAlert,
-  LuCircleCheck,
+  LuArrowRight,
+  LuFingerprint,
   LuLoaderCircle,
+  LuPlus,
   LuShield,
-  LuSparkles,
   LuWrench,
-  LuZap,
 } from "react-icons/lu";
+import { FingerprintAuditDialog } from "@/components/fingerprint-audit-dialog";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { RippleButton } from "@/components/ui/ripple";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import { SettingsPanel } from "@/components/ui/settings-panel";
+import { translateBackendError } from "@/lib/backend-errors";
 import {
   type AutoClaudeProfilePlan,
   assessAllClaudeProfiles,
   buildIsolationWayfernConfig,
-  CLAUDE_DEFAULT_START_URL,
-  CLAUDE_ISOLATION_RULES,
+  buildResidentialUsage,
   canFlagFix,
-  type HealthSeverity,
   isClaudeProfile,
   mergeClaudeTags,
   needsFingerprintRegen,
-  PROXY_REUSE_COOLDOWN_DAYS,
-  type ProfileHealth,
-  pickAvailableProxy,
   planAutoClaudeProfile,
+  type ResidentialObservation,
 } from "@/lib/claude-workflow";
-import { showErrorToast, showSuccessToast } from "@/lib/toast-utils";
+import { showSuccessToast } from "@/lib/toast-utils";
 import { cn } from "@/lib/utils";
-import { resolveWayfernWebRtcMode } from "@/lib/wayfern-defaults";
+import { getCurrentOS } from "@/lib/wayfern-defaults";
 import type {
   BrowserProfile,
-  BrowserReleaseTypes,
   ConsistencyResult,
-  ParsedProxyLine,
   ProxyParseResult,
   StoredProxy,
-  WayfernConfig,
 } from "@/types";
 
 interface ClaudeWorkflowPanelProps {
@@ -58,334 +53,7 @@ interface ClaudeWorkflowPanelProps {
   profiles: BrowserProfile[];
   proxies: StoredProxy[];
   onCreateProfile: () => void;
-  /** Optional: parent refresh after auto-create (events usually cover this). */
   onProfileCreated?: (profile: BrowserProfile) => void;
-}
-
-function proxyLabelFromInput(input: string): string | null {
-  try {
-    const fragment = new URL(input).hash.slice(1);
-    const label = decodeURIComponent(fragment)
-      .replace(/[\u0000-\u001f\u007f]/g, "")
-      .trim()
-      .slice(0, 80);
-    return label || null;
-  } catch {
-    return null;
-  }
-}
-
-function severityBadge(score: HealthSeverity) {
-  if (score === "ok")
-    return (
-      <Badge className="bg-emerald-600/15 text-emerald-700 dark:text-emerald-300">
-        OK
-      </Badge>
-    );
-  if (score === "warn")
-    return (
-      <Badge className="bg-amber-500/15 text-amber-800 dark:text-amber-200">
-        WARN
-      </Badge>
-    );
-  return (
-    <Badge className="bg-destructive/15 text-destructive-text">BLOCK</Badge>
-  );
-}
-
-function HealthRow({
-  health,
-  profile,
-  busy,
-  onFixFlags,
-  onRegenFingerprint,
-}: {
-  health: ProfileHealth;
-  profile: BrowserProfile | undefined;
-  busy: boolean;
-  onFixFlags: () => void;
-  onRegenFingerprint: () => void;
-}) {
-  const [open, setOpen] = useState(health.score !== "ok");
-  const showFix = profile && canFlagFix(health);
-  const showRegen = profile && needsFingerprintRegen(health);
-
-  return (
-    <div className="rounded-md border p-3">
-      <button
-        type="button"
-        className="flex w-full items-center justify-between gap-2 text-left"
-        onClick={() => {
-          setOpen((v) => !v);
-        }}
-      >
-        <span className="font-medium">{health.profileName}</span>
-        {severityBadge(health.score)}
-      </button>
-      {open && health.issues.length > 0 && (
-        <ul className="mt-2 space-y-1 text-sm text-muted-foreground">
-          {health.issues.map((issue) => (
-            <li key={issue.code} className="flex gap-2">
-              {issue.severity === "block" ? (
-                <LuCircleAlert className="mt-0.5 size-4 shrink-0 text-destructive-text" />
-              ) : issue.severity === "warn" ? (
-                <LuCircleAlert className="mt-0.5 size-4 shrink-0 text-amber-600" />
-              ) : (
-                <LuCircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" />
-              )}
-              <span>{issue.message}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      {open && health.issues.length === 0 && (
-        <p className="mt-2 text-sm text-muted-foreground">
-          Isolation checks passed for this profile.
-        </p>
-      )}
-      {open && (showFix || showRegen) && (
-        <div className="mt-3 flex flex-wrap gap-2">
-          {showFix && (
-            <RippleButton
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={(e) => {
-                e.stopPropagation();
-                onFixFlags();
-              }}
-            >
-              {busy ? (
-                <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-              ) : (
-                <LuWrench className="mr-1 size-3.5" />
-              )}
-              Fix flags
-            </RippleButton>
-          )}
-          {showRegen && (
-            <RippleButton
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={(e) => {
-                e.stopPropagation();
-                onRegenFingerprint();
-              }}
-            >
-              {busy ? (
-                <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-              ) : (
-                <LuWrench className="mr-1 size-3.5" />
-              )}
-              Regen fingerprint (DPR)
-            </RippleButton>
-          )}
-        </div>
-      )}
-      {open && health.issues.some((i) => i.code === "SHARED_PROXY") && (
-        <p className="mt-2 text-xs text-destructive-text">
-          Shared proxy cannot auto-fix — assign a unique 家宽 IP to this profile
-          first.
-        </p>
-      )}
-    </div>
-  );
-}
-
-interface QuickReport {
-  profile: BrowserProfile;
-  result: ConsistencyResult | null;
-  probeError: string | null;
-}
-
-function parseFingerprint(
-  profile: BrowserProfile,
-): Record<string, unknown> | null {
-  const raw = profile.wayfern_config?.fingerprint;
-  if (!raw) return null;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-function QuickReportCard({
-  report,
-  busy,
-  onMatch,
-  onRetry,
-}: {
-  report: QuickReport;
-  busy: boolean;
-  onMatch: () => void;
-  onRetry: () => void;
-}) {
-  const { t } = useTranslation();
-  const fp = parseFingerprint(report.profile);
-  const result = report.result;
-  const ua = typeof fp?.userAgent === "string" ? fp.userAgent : null;
-  const dpr =
-    typeof fp?.devicePixelRatio === "number" ? fp.devicePixelRatio : null;
-  const screenW = typeof fp?.screenWidth === "number" ? fp.screenWidth : null;
-  const screenH = typeof fp?.screenHeight === "number" ? fp.screenHeight : null;
-  const webRtcMode = resolveWayfernWebRtcMode(report.profile.wayfern_config);
-  const webRtcSafe = webRtcMode === "proxy" || webRtcMode === "off";
-  const tzMismatch = result?.mismatches.includes("timezone") ?? false;
-  const langMismatch = result?.mismatches.includes("language") ?? false;
-
-  return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-2">
-        <h4 className="text-xs font-semibold">
-          {t("claudeWorkflow.reportTitle")}
-        </h4>
-        {result?.checked &&
-          (result.consistent ? (
-            <Badge className="bg-success/15 text-success">OK</Badge>
-          ) : (
-            <Badge className="bg-destructive/15 text-destructive-text">
-              MISMATCH
-            </Badge>
-          ))}
-      </div>
-
-      {!result && !report.probeError && (
-        <p className="flex items-center gap-2 text-xs text-muted-foreground">
-          <LuLoaderCircle className="size-3.5 animate-spin" />
-          {t("claudeWorkflow.reportChecking")}
-        </p>
-      )}
-
-      {report.probeError && (
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-xs text-destructive-text">
-            {t("claudeWorkflow.reportProbeFailed", {
-              message: report.probeError,
-            })}
-          </p>
-          <RippleButton
-            size="sm"
-            variant="outline"
-            disabled={busy}
-            onClick={onRetry}
-          >
-            {t("common.buttons.retry")}
-          </RippleButton>
-        </div>
-      )}
-
-      {result && (
-        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
-          <dt className="text-muted-foreground">
-            {t("claudeWorkflow.reportExitIp")}
-          </dt>
-          <dd className="font-mono">{result.exit_ip ?? "—"}</dd>
-          <dt className="text-muted-foreground">
-            {t("claudeWorkflow.reportCountry")}
-          </dt>
-          <dd>{result.exit_country_code ?? "—"}</dd>
-          <dt className="text-muted-foreground">
-            {t("claudeWorkflow.reportExitTimezone")}
-          </dt>
-          <dd>{result.exit_timezone ?? "—"}</dd>
-          <dt className="text-muted-foreground">
-            {t("claudeWorkflow.reportFpTimezone")}
-          </dt>
-          <dd className={tzMismatch ? "text-destructive-text" : undefined}>
-            {result.fingerprint_timezone ?? "—"}
-          </dd>
-          <dt className="text-muted-foreground">
-            {t("claudeWorkflow.reportFpLanguage")}
-          </dt>
-          <dd className={langMismatch ? "text-destructive-text" : undefined}>
-            {result.fingerprint_language ?? "—"}
-          </dd>
-          <dt className="text-muted-foreground">WebRTC</dt>
-          <dd>
-            {webRtcSafe
-              ? t("claudeWorkflow.reportWebrtcBlocked")
-              : t("claudeWorkflow.reportWebrtcOpen")}
-          </dd>
-          {ua && (
-            <>
-              <dt className="text-muted-foreground">UA</dt>
-              <dd className="break-all font-mono">{ua}</dd>
-            </>
-          )}
-          {dpr != null && (
-            <>
-              <dt className="text-muted-foreground">DPR</dt>
-              <dd>{dpr}</dd>
-            </>
-          )}
-          {screenW != null && screenH != null && (
-            <>
-              <dt className="text-muted-foreground">
-                {t("claudeWorkflow.reportScreen")}
-              </dt>
-              <dd>
-                {screenW}×{screenH}
-              </dd>
-            </>
-          )}
-        </dl>
-      )}
-
-      {result?.checked && result.consistent && (
-        <p className="flex items-center gap-1.5 text-xs text-success">
-          <LuCircleCheck className="size-3.5" />
-          {t("claudeWorkflow.reportConsistent")}
-        </p>
-      )}
-
-      {result?.checked && !result.consistent && (
-        <div className="space-y-1.5">
-          {tzMismatch && (
-            <p className="text-xs text-destructive-text">
-              {t("claudeWorkflow.reportTzMismatch", {
-                exit: result.exit_timezone ?? "?",
-                fp: result.fingerprint_timezone ?? "?",
-              })}
-            </p>
-          )}
-          {langMismatch && (
-            <p className="text-xs text-destructive-text">
-              {t("claudeWorkflow.reportLangMismatch", {
-                country: result.exit_country_code ?? "?",
-                lang: result.fingerprint_language ?? "?",
-              })}
-            </p>
-          )}
-          {result.exit_ip && (
-            <RippleButton
-              size="sm"
-              variant="outline"
-              disabled={busy}
-              onClick={onMatch}
-            >
-              {busy ? (
-                <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-              ) : (
-                <LuWrench className="mr-1 size-3.5" />
-              )}
-              {t("claudeWorkflow.reportMatchCta")}
-            </RippleButton>
-          )}
-        </div>
-      )}
-
-      {result && !result.checked && (
-        <p className="text-xs text-muted-foreground">
-          {t("claudeWorkflow.reportNotChecked")}
-        </p>
-      )}
-    </div>
-  );
 }
 
 export function ClaudeWorkflowPanel({
@@ -397,659 +65,871 @@ export function ClaudeWorkflowPanel({
   onProfileCreated,
 }: ClaudeWorkflowPanelProps) {
   const { t } = useTranslation();
-  const hostDpr =
-    typeof window !== "undefined" ? window.devicePixelRatio : undefined;
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [bulkBusy, setBulkBusy] = useState(false);
-  const [autoCreating, setAutoCreating] = useState(false);
-  const [quickProxyInput, setQuickProxyInput] = useState("");
-  const [quickCreating, setQuickCreating] = useState(false);
-  const [quickReport, setQuickReport] = useState<QuickReport | null>(null);
-  const [reportBusy, setReportBusy] = useState(false);
-
-  const freeProxy = useMemo(
-    () => pickAvailableProxy(proxies, profiles),
-    [proxies, profiles],
+  const [tab, setTab] = useState<"check" | "usage" | "create">("check");
+  const [usageFilter, setUsageFilter] = useState<"all" | "label" | "ip">("all");
+  const [observations, setObservations] = useState<ResidentialObservation[]>(
+    [],
   );
-
-  const autoPlanPreview = useMemo(() => {
-    const plan = planAutoClaudeProfile({ proxies, profiles });
-    return "error" in plan ? null : plan;
-  }, [proxies, profiles]);
-
-  const [showClaudeOnly, setShowClaudeOnly] = useState(true);
-
+  const [observationError, setObservationError] = useState<string | null>(null);
+  const [observationLoading, setObservationLoading] = useState(true);
+  const [nowSecs, setNowSecs] = useState(() => Date.now() / 1000);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showAll, setShowAll] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [proxyInput, setProxyInput] = useState("");
+  const [confirmRegen, setConfirmRegen] = useState(false);
+  const [auditProfile, setAuditProfile] = useState<BrowserProfile | null>(null);
+  const [probe, setProbe] = useState<{
+    profileId: string;
+    result: ConsistencyResult;
+  } | null>(null);
+  const hostDpr =
+    typeof window === "undefined" ? undefined : window.devicePixelRatio;
   const health = useMemo(
     () => assessAllClaudeProfiles(profiles, proxies, hostDpr),
     [profiles, proxies, hostDpr],
   );
-
-  const profileById = useMemo(() => {
-    const m = new Map<string, BrowserProfile>();
-    for (const p of profiles) m.set(p.id, p);
-    return m;
-  }, [profiles]);
-
-  const hasClaudeProfiles = useMemo(
-    () => profiles.some((p) => isClaudeProfile(p)),
-    [profiles],
+  const visible = health.filter(
+    (h) =>
+      showAll ||
+      profiles.some((p) => p.id === h.profileId && isClaudeProfile(p)),
   );
-
-  const filteredHealth = useMemo(() => {
-    if (!showClaudeOnly || !hasClaudeProfiles) return health;
-    return health.filter((h) => {
-      const p = profileById.get(h.profileId);
-      return p ? isClaudeProfile(p) : false;
-    });
-  }, [health, showClaudeOnly, hasClaudeProfiles, profileById]);
-
-  const counts = useMemo(() => {
-    return {
-      total: filteredHealth.length,
-      block: filteredHealth.filter((h) => h.score === "block").length,
-      warn: filteredHealth.filter((h) => h.score === "warn").length,
-      ok: filteredHealth.filter((h) => h.score === "ok").length,
+  const selected =
+    visible.find((h) => h.profileId === selectedId) ?? visible[0];
+  const profile = profiles.find((p) => p.id === selected?.profileId);
+  const selectedProxy = proxies.find((p) => p.id === profile?.proxy_id);
+  const plan = planAutoClaudeProfile({ profiles, proxies });
+  const result = probe && probe.profileId === profile?.id ? probe.result : null;
+  const usage = buildResidentialUsage(profiles, observations, nowSecs);
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    const refresh = () => {
+      void invoke<ResidentialObservation[]>("get_profile_exit_observations")
+        .then((next) => {
+          if (!active) return;
+          setObservations(next);
+          setNowSecs(Date.now() / 1000);
+          setObservationError(null);
+        })
+        .catch((reason) => {
+          if (active) {
+            setObservations([]);
+            setObservationError(translateBackendError(t, reason));
+          }
+        })
+        .finally(() => active && setObservationLoading(false));
     };
-  }, [filteredHealth]);
-
-  const applyFlagFix = useCallback(async (profile: BrowserProfile) => {
-    const nextConfig = buildIsolationWayfernConfig(profile.wayfern_config);
-    await invoke("update_wayfern_config", {
-      profileId: profile.id,
-      config: nextConfig,
-    });
-    const tags = mergeClaudeTags(profile.tags);
-    await invoke("update_profile_tags", {
-      profileId: profile.id,
-      tags,
-    });
-  }, []);
-
-  const applyRegen = useCallback(async (profile: BrowserProfile) => {
-    const base = buildIsolationWayfernConfig(profile.wayfern_config);
-    const configJson = JSON.stringify(base);
-    const fingerprint = await invoke<string>("generate_sample_fingerprint", {
-      browser: profile.browser || "wayfern",
-      version: profile.version,
-      configJson,
-    });
-    const next: WayfernConfig = {
-      ...base,
-      fingerprint,
-      randomize_fingerprint_on_launch: false,
+    setObservationLoading(true);
+    refresh();
+    const timer = setInterval(refresh, 30_000);
+    return () => {
+      active = false;
+      clearInterval(timer);
     };
-    await invoke("update_wayfern_config", {
-      profileId: profile.id,
-      config: next,
+  }, [isOpen, t]);
+  let fingerprint: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(profile?.wayfern_config?.fingerprint ?? "{}");
+    fingerprint = parsed.fingerprint ?? parsed;
+  } catch {
+    /* The health check reports a missing/invalid stored fingerprint. */
+  }
+
+  async function action(id: string, work: () => Promise<void>) {
+    if (busy) return;
+    setBusy(id);
+    setError(null);
+    try {
+      await work();
+    } catch (reason) {
+      setError(translateBackendError(t, reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function create(plan: AutoClaudeProfilePlan) {
+    const downloaded = await invoke<string[]>(
+      "get_downloaded_browser_versions",
+      { browserStr: "wayfern" },
+    );
+    if (!downloaded[0]) throw new Error(t("isolation.downloadFirst"));
+    const created = await invoke<BrowserProfile>("create_browser_profile_new", {
+      name: plan.name,
+      browserStr: "wayfern",
+      version: downloaded[0],
+      releaseType: "stable",
+      proxyId: plan.proxyId,
+      vpnId: null,
+      wayfernConfig: plan.wayfernConfig,
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+      startUrls: [plan.startUrl],
     });
+    onProfileCreated?.(created);
+    setSelectedId(created.id);
+    setTab("check");
+    // Never hide a partially configured profile or delete data on a failure.
+    try {
+      await invoke("update_profile_tags", {
+        profileId: created.id,
+        tags: plan.tags,
+      });
+      await invoke("update_profile_note", {
+        profileId: created.id,
+        note: plan.note,
+      });
+    } catch {
+      throw new Error(t("isolation.partialCreate", { name: created.name }));
+    }
+    showSuccessToast(t("claudeWorkflow.quickOk", { name: created.name }));
+  }
+
+  async function quickCreate() {
+    const text = proxyInput.trim();
+    const parsed = await invoke<ProxyParseResult[]>("parse_txt_proxies", {
+      content: text,
+    });
+    if (
+      parsed.length !== 1 ||
+      parsed[0].status !== "parsed" ||
+      parsed[0].proxy_type.toLowerCase() !== "socks5"
+    ) {
+      throw new Error(t("isolation.explicitSocks"));
+    }
+    const item = parsed[0];
+    const createdProxy = await invoke<StoredProxy>("create_stored_proxy", {
+      name: `Claude-${item.host}-${Date.now()}`,
+      proxySettings: {
+        proxy_type: "socks5",
+        host: item.host,
+        port: item.port,
+        username: item.username,
+        password: item.password,
+      },
+    });
+    setProxyInput("");
+    const next = planAutoClaudeProfile({
+      profiles,
+      proxies: [...proxies, createdProxy],
+      proxyId: createdProxy.id,
+    });
+    if ("error" in next)
+      throw new Error(
+        t("isolation.proxyRetained", { name: createdProxy.name }),
+      );
+    try {
+      await create(next);
+    } catch (reason) {
+      throw new Error(
+        `${translateBackendError(t, reason)} ${t("isolation.proxyRetained", { name: createdProxy.name })}`,
+      );
+    }
+  }
+
+  async function repair(regenerate: boolean, target = profile) {
+    if (!target) return;
+    const fresh = (
+      await invoke<BrowserProfile[]>("list_browser_profiles")
+    ).find((p) => p.id === target.id);
+    if (!fresh) throw new Error(t("isolation.profileMissing"));
+    const config = buildIsolationWayfernConfig(fresh.wayfern_config);
+    if (regenerate) {
+      if ((!config.os || config.os === getCurrentOS()) && hostDpr) {
+        config.expected_device_pixel_ratio = hostDpr;
+      }
+      config.fingerprint = await invoke<string>("generate_sample_fingerprint", {
+        browser: fresh.browser,
+        version: fresh.version,
+        configJson: JSON.stringify(config),
+      });
+    }
+    await invoke("update_wayfern_config", { profileId: fresh.id, config });
     await invoke("update_profile_tags", {
-      profileId: profile.id,
-      tags: mergeClaudeTags(profile.tags),
+      profileId: fresh.id,
+      tags: mergeClaudeTags(fresh.tags),
     });
-  }, []);
-
-  const handleFixFlags = useCallback(
-    async (profileId: string) => {
-      const profile = profileById.get(profileId);
-      if (!profile) return;
-      setBusyId(profileId);
-      try {
-        await applyFlagFix(profile);
-        showSuccessToast(
-          t("claudeWorkflow.fixFlagsOk", {
-            defaultValue: `Fixed isolation flags on ${profile.name}`,
-          }),
-        );
-      } catch (err) {
-        console.error(err);
-        showErrorToast(
-          t("claudeWorkflow.fixFailed", {
-            defaultValue: `Fix failed: ${String(err)}`,
-          }),
-        );
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [applyFlagFix, profileById, t],
-  );
-
-  const handleRegen = useCallback(
-    async (profileId: string) => {
-      const profile = profileById.get(profileId);
-      if (!profile) return;
-      setBusyId(profileId);
-      try {
-        await applyRegen(profile);
-        showSuccessToast(
-          t("claudeWorkflow.regenOk", {
-            defaultValue: `Regenerated fingerprint for ${profile.name}`,
-          }),
-        );
-      } catch (err) {
-        console.error(err);
-        showErrorToast(
-          t("claudeWorkflow.fixFailed", {
-            defaultValue: `Regen failed: ${String(err)}`,
-          }),
-        );
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [applyRegen, profileById, t],
-  );
-
-  const handleBulkFixFlags = useCallback(async () => {
-    const targets = health
-      .filter((h) => canFlagFix(h))
-      .map((h) => profileById.get(h.profileId))
-      .filter((p): p is BrowserProfile => Boolean(p));
-    if (targets.length === 0) {
-      showSuccessToast("No flag-fixable profiles");
-      return;
-    }
-    setBulkBusy(true);
-    let ok = 0;
-    let fail = 0;
-    for (const p of targets) {
-      try {
-        await applyFlagFix(p);
-        ok += 1;
-      } catch {
-        fail += 1;
-      }
-    }
-    setBulkBusy(false);
-    showSuccessToast(`Fixed flags: ${ok} ok, ${fail} failed`);
-  }, [applyFlagFix, health, profileById]);
-
-  const createProfileFromPlan = useCallback(
-    async (plan: AutoClaudeProfilePlan): Promise<BrowserProfile> => {
-      let version: string | null = null;
-      const releaseType = "stable";
-      try {
-        const releaseTypes = await invoke<BrowserReleaseTypes>(
-          "get_browser_release_types",
-          { browserStr: "wayfern" },
-        );
-        if (releaseTypes.stable) {
-          version = releaseTypes.stable;
-        }
-      } catch {
-        /* fall through to downloaded list */
-      }
-      if (!version) {
-        const downloaded = await invoke<string[]>(
-          "get_downloaded_browser_versions",
-          { browserStr: "wayfern" },
-        );
-        version = downloaded[0] ?? null;
-      }
-      if (!version) {
-        throw new Error(
-          "No Wayfern browser version available — download Wayfern first",
-        );
-      }
-
-      const profile = await invoke<BrowserProfile>(
-        "create_browser_profile_new",
-        {
-          name: plan.name,
-          browserStr: "wayfern",
-          version,
-          releaseType,
-          proxyId: plan.proxyId,
-          vpnId: null,
-          wayfernConfig: plan.wayfernConfig,
-          groupId: null,
-          ephemeral: false,
-          dnsBlocklist: null,
-          launchHook: null,
-        },
-      );
-
-      try {
-        await invoke("update_profile_tags", {
-          profileId: profile.id,
-          tags: plan.tags,
-        });
-      } catch (err) {
-        console.error("Failed to set Claude tags:", err);
-      }
-      try {
-        await invoke("update_profile_note", {
-          profileId: profile.id,
-          note: plan.note,
-        });
-      } catch (err) {
-        console.error("Failed to set Claude note:", err);
-      }
-      return profile;
-    },
-    [],
-  );
-
-  const handleAutoCreate = useCallback(async () => {
-    const plan = planAutoClaudeProfile({ proxies, profiles });
-    if ("error" in plan) {
-      showErrorToast(plan.error);
-      return;
-    }
-    setAutoCreating(true);
-    try {
-      const profile = await createProfileFromPlan(plan);
-      onProfileCreated?.(profile);
-      showSuccessToast(
-        t("claudeWorkflow.autoCreateOk", {
-          defaultValue: `Created ${plan.name} → ${plan.proxyName} · ${plan.cardLabel} · opens ${CLAUDE_DEFAULT_START_URL}`,
-        }),
-      );
-    } catch (err) {
-      console.error(err);
-      showErrorToast(
-        t("claudeWorkflow.autoCreateFailed", {
-          defaultValue: `Auto-create failed: ${String(err)}`,
-        }),
-      );
-    } finally {
-      setAutoCreating(false);
-    }
-  }, [createProfileFromPlan, onProfileCreated, profiles, proxies, t]);
-
-  const runConsistencyCheck = useCallback(async (profile: BrowserProfile) => {
-    try {
-      const result = await invoke<ConsistencyResult>(
-        "check_profile_consistency_now",
-        { profileId: profile.id },
-      );
-      setQuickReport({ profile, result, probeError: null });
-    } catch (err) {
-      setQuickReport({ profile, result: null, probeError: String(err) });
-    }
-  }, []);
-
-  const handleQuickCreate = useCallback(async () => {
-    const text = quickProxyInput.trim();
-    if (!text) {
-      showErrorToast(t("claudeWorkflow.quickInvalid"));
-      return;
-    }
-    setQuickCreating(true);
-    setQuickReport(null);
-    try {
-      const results = await invoke<ProxyParseResult[]>("parse_txt_proxies", {
-        content: text,
-      });
-      const first = results[0];
-      let parsed: ParsedProxyLine | null = null;
-      if (first?.status === "parsed") {
-        parsed = first;
-      } else if (first?.status === "ambiguous") {
-        // Prefer host:port:user:pass over user:pass:host:port.
-        const parts = first.line.split(":");
-        if (parts.length === 4) {
-          parsed = {
-            proxy_type: "socks5",
-            host: parts[0],
-            port: Number.parseInt(parts[1], 10),
-            username: parts[2],
-            password: parts[3],
-            original_line: first.line,
-          };
-        }
-      }
-      if (!parsed) {
-        showErrorToast(t("claudeWorkflow.quickInvalid"));
-        return;
-      }
-
-      // Quick-create is deliberately SOCKS5-only. SOCKS5 is the browser's
-      // remote-DNS path; accepting HTTP here would make the safety guarantee
-      // of this one-click flow false.
-      const proxyType = text.includes("://") ? parsed.proxy_type : "socks5";
-      if (proxyType.toLowerCase() !== "socks5") {
-        showErrorToast(t("claudeWorkflow.quickSocksOnly"));
-        return;
-      }
-
-      const existingNames = new Set(proxies.map((p) => p.name.toLowerCase()));
-      let proxyName = proxyLabelFromInput(text) ?? parsed.host;
-      let suffix = 2;
-      while (existingNames.has(proxyName.toLowerCase())) {
-        proxyName = `${parsed.host}-${suffix}`;
-        suffix += 1;
-      }
-      const createdProxy = await invoke<StoredProxy>("create_stored_proxy", {
-        name: proxyName,
-        proxySettings: {
-          proxy_type: proxyType,
-          host: parsed.host,
-          port: parsed.port,
-          username: parsed.username || undefined,
-          password: parsed.password || undefined,
-          vless_uri: parsed.vless_uri || undefined,
-        },
-      });
-
-      // Fingerprint geo stamping needs the MaxMind DB; the auto-create path
-      // does not ensure it, so do it here.
-      const geoReady = await invoke<boolean>("is_geoip_database_available");
-      if (!geoReady) {
-        await invoke("download_geoip_database");
-      }
-
-      const plan = planAutoClaudeProfile({
-        proxies: [...proxies, createdProxy],
-        profiles,
-        proxyId: createdProxy.id,
-      });
-      if ("error" in plan) {
-        showErrorToast(plan.error);
-        return;
-      }
-      const profile = await createProfileFromPlan(plan);
-      onProfileCreated?.(profile);
-      setQuickProxyInput("");
-      showSuccessToast(t("claudeWorkflow.quickOk", { name: plan.name }));
-
-      setQuickReport({ profile, result: null, probeError: null });
-      await runConsistencyCheck(profile);
-    } catch (err) {
-      console.error(err);
-      showErrorToast(t("claudeWorkflow.quickFailed", { message: String(err) }));
-    } finally {
-      setQuickCreating(false);
-    }
-  }, [
-    createProfileFromPlan,
-    onProfileCreated,
-    profiles,
-    proxies,
-    quickProxyInput,
-    runConsistencyCheck,
-    t,
-  ]);
-
-  const handleReportRetry = useCallback(async () => {
-    if (!quickReport) return;
-    setReportBusy(true);
-    try {
-      await runConsistencyCheck(quickReport.profile);
-    } finally {
-      setReportBusy(false);
-    }
-  }, [quickReport, runConsistencyCheck]);
-
-  const handleReportMatch = useCallback(async () => {
-    const exitIp = quickReport?.result?.exit_ip;
-    if (!quickReport || !exitIp) return;
-    setReportBusy(true);
-    try {
-      await invoke("match_profile_fingerprint_to_exit", {
-        profileId: quickReport.profile.id,
-        exitIp,
-      });
-      await runConsistencyCheck(quickReport.profile);
-      showSuccessToast(t("claudeWorkflow.reportMatchedOk"));
-    } catch (err) {
-      showErrorToast(t("claudeWorkflow.quickFailed", { message: String(err) }));
-    } finally {
-      setReportBusy(false);
-    }
-  }, [quickReport, runConsistencyCheck, t]);
+    setProbe(null);
+    setConfirmRegen(false);
+    showSuccessToast(t("isolation.repaired"));
+  }
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex max-h-[90vh] max-w-[min(40rem,calc(100%-2rem))] flex-col">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <LuShield className="size-5" />
-            {t("claudeWorkflow.title", {
-              defaultValue: "Claude isolation workflow",
-            })}
-          </DialogTitle>
-        </DialogHeader>
-
-        <ScrollArea className="min-h-0 flex-1">
-          <div className="space-y-5 py-2 pr-3">
-            <section className="space-y-2">
-              <h3 className="text-sm font-semibold">
-                {t("claudeWorkflow.rulesTitle", {
-                  defaultValue: "Hard rules (1 · 1 · 1 · 1)",
-                })}
-              </h3>
-              <ul className="space-y-1.5 text-sm text-muted-foreground">
-                {CLAUDE_ISOLATION_RULES.map((rule) => (
-                  <li key={rule} className="flex gap-2">
-                    <LuCircleCheck className="mt-0.5 size-4 shrink-0 text-emerald-600" />
-                    <span>{rule}</span>
-                  </li>
+    <>
+      <Dialog
+        open={isOpen}
+        onOpenChange={(open) => !open && !busy && onClose()}
+      >
+        <DialogContent className="flex h-[min(850px,92vh)] max-w-[min(1080px,calc(100%-2rem))] flex-col gap-0 overflow-hidden p-0">
+          <DialogHeader className="border-b px-6 py-5">
+            <DialogTitle className="flex items-center gap-2">
+              <LuShield className="size-5" />
+              {t("claudeWorkflow.title")}
+            </DialogTitle>
+            <DialogDescription>{t("isolation.description")}</DialogDescription>
+          </DialogHeader>
+          <div
+            className="flex items-center gap-2 border-b px-6 py-3"
+            role="tablist"
+            aria-label={t("claudeWorkflow.title")}
+          >
+            {(["check", "usage", "create"] as const).map((value) => (
+              <Button
+                key={value}
+                role="tab"
+                aria-selected={tab === value}
+                variant={tab === value ? "secondary" : "ghost"}
+                disabled={Boolean(busy)}
+                onClick={() => {
+                  setTab(value);
+                  setError(null);
+                }}
+              >
+                {t(`isolation.${value}`)}
+              </Button>
+            ))}
+            <span className="ml-auto text-xs text-muted-foreground">
+              {t("isolation.localOnly")}
+            </span>
+          </div>
+          {error && (
+            <div
+              role="alert"
+              className="mx-6 mt-4 flex items-start gap-3 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive-text"
+            >
+              <span className="min-w-0 flex-1 break-words">{error}</span>
+              <Button variant="ghost" size="sm" onClick={() => setError(null)}>
+                {t("common.buttons.close")}
+              </Button>
+            </div>
+          )}
+          {tab === "usage" ? (
+            <div className="min-h-0 flex-1 space-y-5 overflow-auto p-6">
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {t("residential.title")}
+                </h2>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  {t("residential.scope")}
+                </p>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                {[
+                  [
+                    "residential.labelDuplicates",
+                    usage.duplicateLabelProfiles.length,
+                  ],
+                  [
+                    "residential.ipDuplicates",
+                    usage.duplicateIpProfiles.length,
+                  ],
+                  ["residential.unknown", usage.unknownIp.count],
+                  ["residential.expired", usage.expiredIp.count],
+                ].map(([label, count]) => (
+                  <SettingsPanel key={String(label)} className="border">
+                    <p className="text-xs text-muted-foreground">
+                      {t(String(label))}
+                    </p>
+                    <p className="mt-2 text-xl font-semibold">
+                      {observationLoading ? "—" : count}
+                    </p>
+                  </SettingsPanel>
                 ))}
-              </ul>
-            </section>
-
-            <section className="space-y-2">
-              <h3 className="text-sm font-semibold">
-                {t("claudeWorkflow.stepsTitle", {
-                  defaultValue: "Create a new Claude profile",
+              </div>
+              <fieldset className="flex flex-wrap gap-2">
+                <legend className="sr-only">{t("residential.filters")}</legend>
+                {(["all", "label", "ip"] as const).map((filter) => (
+                  <Button
+                    key={filter}
+                    variant={usageFilter === filter ? "secondary" : "outline"}
+                    size="sm"
+                    aria-pressed={usageFilter === filter}
+                    onClick={() => setUsageFilter(filter)}
+                  >
+                    {t(`residential.filter.${filter}`)}
+                  </Button>
+                ))}
+              </fieldset>
+              {observationLoading && (
+                <p role="status" className="text-sm">
+                  {t("common.buttons.loading")}
+                </p>
+              )}
+              {observationError && (
+                <p role="alert" className="text-sm text-destructive-text">
+                  {observationError}
+                </p>
+              )}
+              {[
+                {
+                  title: "residential.labels",
+                  groups:
+                    usageFilter === "label"
+                      ? usage.byLabel.filter((g) => g.count > 1)
+                      : [
+                          ...usage.byLabel,
+                          {
+                            ...usage.unknownLabel,
+                            key: t("residential.unknownLabel"),
+                          },
+                        ],
+                  hidden: usageFilter === "ip",
+                },
+                {
+                  title: "residential.exits",
+                  groups:
+                    usageFilter === "ip"
+                      ? usage.byIp.filter((g) => g.count > 1)
+                      : [
+                          ...usage.byIp,
+                          { ...usage.expiredIp, key: t("residential.expired") },
+                          usage.unknownIp,
+                        ],
+                  hidden: usageFilter === "label",
+                },
+              ]
+                .filter((section) => !section.hidden)
+                .map((section) => {
+                  const groups = section.groups.filter(
+                    (group) => group.count > 0,
+                  );
+                  return (
+                    <section key={section.title} className="space-y-3">
+                      <h3 className="text-sm font-semibold">
+                        {t(section.title)}
+                      </h3>
+                      {groups.length === 0 && (
+                        <p className="text-sm text-muted-foreground">
+                          {t("residential.empty")}
+                        </p>
+                      )}
+                      {groups.map((group) => (
+                        <SettingsPanel
+                          key={group.key ?? "unknown"}
+                          className="space-y-3 border"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="break-all text-sm font-medium">
+                              {group.key ?? t("residential.unknown")}
+                            </span>
+                            <Badge variant="outline">
+                              {t("residential.count", { count: group.count })}
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            {t("residential.lastObserved", {
+                              time: group.lastObservedAt
+                                ? new Date(
+                                    group.lastObservedAt * 1000,
+                                  ).toLocaleString()
+                                : t("residential.unknown"),
+                            })}
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            {group.profiles.map((member) => (
+                              <Button
+                                key={member.id}
+                                variant="outline"
+                                size="sm"
+                                className="max-w-full"
+                                onClick={() => {
+                                  setSelectedId(member.id);
+                                  setShowAll(true);
+                                  setTab("check");
+                                }}
+                              >
+                                <span className="truncate">{member.name}</span>
+                                <LuArrowRight className="size-3 shrink-0" />
+                              </Button>
+                            ))}
+                          </div>
+                        </SettingsPanel>
+                      ))}
+                    </section>
+                  );
                 })}
-              </h3>
-              <ol className="list-decimal space-y-1.5 pl-5 text-sm text-muted-foreground">
-                <li>
-                  Auto-create picks a free 家宽 node (no active{" "}
-                  {PROXY_REUSE_COOLDOWN_DAYS}-day lease).
-                </li>
-                <li>
-                  Same node can be reused only after {PROXY_REUSE_COOLDOWN_DAYS}{" "}
-                  days.
-                </li>
-                <li>
-                  Card label auto-assigned (card-A/B…) — never paste full PAN.
-                </li>
-                <li>Launch opens {CLAUDE_DEFAULT_START_URL} by default.</li>
-                <li>
-                  DON forces: geoip from proxy, WebRTC blocked, fixed
-                  fingerprint, host DPR.
-                </li>
-              </ol>
-              {autoPlanPreview && (
-                <p className="rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
-                  Next auto:{" "}
-                  <span className="font-medium text-foreground">
-                    {autoPlanPreview.name}
+            </div>
+          ) : tab === "check" ? (
+            <div className="grid min-h-0 flex-1 grid-cols-1 overflow-auto md:grid-cols-[260px_minmax(0,1fr)] md:overflow-hidden">
+              <aside className="flex min-h-0 flex-col border-b bg-muted/20 md:border-r md:border-b-0">
+                <div className="flex items-center justify-between gap-2 px-4 py-3">
+                  <span className="text-xs font-medium">
+                    {t("isolation.profiles", { count: visible.length })}
                   </span>
-                  {" · "}
-                  {autoPlanPreview.proxyName}
-                  {" · "}
-                  {autoPlanPreview.cardLabel}
-                  {" · "}
-                  {autoPlanPreview.startUrl}
-                </p>
-              )}
-              {!freeProxy && (
-                <p className="text-sm text-amber-700 dark:text-amber-300">
-                  No free node right now — all proxies are inside the{" "}
-                  {PROXY_REUSE_COOLDOWN_DAYS}-day lease window.
-                </p>
-              )}
-              <div className="mt-2 flex flex-wrap gap-2">
-                <RippleButton
-                  disabled={autoCreating || !freeProxy}
-                  onClick={() => {
-                    void handleAutoCreate();
-                  }}
-                >
-                  {autoCreating ? (
-                    <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-                  ) : (
-                    <LuSparkles className="mr-1 size-3.5" />
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    aria-pressed={showAll}
+                    onClick={() => setShowAll(!showAll)}
+                  >
+                    {t(showAll ? "isolation.claudeOnly" : "isolation.showAll")}
+                  </Button>
+                </div>
+                <div className="max-h-52 overflow-auto p-2 md:max-h-none md:flex-1">
+                  {visible.map((h) => (
+                    <button
+                      type="button"
+                      key={h.profileId}
+                      disabled={Boolean(busy)}
+                      aria-pressed={selected?.profileId === h.profileId}
+                      onClick={() => {
+                        setSelectedId(h.profileId);
+                        setConfirmRegen(false);
+                        setError(null);
+                      }}
+                      className={cn(
+                        "mb-1 flex w-full items-center gap-3 rounded-lg border border-transparent p-3 text-left transition-colors hover:bg-muted focus-visible:outline-2 focus-visible:outline-primary",
+                        selected?.profileId === h.profileId &&
+                          "border-border bg-background shadow-sm",
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          "size-2 shrink-0 rounded-full",
+                          h.score === "ok"
+                            ? "bg-muted-foreground"
+                            : h.score === "block"
+                              ? "bg-destructive"
+                              : "bg-warning",
+                        )}
+                      />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-sm font-medium">
+                          {h.profileName}
+                        </span>
+                        <span className="text-xs text-muted-foreground">
+                          {t(
+                            h.issues.length
+                              ? "isolation.issueCount"
+                              : "isolation.configClear",
+                            { count: h.issues.length },
+                          )}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
+                  {visible.length === 0 && (
+                    <p className="p-3 text-sm text-muted-foreground">
+                      {t("isolation.empty")}
+                    </p>
                   )}
-                  {t("claudeWorkflow.autoCreateCta", {
-                    defaultValue: "Auto-create Claude profile",
-                  })}
-                </RippleButton>
-                <RippleButton
+                </div>
+                <Button
                   variant="outline"
+                  className="m-3"
+                  onClick={() => setTab("create")}
+                >
+                  <LuPlus className="size-4" />
+                  {t("isolation.create")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="mx-3 mb-3"
+                  disabled={
+                    Boolean(busy) ||
+                    !health.some(
+                      (h) =>
+                        canFlagFix(h) &&
+                        profiles.some(
+                          (p) =>
+                            p.id === h.profileId &&
+                            isClaudeProfile(p) &&
+                            !p.process_id,
+                        ),
+                    )
+                  }
+                  onClick={() =>
+                    void action("bulk", async () => {
+                      const targets = health
+                        .filter(canFlagFix)
+                        .flatMap((h) =>
+                          profiles.filter(
+                            (p) =>
+                              p.id === h.profileId &&
+                              isClaudeProfile(p) &&
+                              !p.process_id,
+                          ),
+                        );
+                      for (const target of targets) await repair(false, target);
+                    })
+                  }
+                >
+                  {t("isolation.fixAllFlags")}
+                </Button>
+              </aside>
+              <div className="min-w-0 space-y-5 overflow-auto p-5 md:p-6">
+                {profile && selected ? (
+                  <>
+                    <div>
+                      <h2 className="truncate text-lg font-semibold">
+                        {profile.name}
+                      </h2>
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        {t("isolation.configNotProof")}
+                      </p>
+                    </div>
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      <SettingsPanel className="border">
+                        <p className="text-xs text-muted-foreground">
+                          {t("isolation.configCheck")}
+                        </p>
+                        <p className="mt-2 text-xl font-semibold">
+                          {t(
+                            selected.issues.length
+                              ? "isolation.issueCount"
+                              : "isolation.configClear",
+                            { count: selected.issues.length },
+                          )}
+                        </p>
+                      </SettingsPanel>
+                      <SettingsPanel className="border">
+                        <p className="text-xs text-muted-foreground">
+                          {t("isolation.runtime")}
+                        </p>
+                        <p className="mt-2 text-sm font-medium">
+                          {t("isolation.notVerified")}
+                        </p>
+                        <Button
+                          className="mt-2"
+                          variant="outline"
+                          size="sm"
+                          disabled={Boolean(busy)}
+                          onClick={() => setAuditProfile(profile)}
+                        >
+                          <LuFingerprint className="size-4" />
+                          {t("fingerprintAudit.run")}
+                        </Button>
+                      </SettingsPanel>
+                    </div>
+                    <dl className="grid grid-cols-2 gap-3 rounded-xl border p-4 text-xs sm:grid-cols-3">
+                      {[
+                        [
+                          t("isolation.route"),
+                          selectedProxy?.name ??
+                            t(
+                              profile.proxy_id
+                                ? "isolation.missingRoute"
+                                : "isolation.noRoute",
+                            ),
+                        ],
+                        [
+                          t("isolation.savedDpr"),
+                          String(fingerprint.devicePixelRatio ?? "—"),
+                        ],
+                        [
+                          t("isolation.expectedDpr"),
+                          String(
+                            profile.wayfern_config
+                              ?.expected_device_pixel_ratio ??
+                              hostDpr ??
+                              "—",
+                          ),
+                        ],
+                      ].map(([label, value]) => (
+                        <div key={label} className="min-w-0">
+                          <dt className="text-muted-foreground">{label}</dt>
+                          <dd className="mt-1 break-words font-medium">
+                            {value}
+                          </dd>
+                        </div>
+                      ))}
+                    </dl>
+                    <section className="space-y-2">
+                      <h3 className="text-sm font-semibold">
+                        {t("isolation.repairTitle")}
+                      </h3>
+                      {selected.issues.map((issue) => (
+                        <div key={issue.code} className="rounded-lg border p-3">
+                          <div className="flex items-center gap-2">
+                            <Badge
+                              variant="outline"
+                              className={
+                                issue.severity === "block"
+                                  ? "text-destructive-text"
+                                  : "text-warning-text"
+                              }
+                            >
+                              {t(
+                                issue.severity === "block"
+                                  ? "isolation.attention"
+                                  : "isolation.review",
+                              )}
+                            </Badge>
+                            <span className="text-xs text-muted-foreground">
+                              {issue.code}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-sm">
+                            {t(`isolation.issues.${issue.code}`)}
+                          </p>
+                        </div>
+                      ))}
+                      {!selected.issues.length && (
+                        <p className="rounded-lg border p-4 text-sm text-muted-foreground">
+                          {t("isolation.noIssues")}
+                        </p>
+                      )}
+                      <div className="flex flex-wrap gap-2 pt-2">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            Boolean(busy) ||
+                            Boolean(profile.process_id) ||
+                            !canFlagFix(selected)
+                          }
+                          onClick={() =>
+                            void action("repair", () => repair(false))
+                          }
+                        >
+                          {busy === "repair" ? (
+                            <LuLoaderCircle className="size-4 animate-spin" />
+                          ) : (
+                            <LuWrench className="size-4" />
+                          )}
+                          {t("isolation.fixFlags")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={
+                            Boolean(busy) ||
+                            Boolean(profile.process_id) ||
+                            !needsFingerprintRegen(selected)
+                          }
+                          onClick={() => setConfirmRegen(!confirmRegen)}
+                        >
+                          {t("isolation.regenerate")}
+                        </Button>
+                      </div>
+                      {profile.process_id && (
+                        <p className="text-xs text-muted-foreground">
+                          {t("isolation.stopFirst")}
+                        </p>
+                      )}
+                      {confirmRegen && (
+                        <SettingsPanel className="space-y-3 border border-warning/40">
+                          <p className="text-sm">
+                            {t("isolation.regenWarning")}
+                          </p>
+                          <Button
+                            disabled={Boolean(busy)}
+                            size="sm"
+                            onClick={() =>
+                              void action("regenerate", () => repair(true))
+                            }
+                          >
+                            {t("isolation.confirmRegen")}
+                          </Button>
+                        </SettingsPanel>
+                      )}
+                    </section>
+                    <section className="space-y-3 rounded-xl border p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <h3 className="text-sm font-semibold">
+                          {t("isolation.exitCheck")}
+                        </h3>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          disabled={Boolean(busy) || !selectedProxy}
+                          onClick={() =>
+                            void action("probe", async () => {
+                              setProbe(null);
+                              const next = await invoke<ConsistencyResult>(
+                                "check_profile_consistency_now",
+                                { profileId: profile.id },
+                              );
+                              setProbe({ profileId: profile.id, result: next });
+                            })
+                          }
+                        >
+                          {busy === "probe" && (
+                            <LuLoaderCircle className="size-4 animate-spin" />
+                          )}
+                          {t("isolation.checkExit")}
+                        </Button>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        {t("isolation.exitScope")}
+                      </p>
+                      {result ? (
+                        <>
+                          <p role="status" className="text-sm">
+                            {t(
+                              !result.checked
+                                ? "claudeWorkflow.reportNotChecked"
+                                : result.consistent
+                                  ? "claudeWorkflow.reportConsistent"
+                                  : "isolation.exitMismatch",
+                            )}
+                          </p>
+                          <p className="break-words font-mono text-xs">
+                            {result.exit_ip ?? "—"} ·{" "}
+                            {result.exit_timezone ?? "—"} /{" "}
+                            {result.fingerprint_timezone ?? "—"}
+                          </p>
+                          {result.checked &&
+                            !result.consistent &&
+                            result.exit_ip && (
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                disabled={
+                                  Boolean(busy) || Boolean(profile.process_id)
+                                }
+                                onClick={() =>
+                                  void action("match", async () => {
+                                    await invoke(
+                                      "match_profile_fingerprint_to_exit",
+                                      {
+                                        profileId: profile.id,
+                                        exitIp: result.exit_ip,
+                                      },
+                                    );
+                                    setProbe(null);
+                                    showSuccessToast(
+                                      t("isolation.recheckRequired"),
+                                    );
+                                  })
+                                }
+                              >
+                                {t("claudeWorkflow.reportMatchCta")}
+                              </Button>
+                            )}
+                        </>
+                      ) : (
+                        <p className="text-xs text-muted-foreground">
+                          {t("isolation.notVerified")}
+                        </p>
+                      )}
+                    </section>
+                  </>
+                ) : (
+                  <div className="flex min-h-60 flex-col items-center justify-center gap-3 text-center">
+                    <LuShield className="size-8 text-muted-foreground" />
+                    <h2 className="font-semibold">
+                      {t("isolation.emptyTitle")}
+                    </h2>
+                    <p className="max-w-sm text-sm text-muted-foreground">
+                      {t("isolation.empty")}
+                    </p>
+                    <Button onClick={() => setTab("create")}>
+                      {t("isolation.create")}
+                      <LuArrowRight className="size-4" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            <div className="min-h-0 space-y-5 overflow-auto p-6">
+              <div>
+                <h2 className="text-lg font-semibold">
+                  {t("isolation.createTitle")}
+                </h2>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {t("isolation.createDescription")}
+                </p>
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <SettingsPanel className="space-y-4 border">
+                  <h3 className="text-sm font-semibold">
+                    {t("isolation.existingProxy")}
+                  </h3>
+                  {"error" in plan ? (
+                    <p className="text-sm text-muted-foreground">
+                      {t("isolation.noFreeProxy")}
+                    </p>
+                  ) : (
+                    <dl className="space-y-3 text-sm">
+                      <div>
+                        <dt className="text-xs text-muted-foreground">
+                          {t("isolation.route")}
+                        </dt>
+                        <dd>{plan.proxyName}</dd>
+                      </div>
+                      <div>
+                        <dt className="text-xs text-muted-foreground">
+                          {t("isolation.profileName")}
+                        </dt>
+                        <dd>{plan.name}</dd>
+                      </div>
+                    </dl>
+                  )}
+                  <Button
+                    disabled={Boolean(busy) || "error" in plan}
+                    onClick={() => {
+                      if (!("error" in plan))
+                        void action("create", () => create(plan));
+                    }}
+                  >
+                    {busy === "create" && (
+                      <LuLoaderCircle className="size-4 animate-spin" />
+                    )}
+                    {t("claudeWorkflow.autoCreateCta")}
+                  </Button>
+                </SettingsPanel>
+                <SettingsPanel className="space-y-4 border">
+                  <Label htmlFor="quick-proxy-input">
+                    {t("claudeWorkflow.quickTitle")}
+                  </Label>
+                  <Input
+                    id="quick-proxy-input"
+                    type="password"
+                    value={proxyInput}
+                    onChange={(e) => setProxyInput(e.target.value)}
+                    placeholder={t("claudeWorkflow.quickPlaceholder")}
+                    autoComplete="off"
+                    spellCheck={false}
+                    disabled={Boolean(busy)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    {t("isolation.explicitSocks")}
+                  </p>
+                  <Button
+                    disabled={Boolean(busy) || !proxyInput.trim()}
+                    onClick={() => void action("quick", quickCreate)}
+                  >
+                    {busy === "quick" && (
+                      <LuLoaderCircle className="size-4 animate-spin" />
+                    )}
+                    {t("claudeWorkflow.quickCta")}
+                  </Button>
+                </SettingsPanel>
+              </div>
+              <SettingsPanel className="space-y-3 border">
+                <h3 className="text-sm font-semibold">
+                  {t("isolation.preserved")}
+                </h3>
+                <p className="text-sm text-muted-foreground">
+                  {t("isolation.boundaries")}
+                </p>
+                <Button
+                  variant="outline"
+                  disabled={Boolean(busy)}
                   onClick={() => {
                     onClose();
                     onCreateProfile();
                   }}
                 >
-                  {t("claudeWorkflow.createCta", {
-                    defaultValue: "Manual create…",
-                  })}
-                </RippleButton>
-                <RippleButton
-                  variant="outline"
-                  disabled={bulkBusy}
-                  onClick={() => {
-                    void handleBulkFixFlags();
-                  }}
-                >
-                  {bulkBusy ? (
-                    <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-                  ) : (
-                    <LuWrench className="mr-1 size-3.5" />
-                  )}
-                  Fix all flags
-                </RippleButton>
-              </div>
-
-              <div className="mt-3 space-y-2 rounded-md border p-3">
-                <Label
-                  htmlFor="quick-proxy-input"
-                  className="text-xs font-medium"
-                >
-                  {t("claudeWorkflow.quickTitle")}
-                </Label>
-                <div className="flex flex-wrap items-center gap-2">
-                  <Input
-                    id="quick-proxy-input"
-                    value={quickProxyInput}
-                    onChange={(e) => {
-                      setQuickProxyInput(e.target.value);
-                    }}
-                    placeholder={t("claudeWorkflow.quickPlaceholder")}
-                    disabled={quickCreating}
-                    className="min-w-0 flex-1 font-mono text-xs"
-                    autoCapitalize="none"
-                    autoComplete="off"
-                    spellCheck={false}
-                  />
-                  <Badge variant="outline">SOCKS5</Badge>
-                  <RippleButton
-                    disabled={quickCreating || !quickProxyInput.trim()}
-                    onClick={() => {
-                      void handleQuickCreate();
-                    }}
-                  >
-                    {quickCreating ? (
-                      <LuLoaderCircle className="mr-1 size-3.5 animate-spin" />
-                    ) : (
-                      <LuZap className="mr-1 size-3.5" />
-                    )}
-                    {t("claudeWorkflow.quickCta")}
-                  </RippleButton>
-                </div>
-                <p className="text-xs text-muted-foreground">
-                  {t("claudeWorkflow.quickSocksOnly")}
-                </p>
-                {quickReport && (
-                  <QuickReportCard
-                    report={quickReport}
-                    busy={reportBusy}
-                    onMatch={() => {
-                      void handleReportMatch();
-                    }}
-                    onRetry={() => {
-                      void handleReportRetry();
-                    }}
-                  />
-                )}
-              </div>
-            </section>
-
-            <section className="space-y-2">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3 className="text-sm font-semibold">
-                    {t("claudeWorkflow.healthTitle", {
-                      defaultValue: "Profile health scan",
-                    })}
-                  </h3>
-                  <span className="text-xs text-muted-foreground">
-                    {counts.total} profiles · {counts.ok} ok · {counts.warn}{" "}
-                    warn · {counts.block} block
-                  </span>
-                </div>
-                {hasClaudeProfiles && (
-                  <div className="flex items-center gap-1 rounded-md border p-0.5 text-xs">
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded px-2 py-0.5 font-medium transition-colors",
-                        showClaudeOnly
-                          ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                      onClick={() => setShowClaudeOnly(true)}
-                    >
-                      Claude only
-                    </button>
-                    <button
-                      type="button"
-                      className={cn(
-                        "rounded px-2 py-0.5 font-medium transition-colors",
-                        !showClaudeOnly
-                          ? "bg-primary text-primary-foreground"
-                          : "text-muted-foreground hover:text-foreground",
-                      )}
-                      onClick={() => setShowClaudeOnly(false)}
-                    >
-                      All profiles
-                    </button>
-                  </div>
-                )}
-              </div>
-              {filteredHealth.length === 0 ? (
-                <p className="text-sm text-muted-foreground">
-                  No profiles match the filter. Create one with a dedicated 家宽
-                  proxy.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {filteredHealth.map((h) => (
-                    <HealthRow
-                      key={h.profileId}
-                      health={h}
-                      profile={profileById.get(h.profileId)}
-                      busy={busyId === h.profileId || bulkBusy}
-                      onFixFlags={() => {
-                        void handleFixFlags(h.profileId);
-                      }}
-                      onRegenFingerprint={() => {
-                        void handleRegen(h.profileId);
-                      }}
-                    />
-                  ))}
-                </div>
-              )}
-            </section>
-
-            <p
-              className={cn(
-                "rounded-md border border-border/60 bg-muted/40 p-3 text-xs text-muted-foreground",
-              )}
-            >
-              Isolation reduces network/device linking. Claude may still ban for
-              payment reuse, content policy, or bulk automation. One card per
-              profile is operational discipline — DON only stores your labels.
-              Shared proxies and DPR mismatches block launch until fixed.
-            </p>
-          </div>
-        </ScrollArea>
-      </DialogContent>
-    </Dialog>
+                  {t("claudeWorkflow.createCta")}
+                </Button>
+              </SettingsPanel>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
+      <FingerprintAuditDialog
+        key={auditProfile?.id ?? "none"}
+        isOpen={Boolean(auditProfile)}
+        profile={auditProfile}
+        onClose={() => setAuditProfile(null)}
+      />
+    </>
   );
 }

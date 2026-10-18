@@ -84,6 +84,7 @@ mod browser_tabs;
 mod browser_version_manager;
 mod cdp_target;
 mod checksum;
+mod data_recovery;
 mod default_browser;
 pub mod dns_blocklist;
 mod downloaded_browsers_registry;
@@ -149,6 +150,7 @@ mod window_decorations;
 // mod theme_detector; // removed: theme detection handled in webview via CSS prefers-color-scheme
 mod agent_console;
 mod agent_schedules;
+mod browser_agent;
 mod cloud_api;
 pub mod cloud_auth;
 mod cloud_errors;
@@ -3448,6 +3450,8 @@ pub fn run_with_builder(
       confirm_quit,
       hide_to_tray,
       update_tray_menu,
+      data_recovery::get_data_recovery_items,
+      data_recovery::recover_data_file,
       get_supported_browsers,
       is_browser_supported_on_platform,
       download_browser,
@@ -3605,6 +3609,7 @@ pub fn run_with_builder(
       get_traffic_stats_for_period,
       fingerprint_consistency::match_profile_fingerprint_to_exit,
       fingerprint_consistency::check_profile_consistency_now,
+      fingerprint_consistency::get_profile_exit_observations,
       launch_gate::get_profile_pre_launch_checks,
       wayfern_persona::get_profile_persona,
       recorder::start_recipe_recording,
@@ -3758,6 +3763,12 @@ pub fn run_with_builder(
       agent_console::set_agents_paused,
       agent_console::clear_agent_activity,
       agent_console::show_profile_window,
+      browser_agent::get_browser_agent_config,
+      browser_agent::save_browser_agent_config,
+      browser_agent::get_browser_agent_tabs,
+      browser_agent::start_browser_agent_task,
+      browser_agent::get_browser_agent_task,
+      browser_agent::control_browser_agent_task,
       // Profile password commands
       set_profile_password,
       change_profile_password,

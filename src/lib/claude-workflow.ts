@@ -1,20 +1,14 @@
 import {
+  getCurrentOS,
   getDefaultWayfernConfig,
   resolveWayfernWebRtcMode,
 } from "@/lib/wayfern-defaults";
 import type { BrowserProfile, StoredProxy, WayfernConfig } from "@/types";
 
-/** Days a residential node stays reserved for one Claude profile. */
-export const PROXY_REUSE_COOLDOWN_DAYS = 3;
-
-export const PROXY_REUSE_COOLDOWN_SECS =
-  PROXY_REUSE_COOLDOWN_DAYS * 24 * 60 * 60;
-
 /** Hard isolation model for Claude accounts on DON. */
 export const CLAUDE_ISOLATION_RULES = [
   "1 profile = 1 Claude account",
-  "1 profile = 1 residential (家宽) sticky IP (active lease)",
-  `Same node may be reused only after ${PROXY_REUSE_COOLDOWN_DAYS} days`,
+  "每个档案配置家宽路由；重复使用仅提示，不限制等待时间",
   "1 profile = 1 timezone matching that IP",
   "1 profile = 1 payment card (do not share cards across profiles)",
   "Fingerprint stays fixed (never randomize on launch)",
@@ -47,18 +41,6 @@ export interface ClaudeCreateFields {
   residentialLabel?: string;
   /** Start URL stamped into the note (launch default). */
   startUrl?: string;
-}
-
-export interface ProxyHoldInfo {
-  profile: BrowserProfile;
-  /** Unix seconds when the lease started. */
-  holdStart: number;
-  /** Unix seconds when the node becomes free for a new Claude profile. */
-  freeAt: number;
-  /** True while now < freeAt. */
-  active: boolean;
-  /** Whole days remaining (ceil), 0 when free. */
-  daysRemaining: number;
 }
 
 export interface AutoClaudeProfilePlan {
@@ -96,8 +78,6 @@ export function buildClaudeNote(fields: ClaudeCreateFields): string {
       ? `card: ${fields.cardLabel.trim()}`
       : "card: (set unique card label — never share cards)",
     `start_url: ${startUrl}`,
-    `proxy_lease_days: ${PROXY_REUSE_COOLDOWN_DAYS}`,
-    `rule: 1 profile · 1 家宽 IP · 1 timezone · 1 card · reuse node after ${PROXY_REUSE_COOLDOWN_DAYS}d`,
   ];
   return lines.join("\n");
 }
@@ -106,33 +86,124 @@ export function buildClaudeTags(): string[] {
   return ["claude", "residential", "don-isolation"];
 }
 
-/** Prefer created_at; fall back to last_launch for legacy profiles. */
-export function profileProxyHoldStart(profile: BrowserProfile): number | null {
-  if (profile.created_at != null && profile.created_at > 0) {
-    return profile.created_at;
-  }
-  if (profile.last_launch != null && profile.last_launch > 0) {
-    return profile.last_launch;
-  }
-  return null;
+export interface ResidentialObservation {
+  profile_id: string;
+  proxy_id: string | null;
+  ip: string | null;
+  observed_at: number | null;
+  fresh: boolean;
 }
 
-/**
- * Lease info for a profile that currently references this proxy.
- * Missing timestamps are treated as still holding (conservative).
- */
-export function getProxyHoldInfo(
-  profile: BrowserProfile,
-  nowSecs: number = Math.floor(Date.now() / 1000),
-): ProxyHoldInfo | null {
-  if (!profile.proxy_id) return null;
-  const holdStart = profileProxyHoldStart(profile) ?? nowSecs;
-  const freeAt = holdStart + PROXY_REUSE_COOLDOWN_SECS;
-  const active = nowSecs < freeAt;
-  const daysRemaining = active
-    ? Math.max(1, Math.ceil((freeAt - nowSecs) / (24 * 60 * 60)))
-    : 0;
-  return { profile, holdStart, freeAt, active, daysRemaining };
+export interface ResidentialUsageGroup {
+  key: string | null;
+  profiles: BrowserProfile[];
+  count: number;
+  /** Latest valid current-route observation in this group, in Unix seconds. */
+  lastObservedAt: number | null;
+}
+
+export interface ResidentialUsage {
+  byLabel: ResidentialUsageGroup[];
+  byIp: ResidentialUsageGroup[];
+  unknownLabel: ResidentialUsageGroup;
+  unknownIp: ResidentialUsageGroup;
+  expiredIp: ResidentialUsageGroup;
+  duplicateLabelProfiles: BrowserProfile[];
+  duplicateIpProfiles: BrowserProfile[];
+}
+
+/** Current route-cache snapshot only; never an account identity or reuse gate. */
+export function buildResidentialUsage(
+  profiles: BrowserProfile[],
+  observations: ResidentialObservation[],
+  nowSecs: number,
+): ResidentialUsage {
+  const latest = new Map<string, ResidentialObservation>();
+  for (const observation of observations) {
+    const previous = latest.get(observation.profile_id);
+    if (
+      !previous ||
+      (observation.observed_at ?? -Infinity) >=
+        (previous.observed_at ?? -Infinity)
+    ) {
+      latest.set(observation.profile_id, observation);
+    }
+  }
+  const labels = new Map<string, ResidentialUsageGroup>();
+  const ips = new Map<string, ResidentialUsageGroup>();
+  const group = (key: string | null): ResidentialUsageGroup => ({
+    key,
+    profiles: [],
+    count: 0,
+    lastObservedAt: null,
+  });
+  const unknownLabel = group(null);
+  const unknownIp = group(null);
+  const expiredIp = group(null);
+  const add = (
+    target: ResidentialUsageGroup,
+    profile: BrowserProfile,
+    observedAt: number | null,
+  ) => {
+    target.profiles.push(profile);
+    target.count += 1;
+    if (observedAt !== null) {
+      target.lastObservedAt = Math.max(
+        target.lastObservedAt ?? observedAt,
+        observedAt,
+      );
+    }
+  };
+  const getGroup = (map: Map<string, ResidentialUsageGroup>, key: string) => {
+    const target = map.get(key) ?? group(key);
+    map.set(key, target);
+    return target;
+  };
+  for (const profile of profiles) {
+    const observation = latest.get(profile.id);
+    const time = observation?.observed_at;
+    const ip = observation?.ip?.trim();
+    const known =
+      !!ip &&
+      observation?.proxy_id === (profile.proxy_id ?? null) &&
+      time != null &&
+      Number.isFinite(time) &&
+      time > 0 &&
+      time <= nowSecs;
+    const valid =
+      known && observation?.fresh === true && nowSecs - time < 30 * 60;
+    const observedAt = known ? time : null;
+    const label = profile.note
+      ?.match(/^\s*residential\s*:[ \t]*([^\r\n]*)/im)?.[1]
+      ?.trim();
+    add(
+      label && label !== "(set 家宽 label)"
+        ? getGroup(labels, label)
+        : unknownLabel,
+      profile,
+      observedAt,
+    );
+    add(
+      valid && ip ? getGroup(ips, ip) : known ? expiredIp : unknownIp,
+      profile,
+      observedAt,
+    );
+  }
+  const byLabel = [...labels.values()];
+  const byIp = [...ips.values()];
+  return {
+    byLabel,
+    byIp,
+    unknownLabel,
+    unknownIp,
+    expiredIp,
+    duplicateLabelProfiles: byLabel
+      .filter((g) => g.count > 1)
+      .flatMap((g) => g.profiles),
+    duplicateIpProfiles: byIp
+      .filter((g) => g.count > 1)
+      .flatMap((g) => g.profiles),
+  };
 }
 
 /** Profiles currently bound to this proxy (any age). */
@@ -148,46 +219,21 @@ export function profilesSharingProxy(
   );
 }
 
-/** Profiles whose lease on this proxy is still active. */
-export function profilesHoldingProxy(
-  proxyId: string | undefined | null,
-  profiles: BrowserProfile[],
-  exceptProfileId?: string,
-  nowSecs: number = Math.floor(Date.now() / 1000),
-): ProxyHoldInfo[] {
-  return profilesSharingProxy(proxyId, profiles, exceptProfileId)
-    .map((p) => getProxyHoldInfo(p, nowSecs))
-    .filter((h): h is ProxyHoldInfo => h?.active === true);
-}
-
-/** True if a new Claude profile may claim this node now. */
-export function isProxyReusable(
-  proxyId: string,
-  profiles: BrowserProfile[],
-  exceptProfileId?: string,
-  nowSecs: number = Math.floor(Date.now() / 1000),
-): boolean {
-  return (
-    profilesHoldingProxy(proxyId, profiles, exceptProfileId, nowSecs).length ===
-    0
-  );
-}
-
-/** First free SOCKS5 residential proxy (no active hold). */
+/** Prefer unreferenced SOCKS5 routes, but sharing never prevents selection. */
 export function pickAvailableProxy(
   proxies: StoredProxy[],
   profiles: BrowserProfile[],
-  nowSecs: number = Math.floor(Date.now() / 1000),
 ): StoredProxy | null {
-  for (const proxy of proxies) {
-    if (proxy.proxy_settings?.proxy_type?.toLowerCase() !== "socks5") {
-      continue;
-    }
-    if (isProxyReusable(proxy.id, profiles, undefined, nowSecs)) {
-      return proxy;
-    }
-  }
-  return null;
+  const candidates = proxies.filter(
+    (proxy) => proxy.proxy_settings?.proxy_type?.toLowerCase() === "socks5",
+  );
+  return (
+    candidates.find(
+      (proxy) => !profiles.some((profile) => profile.proxy_id === proxy.id),
+    ) ??
+    candidates[0] ??
+    null
+  );
 }
 
 export function nextAutoCardLabel(profiles: BrowserProfile[]): string {
@@ -237,7 +283,7 @@ export function buildResidentialLabel(proxy: StoredProxy): string {
   return `家宽-${geo}-${ip}`;
 }
 
-/** Fully automatic Claude profile plan for a free proxy (or a chosen one). */
+/** Fully automatic Claude profile plan for a preferred or chosen route. */
 export function planAutoClaudeProfile(args: {
   proxies: StoredProxy[];
   profiles: BrowserProfile[];
@@ -245,29 +291,15 @@ export function planAutoClaudeProfile(args: {
   cardLabel?: string;
   name?: string;
 }): AutoClaudeProfilePlan | { error: string } {
-  const now = Math.floor(Date.now() / 1000);
   let proxy: StoredProxy | null = null;
   if (args.proxyId) {
     proxy = args.proxies.find((p) => p.id === args.proxyId) ?? null;
-    if (!proxy) return { error: "Selected proxy not found" };
-    if (!isProxyReusable(proxy.id, args.profiles, undefined, now)) {
-      const holds = profilesHoldingProxy(
-        proxy.id,
-        args.profiles,
-        undefined,
-        now,
-      );
-      const names = holds.map((h) => h.profile.name).join(", ");
-      const days = holds[0]?.daysRemaining ?? PROXY_REUSE_COOLDOWN_DAYS;
-      return {
-        error: `Proxy still leased by: ${names} (${days}d left of ${PROXY_REUSE_COOLDOWN_DAYS}d window)`,
-      };
-    }
+    if (!proxy) return { error: "所选代理不存在，请重新选择" };
   } else {
-    proxy = pickAvailableProxy(args.proxies, args.profiles, now);
+    proxy = pickAvailableProxy(args.proxies, args.profiles);
     if (!proxy) {
       return {
-        error: `No free residential proxy — all nodes are within the ${PROXY_REUSE_COOLDOWN_DAYS}-day lease`,
+        error: "没有可选的 SOCKS5 家宽代理，请先添加代理",
       };
     }
   }
@@ -316,7 +348,10 @@ function fingerprintObj(
   const raw = profile.wayfern_config?.fingerprint;
   if (!raw) return null;
   try {
-    return JSON.parse(raw) as Record<string, unknown>;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+      return null;
+    return parsed.fingerprint ?? parsed;
   } catch {
     return null;
   }
@@ -341,9 +376,8 @@ export function isClaudeProfile(profile: BrowserProfile): boolean {
 export function assessClaudeProfile(
   profile: BrowserProfile,
   allProfiles: BrowserProfile[],
-  _proxies: StoredProxy[],
+  proxies: StoredProxy[],
   hostDpr?: number,
-  nowSecs: number = Math.floor(Date.now() / 1000),
 ): ProfileHealth {
   const issues: HealthIssue[] = [];
   const cfg = profile.wayfern_config;
@@ -358,35 +392,25 @@ export function assessClaudeProfile(
         "No residential proxy assigned — Claude isolation requires 1 家宽 IP per profile",
     });
   } else if (profile.proxy_id) {
-    const activeHolds = profilesHoldingProxy(
+    if (!proxies.some((proxy) => proxy.id === profile.proxy_id)) {
+      issues.push({
+        code: "PROXY_MISSING",
+        severity: "block",
+        message:
+          "The configured proxy no longer exists. Reassign it before use.",
+      });
+    }
+    const shared = profilesSharingProxy(
       profile.proxy_id,
       allProfiles,
       profile.id,
-      nowSecs,
     );
-    if (activeHolds.length > 0) {
+    if (shared.length > 0) {
       issues.push({
         code: "SHARED_PROXY",
-        severity: "block",
-        message: `Proxy still leased by: ${activeHolds
-          .map((h) => `${h.profile.name} (${h.daysRemaining}d left)`)
-          .join(", ")} — wait ${PROXY_REUSE_COOLDOWN_DAYS}d or unbind`,
+        severity: "warn",
+        message: `以下档案也使用此代理：${shared.map((p) => p.name).join("、")}。仅供提醒，不阻止创建或启动。`,
       });
-    } else {
-      const older = profilesSharingProxy(
-        profile.proxy_id,
-        allProfiles,
-        profile.id,
-      );
-      if (older.length > 0) {
-        issues.push({
-          code: "PROXY_REUSED",
-          severity: "warn",
-          message: `Node reused after ${PROXY_REUSE_COOLDOWN_DAYS}d; still bound on: ${older
-            .map((p) => p.name)
-            .join(", ")} — unbind old profile if unused`,
-        });
-      }
     }
   }
 
@@ -426,15 +450,19 @@ export function assessClaudeProfile(
     });
   } else {
     const dpr = Number(fp.devicePixelRatio);
+    const native = !cfg?.os || cfg.os === getCurrentOS();
+    const expectedDpr = native
+      ? (hostDpr ?? cfg?.expected_device_pixel_ratio)
+      : cfg?.expected_device_pixel_ratio;
     if (
-      hostDpr != null &&
+      expectedDpr != null &&
       Number.isFinite(dpr) &&
-      Math.abs(dpr - hostDpr) > 0.05
+      Math.abs(dpr - expectedDpr) > 0.05
     ) {
       issues.push({
         code: "DPR_MISMATCH",
         severity: "warn",
-        message: `Fingerprint DPR ${dpr} ≠ host ${hostDpr} — Claude/Stripe payment iframe may render differently`,
+        message: `Fingerprint DPR ${dpr} differs from the configured target ${expectedDpr}. Run an audit before changing identity.`,
       });
     }
     if (!fp.timezone) {
@@ -507,29 +535,15 @@ export function claudeCreateBlockers(args: {
   cardLabel?: string;
   /** When true (auto-create), empty card label is allowed — caller will fill. */
   allowEmptyCard?: boolean;
+  /** Retained for create-call compatibility; never used to gate proxy reuse. */
   nowSecs?: number;
 }): string[] {
-  const now = args.nowSecs ?? Math.floor(Date.now() / 1000);
   const blockers: string[] = [];
   if (!args.name.trim()) blockers.push("Profile name is required");
   if (!args.proxyId) {
     blockers.push(
       "Select a dedicated residential (家宽) proxy — required for Claude isolation",
     );
-  } else {
-    const holds = profilesHoldingProxy(
-      args.proxyId,
-      args.profiles,
-      undefined,
-      now,
-    );
-    if (holds.length > 0) {
-      blockers.push(
-        `Node leased until ~${holds[0].daysRemaining}d left by: ${holds
-          .map((h) => h.profile.name)
-          .join(", ")} (${PROXY_REUSE_COOLDOWN_DAYS}-day reuse rule)`,
-      );
-    }
   }
   if (!args.allowEmptyCard && !args.cardLabel?.trim()) {
     blockers.push(
@@ -537,41 +551,6 @@ export function claudeCreateBlockers(args: {
     );
   }
   return blockers;
-}
-
-/** proxyId → list of profile names with an active lease. */
-export function buildProxyOccupancy(
-  profiles: BrowserProfile[],
-  nowSecs: number = Math.floor(Date.now() / 1000),
-): Map<string, string[]> {
-  const map = new Map<string, string[]>();
-  for (const p of profiles) {
-    if (!p.proxy_id) continue;
-    const hold = getProxyHoldInfo(p, nowSecs);
-    if (!hold?.active) continue;
-    const list = map.get(p.proxy_id) ?? [];
-    list.push(
-      hold.daysRemaining > 0
-        ? `${p.name} (${hold.daysRemaining}d left)`
-        : p.name,
-    );
-    map.set(p.proxy_id, list);
-  }
-  return map;
-}
-
-export function proxyOccupancyLabel(
-  proxyId: string,
-  occupancy: Map<string, string[]>,
-  exceptProfileName?: string,
-): string | null {
-  const names = (occupancy.get(proxyId) ?? []).filter((n) => {
-    if (!exceptProfileName) return true;
-    return !n.startsWith(exceptProfileName);
-  });
-  if (names.length === 0) return null;
-  if (names.length === 1) return `leased: ${names[0]}`;
-  return `leased: ${names.length} profiles`;
 }
 
 /**
@@ -583,10 +562,11 @@ export function buildIsolationWayfernConfig(
 ): WayfernConfig {
   const defaults = getClaudeWayfernConfig();
   return {
-    ...existing,
     ...defaults,
-    os: existing?.os ?? defaults.os,
-    fingerprint: existing?.fingerprint,
+    ...existing,
+    geoip: true,
+    webrtc_mode: "proxy",
+    randomize_fingerprint_on_launch: false,
   };
 }
 
@@ -626,7 +606,7 @@ export function launchBlockMessages(
   const health = assessClaudeProfile(profile, allProfiles, [], hostDpr);
   // Only hard-block on issues that break critical account isolation.
   // Missing card label or DPR mismatches stay warn-only.
-  const hard = new Set(["SHARED_PROXY", "RANDOMIZE_ON"]);
+  const hard = new Set(["NO_PROXY", "RANDOMIZE_ON"]);
   return health.issues
     .filter((i) => i.severity === "block" && hard.has(i.code))
     .map((i) => i.message);

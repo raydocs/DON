@@ -187,6 +187,7 @@ impl SyncScheduler {
 
     if !self.pending_configs.lock().await.is_empty()
       || !self.pending_config_deletes.lock().await.is_empty()
+      || config_entities::has_pending_deletes()
     {
       return true;
     }
@@ -530,10 +531,10 @@ impl SyncScheduler {
   }
 
   async fn process_pending_configs(&self, app_handle: &tauri::AppHandle) {
-    let deletes: Vec<(ConfigKind, String)> =
-      self.pending_config_deletes.lock().await.drain().collect();
-    let syncs: Vec<(ConfigKind, String)> = self.pending_configs.lock().await.drain().collect();
-    if deletes.is_empty() && syncs.is_empty() {
+    if self.pending_configs.lock().await.is_empty()
+      && self.pending_config_deletes.lock().await.is_empty()
+      && !config_entities::has_pending_deletes()
+    {
       return;
     }
     let engine = match SyncEngine::create_from_settings(app_handle).await {
@@ -546,17 +547,11 @@ impl SyncScheduler {
         return;
       }
     };
-    for (kind, id) in deletes {
-      // Not retried, as for groups: the tombstone check at the next start
-      // keeps a copy that missed this from coming back on other devices only
-      // once the delete has reached the cloud.
-      if let Err(e) = engine.delete_config(kind, &id).await {
-        log::warn!(
-          "Remote {} delete failed id={id} err=\"{e}\"",
-          kind.tombstone_type()
-        );
-      }
+    self.pending_config_deletes.lock().await.clear();
+    if let Err(e) = config_entities::replay_deletes(&engine).await {
+      log::warn!("Config deletion replay incomplete err={e}");
     }
+    let syncs: Vec<(ConfigKind, String)> = self.pending_configs.lock().await.drain().collect();
     for (kind, id) in syncs {
       match config_entities::sync_one(&engine, kind, &id).await {
         Ok(()) => log_sync_success(kind.tombstone_type(), &id),
@@ -1107,7 +1102,18 @@ impl SyncScheduler {
         }
         other => {
           if let Some(kind) = ConfigKind::from_tombstone_type(other) {
-            config_entities::apply_remote_delete(kind, &entity_id);
+            // Live events can arrive late; reconcile against the current
+            // tombstone and local edit timestamp instead of blindly removing.
+            let result = match SyncEngine::create_from_settings(app_handle).await {
+              Ok(engine) => config_entities::sync_one(&engine, kind, &entity_id).await,
+              Err(e) => Err(super::types::SyncError::IoError(e)),
+            };
+            if let Err(e) = result {
+              log::warn!("Config tombstone reconcile deferred id={entity_id} err={e}");
+              self
+                .queue_tombstone(other.to_string(), entity_id.clone())
+                .await;
+            }
           }
         }
       }

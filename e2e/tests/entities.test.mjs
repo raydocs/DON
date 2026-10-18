@@ -933,6 +933,11 @@ test("profile, group, proxy, tag, metadata, clone, and bulk-delete lifecycle", a
       });
       assert.notEqual(clone.id, profile.id);
       assert.equal(clone.name, "Cloned Profile");
+      assert.equal(
+        clone.sync_mode,
+        "Disabled",
+        "copied browser data requires explicit sync opt-in",
+      );
       assert.equal(clone.dns_server, "https://dns.quad9.net/dns-query");
       assert.equal(clone.status_id, warming.id, "a clone keeps the status");
       const counts = await app.invoke("get_groups_with_profile_counts");
@@ -2643,7 +2648,9 @@ test("local launch arguments and fingerprints work without a cloud account", asy
         profileId: profile.id,
         config: { ...stored.wayfern_config, launch_args: [] },
       });
-      const cleared = (await app.invoke("list_browser_profiles"))[0];
+      const cleared = (await app.invoke("list_browser_profiles")).find(
+        (p) => p.id === profile.id,
+      );
       assert.deepEqual(cleared.wayfern_config.launch_args ?? [], []);
       assert.ok(cleared.updated_at > 1);
       assert.equal(

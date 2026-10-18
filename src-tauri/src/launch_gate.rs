@@ -174,6 +174,14 @@ fn gate_disabled() -> bool {
     .unwrap_or(false)
 }
 
+/// An explicit proxy assignment must resolve before VPN fallback or the global
+/// route policy is considered. Only an unassigned profile may choose direct.
+pub(crate) fn require_assigned_proxy(
+  resolved: Option<crate::browser::ProxySettings>,
+) -> Result<crate::browser::ProxySettings, String> {
+  resolved.ok_or_else(|| crate::backend_error("PROFILE_ROUTE_UNAVAILABLE"))
+}
+
 /// The kill switch. With "Block launches without a proxy or VPN" on, a launch
 /// that would reach the internet from the machine's own address is refused:
 /// a profile with no route, and a profile whose proxy or VPN is gone or gave
@@ -494,9 +502,35 @@ mod tests {
   use super::*;
 
   #[test]
-  fn with_the_kill_switch_off_every_launch_passes() {
+  fn with_the_kill_switch_off_direct_and_vpn_policy_is_unchanged() {
     assert!(route_verdict(false, false, false).is_ok());
     assert!(route_verdict(true, false, false).is_ok());
+  }
+
+  #[test]
+  fn an_assigned_proxy_must_resolve_regardless_of_the_kill_switch() {
+    for required in [false, true] {
+      let launch = require_assigned_proxy(None).and_then(|_| route_verdict(true, true, required));
+      let error = launch.unwrap_err();
+      let parsed: serde_json::Value = serde_json::from_str(&error).unwrap();
+      assert_eq!(parsed["code"], "PROFILE_ROUTE_UNAVAILABLE");
+    }
+  }
+
+  #[test]
+  fn a_resolved_proxy_is_preserved_and_passes_both_route_policies() {
+    let proxy = crate::browser::ProxySettings {
+      proxy_type: "http".into(),
+      host: "127.0.0.1".into(),
+      port: 8080,
+      username: Some("user".into()),
+      password: Some("password".into()),
+      vless_uri: None,
+    };
+    assert_eq!(require_assigned_proxy(Some(proxy.clone())).unwrap(), proxy);
+    for required in [false, true] {
+      assert!(route_verdict(true, true, required).is_ok());
+    }
   }
 
   #[test]

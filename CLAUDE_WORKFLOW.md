@@ -7,8 +7,8 @@ This is operational isolation for multi-account stability. It does **not** guara
 ## Hard rules
 
 1. **1 profile ↔ 1 Claude account** — never log two Claude accounts into the same profile.
-2. **1 profile ↔ 1 residential IP (active lease)** — assign a dedicated sticky 家宽/residential proxy.
-3. **3-day node reuse** — the same proxy may be claimed by a *new* Claude profile only after **3 days** from the previous profile’s `created_at` (lease window). Concurrent active leases still block.
+2. **Residential route** — configure a 家宽/residential proxy (or VPN route).
+3. **Reuse is allowed immediately** — shared routes, labels, and observed exits are informational warnings, never creation or launch gates. There is no waiting period.
 4. **1 profile ↔ 1 timezone story** — geoip follows the proxy exit (timezone/language stamped from that IP).
 5. **1 profile ↔ 1 card** — use a unique payment instrument per account. DON only stores a **label** (e.g. `card-A`), never a full card number.
 6. **Fingerprint fixed** — `randomize_fingerprint_on_launch` stays off.
@@ -26,13 +26,13 @@ This is operational isolation for multi-account stability. It does **not** guara
 ### Create (auto)
 
 1. Open **Claude** (header) → **Auto-create Claude profile**.
-2. DON picks the first free node (no active 3-day lease), auto name / 家宽 label / `card-A…`, stamps note with `start_url: https://claude.com` and `proxy_lease_days: 3`.
+2. DON prefers an unreferenced SOCKS5 route, falling back to a used SOCKS5 route when all are referenced; explicit selection can also reuse a route. It generates a name / 家宽 label / `card-A…` and stamps `start_url: https://claude.com`. No lease metadata is written.
 3. Isolation flags applied: `geoip`, `block_webrtc`, fixed FP, host DPR.
 
 ### Create (manual)
 
-1. **New** with Claude isolation checked (default) — form auto-fills free proxy + labels.
-2. Tweak name/card if needed; create blocked if node still leased.
+1. **New** with Claude isolation checked (default) — form auto-fills a preferred proxy + labels.
+2. Tweak name/card if needed; shared proxies do not block creation.
 
 ### After create
 
@@ -40,7 +40,7 @@ This is operational isolation for multi-account stability. It does **not** guara
 2. Confirm WebRTC/public IP = the residential exit (not home real IP).
 3. Warm up briefly, then log into Claude **only on this profile**.
 4. Pay only from this profile with its dedicated card.
-5. Reuse the same node for another profile only after the **3-day** lease ends (prefer unbinding the old profile).
+5. The same route can be reused immediately. Check shared-route warnings for operational context.
 
 Every profile ships with the **Session Key for Claude** extension preloaded (reserved **DON Default** group, attached automatically at creation): on claude.ai, click the toolbar icon to copy that profile's session key.
 
@@ -50,9 +50,26 @@ Header **Claude** panel:
 
 | Severity | Examples |
 |----------|----------|
-| **BLOCK** | No proxy; active shared lease; randomize on; DPR mismatch vs host |
-| **WARN** | geoip off; WebRTC open; missing card/家宽 note; missing `claude` tag; node reused after 3d still bound on old profile |
+| **BLOCK** | No proxy or VPN route; configured proxy missing (health scan); randomize on |
+| **WARN** | Shared proxy; DPR mismatch vs target; geoip off; WebRTC open; missing card/家宽 note; missing `claude` tag |
 | **OK** | Isolation checks pass |
+
+### Residential usage API
+
+`buildResidentialUsage(profiles, observations, nowSecs)` is a pure snapshot builder for the health panel. It does not mutate profiles or notes. Observation DTO:
+
+```ts
+{ profile_id: string, proxy_id: string | null, ip: string | null,
+  observed_at: number | null, fresh: boolean }[]
+```
+
+- `byLabel`: groups keyed by the trimmed `residential:` line in `profile.note`. Missing/empty labels and `(set 家宽 label)` go to `unknownLabel`.
+- `byIp`: groups keyed only by the latest fresh observed exit IP per profile. Expired or non-fresh observations for the current route go to `expiredIp`; missing, future-dated, or current-`proxy_id`-mismatched observations go to `unknownIp`. Proxy names and hosts are never used as evidence of an exit IP.
+- Every group (including unknown and expired groups) contains `key` (`null` for unknown/expired), complete `profiles`, `count`, and `lastObservedAt` (latest known current-route observation in Unix seconds, otherwise `null`).
+- `duplicateLabelProfiles` and `duplicateIpProfiles`: complete profiles in known groups with `count > 1`, for independent filtering. Unknown profiles never count as duplicates.
+- Observations are fresh for **less than 30 minutes**, solely to expire route-cache evidence, not to restrict reuse. Latest timestamp wins (last input wins ties); a newer unusable observation does not revive an older exit. Dynamic exits replace the old value rather than creating a historical account identity. Nullable proxy IDs match profiles without a proxy ID, supporting cached VPN-route observations. The backend reads only its process-local current-route cache: a shared route can supply several profiles' observations, which is not proof that each profile launched; discarded cache entries become unknown.
+
+Labels and exit IPs are independent: one label may have several exits and several labels may share one exit. No card numbers or session secrets are collected by this function. Existing user notes, including historical lease text, are preserved; new notes and migration additions no longer write lease rules.
 
 ## Out of scope (still your responsibility)
 

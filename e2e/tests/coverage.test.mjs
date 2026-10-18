@@ -69,6 +69,9 @@ test("every Tauri command has exactly one E2E owner and evidence level", async (
 
     const evidenceFiles = [
       path.join(root, "e2e", "tests", `${entry.suite}.test.mjs`),
+      ...(entry.suite === "integrations"
+        ? [path.join(root, "e2e", "tests", "browser-agent.test.mjs")]
+        : []),
       ...(entry.suite === "browser"
         ? [path.join(root, "e2e", "lib", "fixtures.mjs")]
         : []),

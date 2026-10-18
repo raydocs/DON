@@ -109,6 +109,47 @@ lazy_static::lazy_static! {
   static ref EXIT_CACHE: Mutex<ExitCacheState> = Mutex::new(ExitCacheState::default());
 }
 
+/// Latest local observation of a profile's current route, not a record of that
+/// profile having launched. Profiles with the same route share observations.
+#[derive(Debug, Serialize)]
+pub struct ProfileExitObservation {
+  pub profile_id: String,
+  pub proxy_id: Option<String>,
+  pub ip: Option<String>,
+  pub observed_at: Option<u64>,
+  pub fresh: bool,
+}
+
+fn profile_exit_observation(profile: &BrowserProfile) -> ProfileExitObservation {
+  let key = exit_cache_key(profile);
+  let state = exit_cache();
+  let cached = key.as_ref().and_then(|key| {
+    state
+      .cache
+      .get(key)
+      .filter(|cached| cached.identity == key.identity)
+  });
+  ProfileExitObservation {
+    profile_id: profile.id.to_string(),
+    proxy_id: profile.proxy_id.clone(),
+    ip: cached.and_then(|cached| cached.ip.clone()),
+    observed_at: cached.map(|cached| cached.fetched_at),
+    fresh: cached.is_some_and(|cached| {
+      crate::proxy_manager::now_secs().saturating_sub(cached.fetched_at) < EXIT_CACHE_TTL_SECS
+    }),
+  }
+}
+
+/// Read existing cache entries only, including expired entries still present.
+/// Never probes, starts workers, prunes the cache, or exposes route identities.
+#[tauri::command]
+pub fn get_profile_exit_observations() -> Result<Vec<ProfileExitObservation>, String> {
+  let profiles = crate::profile::ProfileManager::instance()
+    .list_profiles()
+    .map_err(|_| crate::backend_error("INTERNAL_ERROR"))?;
+  Ok(profiles.iter().map(profile_exit_observation).collect())
+}
+
 /// The dimensions an exit is compared on, in report order.
 pub const CHECKED_DIMENSIONS: [&str; 2] = ["timezone", "language"];
 
@@ -697,6 +738,81 @@ pub async fn check_profile_consistency_now(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn route_observations_are_cache_only_shared_current_and_secret_free() {
+    let mut profile = BrowserProfile {
+      id: uuid::Uuid::new_v4(),
+      vpn_id: Some(format!("observation-{}", uuid::Uuid::new_v4())),
+      ..Default::default()
+    };
+    let key = exit_cache_key(&profile).unwrap();
+    assert!(profile_exit_observation(&profile).observed_at.is_none());
+    let now = crate::proxy_manager::now_secs();
+    exit_cache().cache.insert(
+      key.clone(),
+      CachedExit {
+        fetched_at: now,
+        identity: key.identity.clone(),
+        timezone: None,
+        country_code: None,
+        ip: Some("192.0.2.1".into()),
+      },
+    );
+    let observation = profile_exit_observation(&profile);
+    assert!(observation.fresh);
+    assert_eq!(observation.observed_at, Some(now));
+    assert_eq!(
+      serde_json::to_value(&observation).unwrap(),
+      serde_json::json!({
+        "profile_id": profile.id.to_string(),
+        "proxy_id": null,
+        "ip": "192.0.2.1",
+        "observed_at": now,
+        "fresh": true
+      })
+    );
+
+    let mut shared = profile.clone();
+    shared.id = uuid::Uuid::new_v4();
+    assert_eq!(profile_exit_observation(&shared).ip, observation.ip);
+    assert_eq!(profile_exit_observation(&shared).observed_at, Some(now));
+
+    // TTL marks freshness only: a read neither removes nor refreshes entries.
+    let expired_at = now - EXIT_CACHE_TTL_SECS;
+    {
+      let mut state = exit_cache();
+      let cached = state.cache.get_mut(&key).unwrap();
+      cached.fetched_at = expired_at;
+      cached.ip = Some("192.0.2.2".into());
+    }
+    for p in [&profile, &shared] {
+      let updated = profile_exit_observation(p);
+      assert!(!updated.fresh);
+      assert_eq!(updated.observed_at, Some(expired_at));
+      assert_eq!(updated.ip.as_deref(), Some("192.0.2.2"));
+    }
+    assert!(exit_cache().cache.contains_key(&key));
+
+    // Even an entry under the right key cannot leak a mismatched identity.
+    exit_cache().cache.get_mut(&key).unwrap().identity =
+      "http://user:secret@gateway/session".into();
+    let unknown = profile_exit_observation(&profile);
+    assert_eq!(unknown.ip, None);
+    assert_eq!(unknown.observed_at, None);
+    assert!(!unknown.fresh);
+    exit_cache().cache.get_mut(&key).unwrap().identity = key.identity.clone();
+    profile.vpn_id = Some(format!("changed-{}", uuid::Uuid::new_v4()));
+    assert_eq!(profile_exit_observation(&profile).observed_at, None);
+    assert_eq!(
+      profile_exit_observation(&shared).observed_at,
+      Some(expired_at)
+    );
+    invalidate_exit_cache_key(&key);
+    assert_eq!(profile_exit_observation(&shared).observed_at, None);
+    shared.vpn_id = None;
+    assert_eq!(profile_exit_observation(&shared).observed_at, None);
+  }
 
   #[test]
   fn language_check_accepts_the_main_language_of_the_country() {

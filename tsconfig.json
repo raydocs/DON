@@ -36,6 +36,7 @@
   "exclude": [
     "node_modules",
     "src-tauri/target",
+    "e2e/app/target",
     "donut-sync",
     "cloudflare-sync-worker"
   ]

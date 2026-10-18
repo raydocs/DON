@@ -278,6 +278,7 @@ pub(crate) fn persist_browser_identity(proxy_id: &str, browser_pid: u32) -> bool
 /// output never reaches this log, so the stop line is written from here.
 struct WorkerSnapshot {
   pid: Option<u32>,
+  start_time: Option<u64>,
   was_running: bool,
   profile_id: Option<String>,
   browser_pid: Option<u32>,
@@ -289,6 +290,7 @@ impl WorkerSnapshot {
     let pid = config.as_ref().and_then(|config| config.pid);
     Self {
       pid,
+      start_time: config.as_ref().and_then(|config| config.pid_start_time),
       was_running: pid.is_some_and(crate::proxy_storage::is_process_running),
       profile_id: config.as_ref().and_then(|config| config.profile_id.clone()),
       browser_pid: config.as_ref().and_then(|config| config.browser_pid),
@@ -308,6 +310,12 @@ impl WorkerSnapshot {
       self.profile_id.as_deref().unwrap_or("none"),
       self.browser_pid.map(|pid| pid.to_string()).unwrap_or_else(|| "none".to_string()),
     );
+  }
+
+  fn still_running(&self) -> bool {
+    self
+      .pid
+      .is_some_and(|pid| crate::proxy_storage::process_identity_matches(pid, self.start_time))
   }
 }
 
@@ -2292,9 +2300,9 @@ impl ProxyManager {
     browser_pid: u32,
   ) -> Result<(), String> {
     let (proxy_id, profile_id): (String, Option<String>) = {
-      let mut proxies = self.active_proxies.lock().unwrap();
-      match proxies.remove(&browser_pid) {
-        Some(proxy) => (proxy.id, proxy.profile_id.clone()),
+      let proxies = self.active_proxies.lock().unwrap();
+      match proxies.get(&browser_pid) {
+        Some(proxy) => (proxy.id.clone(), proxy.profile_id.clone()),
         None => return Ok(()), // No proxy to stop
       }
     };
@@ -2310,19 +2318,20 @@ impl ProxyManager {
       .arg("--id")
       .arg(&proxy_id);
 
-    // A failed spawn (sidecar missing, permission denied, fd exhaustion) must
-    // not panic the cleanup task — the proxy is already removed from tracking,
-    // so degrade gracefully like the non-success branch below.
     match proxy_cmd.output().await {
       Ok(output) if !output.status.success() => {
-        log::warn!(
-          "Proxy worker stop command failed id={proxy_id} stderr={:?}",
+        return Err(format!(
+          "Proxy worker stop failed id={proxy_id}: {}",
           String::from_utf8_lossy(&output.stderr).trim()
-        );
+        ));
       }
       Ok(_) => {}
-      Err(e) => log::warn!("Proxy worker stop command did not run id={proxy_id} err=\"{e}\""),
+      Err(e) => return Err(format!("Proxy worker stop did not run id={proxy_id}: {e}")),
     }
+    if worker.still_running() {
+      return Err(format!("Proxy worker still running id={proxy_id}"));
+    }
+    self.active_proxies.lock().unwrap().remove(&browser_pid);
     worker.log_stopped(&proxy_id);
 
     // Clear profile-to-proxy mapping if it references this proxy
@@ -2380,16 +2389,18 @@ impl ProxyManager {
           .arg("--id")
           .arg(&proxy_id);
 
-        // Don't panic if the sidecar can't be spawned — still clear the mapping.
         match proxy_cmd.output().await {
           Ok(output) if !output.status.success() => {
-            log::warn!(
-              "Proxy worker stop command failed id={proxy_id} stderr={:?}",
+            return Err(format!(
+              "Proxy worker stop failed id={proxy_id}: {}",
               String::from_utf8_lossy(&output.stderr).trim()
-            );
+            ));
           }
           Ok(_) => {}
-          Err(e) => log::warn!("Proxy worker stop command did not run id={proxy_id} err=\"{e}\""),
+          Err(e) => return Err(format!("Proxy worker stop did not run id={proxy_id}: {e}")),
+        }
+        if worker.still_running() {
+          return Err(format!("Proxy worker still running id={proxy_id}"));
         }
         worker.log_stopped(&proxy_id);
 
@@ -2703,6 +2714,19 @@ impl ProxyManager {
         };
 
         for (browser_pid, proxy_id, profile_id) in dead_browser_entries {
+          // A status refresh may have rebound this route since the snapshot.
+          if crate::proxy_storage::get_proxy_config(&proxy_id)
+            .is_some_and(|config| crate::proxy_storage::browser_owner_is_alive(&config))
+          {
+            continue;
+          }
+          let reason = format!("browser_exited({browser_pid})");
+          if let Err(error) =
+            crate::proxy_runner::stop_proxy_process_because(&proxy_id, &reason).await
+          {
+            log::warn!("Proxy cleanup failed id={proxy_id} err=\"{error}\"");
+            continue;
+          }
           {
             let mut proxies = self.active_proxies.lock().unwrap();
             // Re-check the entry still maps to the same proxy_id — another
@@ -2722,8 +2746,6 @@ impl ProxyManager {
               map.remove(pid);
             }
           }
-          let reason = format!("browser_exited({browser_pid})");
-          let _ = crate::proxy_runner::stop_proxy_process_because(&proxy_id, &reason).await;
         }
       }
     }

@@ -524,7 +524,7 @@ fn zip_unpacked_dir(dir: &Path) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
   let mut buffer = std::io::Cursor::new(Vec::new());
   {
     let mut writer = zip::ZipWriter::new(&mut buffer);
-    let options: zip::write::FileOptions<'_, ()> =
+    let options: zip::write::FileOptions<'_, '_, ()> =
       zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     for (relative, absolute) in files {
       let data = fs::read(&absolute)?;
@@ -1868,7 +1868,7 @@ impl ExtensionManager {
     };
     for i in 0..archive.len() {
       let mut file = archive.by_index(i)?;
-      let out_path = dest.join(file.mangled_name());
+      let out_path = dest.join(file.mangled_name()?);
 
       if file.is_dir() {
         fs::create_dir_all(&out_path)?;
@@ -2550,7 +2550,7 @@ mod tests {
     let mut buffer = std::io::Cursor::new(Vec::new());
     {
       let mut writer = zip::ZipWriter::new(&mut buffer);
-      let options: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
+      let options: zip::write::FileOptions<'_, '_, ()> = zip::write::FileOptions::default();
       let manifest = serde_json::json!({
         "manifest_version": 3,
         "name": "__MSG_extName__",

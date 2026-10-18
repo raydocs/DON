@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -1437,6 +1444,97 @@ async function launchWithWorker(app, version, name) {
   );
   return { profile, browserPid, workerPid: worker.pid, workerId: worker.id };
 }
+
+test("a refused browser stop retains its live route and running state until concurrent retry", async () => {
+  assert.ok(process.env.WAYFERN_TEST_TOKEN, "WAYFERN_TEST_TOKEN is required");
+  const app = appFromEnvironment("browser-stop-refusal", {
+    seedVersionCache:
+      cachedFixtureVersion(process.env.DONUT_E2E_PROJECT_ROOT) ?? false,
+    wayfernTermsAccepted: false,
+    extraEnv: { DONUT_PROXY_WATCHDOG_INTERVAL_MS: "300" },
+  });
+  const strays = new Set();
+  let refusal;
+  try {
+    const prepared = await prepareWayfern(
+      app,
+      process.env.DONUT_E2E_PROJECT_ROOT,
+    );
+    if (!app.session) await app.start();
+    if (!(await app.invoke("check_wayfern_terms_accepted")))
+      await app.invoke("accept_wayfern_terms");
+    const owned = await launchWithWorker(app, prepared.version, "Refused Stop");
+    strays.add(owned.browserPid).add(owned.workerPid);
+    const worker = (await readWorkerConfigs(app)).find(
+      (item) => item.id === owned.workerId,
+    );
+    await assertWorkerRoute(worker.local_port);
+    refusal = path.join(
+      app.dataRoot,
+      "cache",
+      `refuse-browser-stop-${owned.browserPid}`,
+    );
+    await writeFile(refusal, "refuse all process-control channels\n");
+    const stop = () =>
+      app.invoke("kill_browser_profile", { profile: owned.profile });
+    const failed = await Promise.allSettled([stop(), stop()]);
+    assert.ok(
+      failed.every((item) => item.status === "rejected"),
+      "every refused stop must fail",
+    );
+    for (const result of failed)
+      assert.match(String(result.reason), /INTERNAL_ERROR/);
+    assert.ok(processExists(owned.browserPid));
+    assert.ok(processExists(owned.workerPid));
+    assert.deepEqual(
+      (await readWorkerConfigs(app)).find((item) => item.id === worker.id),
+      worker,
+    );
+    const running = (await app.invoke("list_browser_profiles")).find(
+      (item) => item.id === owned.profile.id,
+    );
+    assert.equal(running.process_id, owned.browserPid);
+    assert.equal(
+      await app.invoke("check_browser_status", { profile: running }),
+      true,
+    );
+    await assertWorkerRoute(worker.local_port);
+
+    await rm(refusal);
+    refusal = undefined;
+    await Promise.all([stop(), stop()]);
+    await stop();
+    await waitForCondition(
+      () => !processExists(owned.browserPid) && !processExists(owned.workerPid),
+      "confirmed browser and route shutdown",
+    );
+    assert.equal(
+      (await readWorkerConfigs(app)).some((item) => item.id === worker.id),
+      false,
+    );
+    assert.equal(
+      (await app.invoke("list_browser_profiles")).find(
+        (item) => item.id === owned.profile.id,
+      ).process_id,
+      null,
+    );
+  } catch (error) {
+    await app.capture("failure");
+    throw error;
+  } finally {
+    if (refusal) await rm(refusal, { force: true });
+    for (const pid of strays) {
+      if (processExists(pid)) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* Already gone. */
+        }
+      }
+    }
+    await app.close();
+  }
+});
 
 // The reported orphan, reproduced end to end with a real Wayfern. A detached
 // donut-proxy has to notice its browser is gone and exit on its own — before it

@@ -147,6 +147,17 @@ impl SyncClient {
   }
 
   pub async fn delete(&self, key: &str, tombstone_key: Option<&str>) -> SyncResult<DeleteResponse> {
+    self
+      .delete_at(key, tombstone_key, chrono::Utc::now().to_rfc3339())
+      .await
+  }
+
+  pub(super) async fn delete_at(
+    &self,
+    key: &str,
+    tombstone_key: Option<&str>,
+    deleted_at: String,
+  ) -> SyncResult<DeleteResponse> {
     let response = self
       .client
       .post(self.url("delete"))
@@ -154,7 +165,7 @@ impl SyncClient {
       .json(&DeleteRequest {
         key: key.to_string(),
         tombstone_key: tombstone_key.map(|s| s.to_string()),
-        deleted_at: Some(chrono::Utc::now().to_rfc3339()),
+        deleted_at: Some(deleted_at),
       })
       .send()
       .await

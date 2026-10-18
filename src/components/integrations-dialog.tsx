@@ -91,6 +91,7 @@ interface AppSettings {
   api_port: number;
   api_token?: string;
   mcp_enabled?: boolean;
+  mcp_read_only?: boolean;
   mcp_port?: number;
   mcp_remote_enabled: boolean;
   mcp_remote_key?: string | null;
@@ -144,6 +145,9 @@ export function IntegrationsDialog({
   const [apiServerPort, setApiServerPort] = useState<number | null>(null);
   const [mcpConfig, setMcpConfig] = useState<McpConfig | null>(null);
   const [isMcpStarting, setIsMcpStarting] = useState(false);
+  const [mcpLoading, setMcpLoading] = useState(true);
+  const [mcpError, setMcpError] = useState<string | null>(null);
+  const [showMcpToken, setShowMcpToken] = useState(false);
   const [showApiToken, setShowApiToken] = useState(false);
   const [isApiStarting, setIsApiStarting] = useState(false);
   const [agents, setAgents] = useState<McpAgentInfo[]>([]);
@@ -217,15 +221,18 @@ export function IntegrationsDialog({
   }, []);
 
   const loadLocalMcp = useCallback(async () => {
+    setMcpError(null);
     try {
       const running = await invoke<boolean>("get_mcp_server_status");
       setMcpConfig(
         running ? await invoke<McpConfig | null>("get_mcp_config") : null,
       );
     } catch (error) {
-      console.error("Failed to get local MCP status:", error);
+      setMcpError(translateBackendError(t, error));
+    } finally {
+      setMcpLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadAgents = useCallback(async () => {
     try {
@@ -310,7 +317,9 @@ export function IntegrationsDialog({
   }, []);
 
   const handleMcpToggle = async (enabled: boolean) => {
+    if (isMcpStarting) return;
     setIsMcpStarting(true);
+    setShowMcpToken(false);
     try {
       if (enabled) {
         const port = await invoke<number>("start_mcp_server");
@@ -1096,7 +1105,60 @@ export function IntegrationsDialog({
               </AnimatedTabsContent>
 
               <AnimatedTabsContent value="mcp" className="@container mt-4">
-                <SettingsPanel>
+                <div className="mb-4">
+                  <h2 className="text-lg font-semibold">
+                    {t("connections.mcpTitle")}
+                  </h2>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {t("connections.mcpDescription")}
+                  </p>
+                </div>
+                <div className="mb-4 grid gap-3 @xl:grid-cols-3">
+                  {[
+                    [
+                      "connections.listener",
+                      mcpLoading || mcpError
+                        ? t("connections.unknown")
+                        : mcpConfig
+                          ? `127.0.0.1:${mcpConfig.port}`
+                          : t("connections.off"),
+                    ],
+                    ["connections.authentication", t("connections.bearer")],
+                    [
+                      "connections.remote",
+                      t(
+                        remote?.connected
+                          ? "connections.remoteSeparate"
+                          : "connections.off",
+                      ),
+                    ],
+                  ].map(([label, value]) => (
+                    <SettingsPanel key={label} className="border">
+                      <p className={SECTION_LABEL_CLASS}>{t(label)}</p>
+                      <p className="mt-2 break-words text-sm font-semibold">
+                        {value}
+                      </p>
+                    </SettingsPanel>
+                  ))}
+                </div>
+                {mcpError && (
+                  <div
+                    role="alert"
+                    className="mb-4 flex items-center gap-3 rounded-lg border border-destructive/30 p-3 text-sm"
+                  >
+                    <span className="min-w-0 flex-1 break-words text-destructive-text">
+                      {mcpError}
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void loadLocalMcp()}
+                    >
+                      {t("common.buttons.retry")}
+                    </Button>
+                  </div>
+                )}
+                <SettingsPanel className="space-y-4 border">
                   <SettingsRow
                     label={t("integrations.mcpEnableLabel")}
                     htmlFor={mcpSwitchId}
@@ -1112,29 +1174,147 @@ export function IntegrationsDialog({
                       id={mcpSwitchId}
                       checked={mcpConfig !== null}
                       disabled={
-                        isMcpStarting || (!termsAccepted && mcpConfig === null)
+                        mcpLoading ||
+                        Boolean(mcpError) ||
+                        isMcpStarting ||
+                        (!termsAccepted && mcpConfig === null)
                       }
                       onCheckedChange={(enabled) =>
                         void handleMcpToggle(enabled)
                       }
                     />
                   </SettingsRow>
+                  <div className="space-y-3 border-t pt-4">
+                    <Label>{t("connections.permissions")}</Label>
+                    <div className="grid gap-2 @xl:grid-cols-2">
+                      {([true, false] as const).map((readOnly) => (
+                        <Button
+                          key={String(readOnly)}
+                          variant={
+                            Boolean(settings.mcp_read_only) === readOnly
+                              ? "secondary"
+                              : "outline"
+                          }
+                          aria-pressed={
+                            Boolean(settings.mcp_read_only) === readOnly
+                          }
+                          disabled={
+                            isMcpStarting || mcpLoading || Boolean(mcpConfig)
+                          }
+                          onClick={() => {
+                            setIsMcpStarting(true);
+                            void invoke<AppSettings>("get_app_settings")
+                              .then((fresh) =>
+                                invoke<AppSettings>("save_app_settings", {
+                                  settings: {
+                                    ...fresh,
+                                    mcp_read_only: readOnly,
+                                  },
+                                }),
+                              )
+                              .then(setSettings)
+                              .catch((error) =>
+                                setMcpError(translateBackendError(t, error)),
+                              )
+                              .finally(() => setIsMcpStarting(false));
+                          }}
+                        >
+                          {t(
+                            readOnly
+                              ? "connections.inspect"
+                              : "connections.fullControl",
+                          )}
+                        </Button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      {t(
+                        settings.mcp_read_only
+                          ? "connections.inspectScope"
+                          : "connections.fullScope",
+                      )}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {t("connections.stopToChange")}
+                    </p>
+                  </div>
                   {mcpConfig && (
-                    <SettingsRow label={t("integrations.mcp.url")}>
-                      <div className="flex min-w-0 flex-1 gap-2">
-                        <Input
-                          readOnly
-                          type="password"
-                          aria-label={t("integrations.mcp.url")}
-                          value={`http://127.0.0.1:${mcpConfig.port}/mcp/${mcpConfig.token}`}
-                        />
-                        <CopyToClipboard
-                          text={`http://127.0.0.1:${mcpConfig.port}/mcp/${mcpConfig.token}`}
-                          successMessage={t("integrations.mcp.urlCopied")}
-                        />
+                    <div className="space-y-4 border-t pt-4">
+                      <div className="space-y-1.5">
+                        <Label htmlFor="local-mcp-endpoint">
+                          {t("connections.endpoint")}
+                        </Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="local-mcp-endpoint"
+                            readOnly
+                            value={`http://127.0.0.1:${mcpConfig.port}/mcp`}
+                            className="font-mono text-xs"
+                          />
+                          <CopyToClipboard
+                            text={`http://127.0.0.1:${mcpConfig.port}/mcp`}
+                            successMessage={t("integrations.mcp.urlCopied")}
+                          />
+                        </div>
                       </div>
-                    </SettingsRow>
+                      <div className="space-y-1.5">
+                        <Label htmlFor="local-mcp-token">
+                          {t("connections.token")}
+                        </Label>
+                        <div className="flex gap-2">
+                          <Input
+                            id="local-mcp-token"
+                            readOnly
+                            type={showMcpToken ? "text" : "password"}
+                            value={mcpConfig.token}
+                            className="font-mono text-xs"
+                          />
+                          <Button
+                            variant="outline"
+                            size="icon"
+                            aria-label={t(
+                              showMcpToken
+                                ? "common.aria.hideToken"
+                                : "common.aria.showToken",
+                            )}
+                            onClick={() => setShowMcpToken(!showMcpToken)}
+                          >
+                            {showMcpToken ? <LuEyeOff /> : <LuEye />}
+                          </Button>
+                          <CopyToClipboard
+                            text={mcpConfig.token}
+                            successMessage={t("common.buttons.copied")}
+                          />
+                        </div>
+                        <p className="text-xs text-muted-foreground">
+                          {t("connections.headerHint")}
+                        </p>
+                      </div>
+                      <details className="rounded-lg border p-3">
+                        <summary className="cursor-pointer text-xs font-medium">
+                          {t("connections.legacyUrl")}
+                        </summary>
+                        <p className="my-3 text-xs text-warning-text">
+                          {t("connections.legacyWarning")}
+                        </p>
+                        <div className="flex gap-2">
+                          <Input
+                            readOnly
+                            type="password"
+                            aria-label={t("integrations.mcp.url")}
+                            value={`http://127.0.0.1:${mcpConfig.port}/mcp/${mcpConfig.token}`}
+                          />
+                          <CopyToClipboard
+                            text={`http://127.0.0.1:${mcpConfig.port}/mcp/${mcpConfig.token}`}
+                            successMessage={t("integrations.mcp.urlCopied")}
+                          />
+                        </div>
+                      </details>
+                    </div>
                   )}
+                  <p className="rounded-lg bg-background/60 p-3 text-xs text-muted-foreground">
+                    {t("connections.mcpBoundary")}
+                  </p>
                 </SettingsPanel>
               </AnimatedTabsContent>
 

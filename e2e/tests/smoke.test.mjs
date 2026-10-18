@@ -1,8 +1,111 @@
 import assert from "node:assert/strict";
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 import { appFromEnvironment, withApp } from "../lib/app.mjs";
+
+test("damaged settings and profile metadata stay visible and recover without discarding originals", async () => {
+  await withApp("smoke-recovery", async (app) => {
+    assert.deepEqual(await app.invoke("get_data_recovery_items"), []);
+    const settings = await app.invoke("get_app_settings");
+    const profile = await app.invoke("create_browser_profile_new", {
+      name: "Recovery fixture",
+      browserStr: "wayfern",
+      version: "150.0.7871.100",
+      releaseType: "stable",
+      proxyId: null,
+      vpnId: null,
+      wayfernConfig: { fingerprint: "{}" },
+      groupId: null,
+      ephemeral: false,
+      dnsBlocklist: null,
+      launchHook: null,
+    });
+    const settingsPath = path.join(
+      app.dataRoot,
+      "data",
+      "settings",
+      "app_settings.json",
+    );
+    const metadataPath = path.join(
+      app.dataRoot,
+      "data",
+      "profiles",
+      profile.id,
+      "metadata.json",
+    );
+    const good = await readFile(metadataPath);
+    const broken = Buffer.from([123, 34, 120, 34, 58, 255]);
+    await writeFile(settingsPath, broken);
+    await writeFile(metadataPath, broken);
+    const items = await app.invoke("get_data_recovery_items");
+    assert.deepEqual(
+      items.map((item) => item.id).sort(),
+      [profile.id, "settings"].sort(),
+    );
+    assert.match(
+      await app.invokeError("get_app_settings"),
+      /DATA_RECOVERY_REQUIRED/,
+    );
+    assert.match(
+      await app.invokeError("save_app_settings", { settings }),
+      /DATA_RECOVERY_REQUIRED/,
+    );
+    assert.deepEqual(await readFile(settingsPath), broken);
+    assert.ok(
+      !(await app.invoke("list_browser_profiles")).some(
+        (item) => item.id === profile.id,
+      ),
+    );
+    // An event causes the same recovery scan used at startup; no remote data.
+    await app.execute(
+      `await window.__TAURI_INTERNALS__.invoke('plugin:event|emit', {event:'profiles-changed', payload:null});`,
+    );
+    await app.waitForText("Review recovery");
+    await app.clickText("Review recovery", { roles: ["button"] });
+    await app.waitForText("Recover local data");
+    await app.capture("data-recovery-damaged");
+    const candidate = path.join(app.root, "recovered-metadata.json");
+    await writeFile(
+      candidate,
+      JSON.stringify({
+        ...JSON.parse(good),
+        id: "00000000-0000-0000-0000-000000000001",
+      }),
+    );
+    assert.match(
+      await app.invokeError("recover_data_file", {
+        id: profile.id,
+        source: candidate,
+      }),
+      /DATA_RECOVERY_INVALID/,
+    );
+    assert.deepEqual(await readFile(metadataPath), broken);
+    await writeFile(candidate, good);
+    await app.invoke("recover_data_file", {
+      id: profile.id,
+      source: candidate,
+    });
+    await app.invoke("recover_data_file", { id: "settings", source: null });
+    assert.deepEqual(await app.invoke("get_data_recovery_items"), []);
+    assert.equal((await app.invoke("get_app_settings")).sync_server_url, null);
+    for (const file of [settingsPath, metadataPath]) {
+      const backups = (await readdir(path.dirname(file))).filter((name) =>
+        name.startsWith(`${path.basename(file)}.quarantine-`),
+      );
+      assert.equal(backups.length, 1);
+      assert.deepEqual(
+        await readFile(path.join(path.dirname(file), backups[0])),
+        broken,
+      );
+    }
+    assert.ok(
+      (await app.invoke("list_browser_profiles")).some(
+        (item) => item.id === profile.id,
+      ),
+    );
+  });
+});
 
 test("table views persist separately, migrate the old sort, and reject invalid settings", async () => {
   await withApp("smoke-table-views", async (app) => {

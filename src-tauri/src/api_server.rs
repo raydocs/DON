@@ -191,40 +191,7 @@ pub struct CreateProfileRequest {
   pub start_urls: Option<Vec<String>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, ToSchema)]
-pub struct UpdateProfileRequest {
-  pub name: Option<String>,
-  // No `browser` field: a profile's engine is fixed at creation (changing it
-  // would invalidate the generated fingerprint and on-disk profile dir).
-  // Accepting it here only to silently ignore it misled API clients.
-  pub version: Option<String>,
-  /// Omitted or `null` leaves the proxy assignment unchanged; an empty string
-  /// detaches it. Assigning a proxy clears any assigned VPN.
-  pub proxy_id: Option<String>,
-  /// Omitted or `null` leaves the VPN assignment unchanged; an empty string
-  /// detaches it. Assigning a VPN clears any assigned proxy.
-  pub vpn_id: Option<String>,
-  pub launch_hook: Option<String>,
-  pub release_type: Option<String>,
-  pub group_id: Option<String>,
-  pub tags: Option<Vec<String>>,
-  pub extension_group_id: Option<String>,
-  pub proxy_bypass_rules: Option<Vec<String>>,
-  /// One of "Disabled", "Regular", "Encrypted".
-  pub sync_mode: Option<String>,
-  /// Wipe browsing data (keeping extensions and bookmarks) when the browser
-  /// exits. Rejected (400) for ephemeral or password-protected profiles.
-  pub clear_on_close: Option<bool>,
-  /// Omitted or `null` leaves the DNS server unchanged; an empty string
-  /// clears it, so the proxy resolves names again. Same formats as on create.
-  /// Takes effect at the next launch.
-  pub dns_server: Option<String>,
-  /// Omitted or `null` leaves the status unchanged; an empty string clears it.
-  pub status_id: Option<String>,
-  /// Replaces the start pages; an empty list removes them. Omitted or `null`
-  /// leaves them unchanged.
-  pub start_urls: Option<Vec<String>>,
-}
+pub use crate::profile::update::UpdateProfileRequest;
 
 #[derive(Clone)]
 struct ApiServerState {
@@ -1951,6 +1918,7 @@ async fn create_profile(
     (status = 400, description = "Bad request"),
     (status = 401, description = "Unauthorized"),
     (status = 404, description = "Profile not found"),
+    (status = 409, description = "Profile is running"),
     (status = 500, description = "Internal server error")
   ),
   security(
@@ -1964,162 +1932,20 @@ async fn update_profile(
   Json(request): Json<UpdateProfileRequest>,
 ) -> Result<Json<ApiProfileResponse>, (StatusCode, String)> {
   let profile_manager = ProfileManager::instance();
-
-  if request.proxy_id.as_deref().is_some_and(|s| !s.is_empty())
-    && request.vpn_id.as_deref().is_some_and(|s| !s.is_empty())
-  {
-    return Err((
-      StatusCode::BAD_REQUEST,
-      "Cannot set both proxy_id and vpn_id".to_string(),
-    ));
-  }
-  // Checked before any field changes, so a bad value leaves the profile as it was.
-  if let Some(dns_server) = &request.dns_server {
-    crate::profile_dns::normalize_dns_server(Some(dns_server.clone()))
-      .map_err(manager_error_response)?;
-  }
-  if let Some(status_id) = request.status_id.as_deref().filter(|id| !id.is_empty()) {
-    if !crate::profile_statuses::exists(status_id) {
-      return Err(manager_error_response(crate::backend_error(
-        "PROFILE_STATUS_NOT_FOUND",
-      )));
+  if let Some(mode) = &request.sync_mode {
+    if request.has_metadata_changes() {
+      return Err((
+        StatusCode::BAD_REQUEST,
+        "Cannot edit sync_mode together with profile metadata; send sync_mode alone".into(),
+      ));
     }
-  }
-  if let Some(start_urls) = &request.start_urls {
-    crate::profile::manager::checked_start_urls(start_urls.clone())
-      .map_err(manager_error_response)?;
-  }
-
-  // Update profile fields
-  if let Some(new_name) = request.name {
-    if let Err(e) = profile_manager.rename_profile(&state.app_handle, &id, &new_name) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(version) = request.version {
-    if let Err(e) = profile_manager.update_profile_version(&state.app_handle, &id, &version) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(proxy_id) = request.proxy_id {
-    if let Err(e) = profile_manager
-      .update_profile_proxy(state.app_handle.clone(), &id, Some(proxy_id))
+    crate::sync::set_profile_sync_mode(state.app_handle.clone(), id.clone(), mode.clone())
       .await
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(vpn_id) = request.vpn_id {
-    if let Err(e) = profile_manager
-      .update_profile_vpn(state.app_handle.clone(), &id, Some(vpn_id))
-      .await
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(launch_hook) = request.launch_hook {
-    let normalized = if launch_hook.trim().is_empty() {
-      None
-    } else {
-      Some(launch_hook)
-    };
-
-    if let Err(e) = profile_manager.update_profile_launch_hook(&state.app_handle, &id, normalized) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(group_id) = request.group_id {
-    if let Err(e) =
-      profile_manager.assign_profiles_to_group(&state.app_handle, vec![id.clone()], Some(group_id))
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(tags) = request.tags {
-    if let Err(e) = profile_manager.update_profile_tags(&state.app_handle, &id, tags) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(extension_group_id) = request.extension_group_id {
-    let ext_group = if extension_group_id.is_empty() {
-      None
-    } else {
-      Some(extension_group_id)
-    };
-    // Assigning a group that does not exist, or one holding an extension this
-    // profile's browser cannot load, fails at launch instead of here unless it
-    // is checked now — which is what the Tauri and MCP paths already do.
-    if let Some(group_id) = ext_group.as_deref() {
-      let browser = {
-        let profiles = profile_manager
-          .list_profiles()
-          .map_err(manager_error_response)?;
-        profiles
-          .iter()
-          .find(|p| p.id.to_string() == id)
-          .map(|p| p.browser.clone())
-          .ok_or_else(|| {
-            (
-              StatusCode::NOT_FOUND,
-              format!("Profile with ID '{id}' not found"),
-            )
-          })?
-      };
-      with_extension_manager(|mgr| mgr.validate_group_compatibility(group_id, &browser))?;
-    }
-    if let Err(e) = profile_manager.update_profile_extension_group(&id, ext_group) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(proxy_bypass_rules) = request.proxy_bypass_rules {
-    if let Err(e) =
-      profile_manager.update_profile_proxy_bypass_rules(&state.app_handle, &id, proxy_bypass_rules)
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(sync_mode) = request.sync_mode {
-    if let Err(e) =
-      crate::sync::set_profile_sync_mode(state.app_handle.clone(), id.clone(), sync_mode).await
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(clear_on_close) = request.clear_on_close {
-    if let Err(e) =
-      profile_manager.update_profile_clear_on_close(&state.app_handle, &id, clear_on_close)
-    {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(dns_server) = request.dns_server {
-    if let Err(e) = profile_manager.update_profile_dns_server(&id, Some(dns_server)) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(start_urls) = request.start_urls {
-    if let Err(e) = profile_manager.update_profile_start_urls(&id, start_urls) {
-      return Err(manager_error_response(e));
-    }
-  }
-
-  if let Some(status_id) = request.status_id {
-    let status_id = Some(status_id).filter(|id| !id.is_empty());
-    if let Err(e) = profile_manager.set_profiles_status(std::slice::from_ref(&id), status_id) {
-      return Err(manager_error_response(e));
-    }
+      .map_err(manager_error_response)?;
+  } else {
+    profile_manager
+      .update_profile(&id, request)
+      .map_err(manager_error_response)?;
   }
 
   // Return updated profile
@@ -6412,6 +6238,30 @@ mod tests {
       schema_required(&spec, "ApiStorageState").is_empty(),
       "cookies and origins may each be left out"
     );
+  }
+
+  #[test]
+  fn openapi_single_profile_updates_are_optional_and_nullable() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec serializes");
+    assert!(schema_required(&spec, "UpdateProfileRequest").is_empty());
+    for field in [
+      "proxy_id",
+      "vpn_id",
+      "group_id",
+      "extension_group_id",
+      "note",
+      "status_id",
+      "launch_hook",
+      "dns_server",
+      "dns_blocklist",
+    ] {
+      assert_eq!(
+        spec["components"]["schemas"]["UpdateProfileRequest"]["properties"][field]["type"],
+        serde_json::json!(["string", "null"]),
+        "{field}"
+      );
+    }
+    assert!(spec["paths"]["/v1/profiles/{id}"]["put"]["responses"]["409"].is_object());
   }
 
   #[test]

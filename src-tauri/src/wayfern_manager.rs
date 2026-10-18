@@ -13,7 +13,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn select_new_wayfern_process(
   candidates: &[(u32, Option<u16>)],
   existing: &std::collections::HashSet<u32>,
@@ -25,7 +25,7 @@ fn select_new_wayfern_process(
     .map(|(pid, _)| *pid)
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(test)]
 fn parse_lsof_listener_pids(output: &str) -> Vec<u32> {
   let mut pids = Vec::new();
   for line in output.lines() {
@@ -1236,10 +1236,15 @@ fn force_kill_process(pid: u32) {
 }
 
 /// Wait up to `limit` for `pid` to leave the process table.
+#[cfg(all(test, unix))]
 async fn wait_for_exit(pid: u32, limit: Duration) -> bool {
+  wait_for_owned_exit(pid, crate::proxy_storage::process_start_time(pid), limit).await
+}
+
+async fn wait_for_owned_exit(pid: u32, identity: Option<u64>, limit: Duration) -> bool {
   let started = std::time::Instant::now();
   loop {
-    if !crate::proxy_storage::is_process_running(pid) {
+    if !crate::proxy_storage::process_identity_matches(pid, identity) {
       return true;
     }
     if started.elapsed() >= limit {
@@ -1749,6 +1754,7 @@ pub struct WayfernLaunchResult {
   pub used_fingerprint: Option<String>,
 }
 
+#[derive(Clone)]
 struct WayfernInstance {
   process_id: Option<u32>,
   process_start_time: Option<u64>,
@@ -1837,6 +1843,9 @@ struct WayfernManagerInner {
 pub struct WayfernManager {
   inner: Arc<AsyncMutex<WayfernManagerInner>>,
   http_client: Client,
+  stop_lock: AsyncMutex<()>,
+  #[cfg(test)]
+  refuse_termination: std::sync::atomic::AtomicBool,
 }
 
 struct SpawnedWayfernGuard {
@@ -1897,6 +1906,9 @@ struct CdpTarget {
 impl WayfernManager {
   fn new() -> Self {
     Self {
+      stop_lock: AsyncMutex::new(()),
+      #[cfg(test)]
+      refuse_termination: std::sync::atomic::AtomicBool::new(false),
       inner: Arc::new(AsyncMutex::new(WayfernManagerInner {
         instances: HashMap::new(),
       })),
@@ -4201,32 +4213,38 @@ impl WayfernManager {
     &self,
     id: &str,
   ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Taken out of the map first, and the lock dropped: a clean shutdown can
-    // take seconds, and nothing else should wait on it.
+    // Serialize stops, but keep the instance visible while Chromium flushes
+    // its session. A refused stop must remain discoverable for a retry.
+    let _stop = self.stop_lock.lock().await;
     let instance = {
-      let mut inner = self.inner.lock().await;
-      inner.instances.remove(id)
+      let inner = self.inner.lock().await;
+      inner.instances.get(id).cloned()
     };
 
     if let Some(instance) = instance {
       if let Some(pid) = instance.process_id {
         if !crate::proxy_storage::process_identity_matches(pid, instance.process_start_time) {
+          self.inner.lock().await.instances.remove(id);
           return Ok(());
         }
         let started = std::time::Instant::now();
-        let outcome = self.stop_browser_process(pid, instance.cdp_port).await;
+        let outcome = self
+          .stop_owned_browser_process(pid, instance.process_start_time, instance.cdp_port)
+          .await;
         let profile = profile_id_in_path(instance.profile_path.as_deref().unwrap_or_default());
         let elapsed_ms = started.elapsed().as_millis();
         if outcome == StopOutcome::StillRunning {
           log::warn!(
             "Browser stop failed, still running profile={profile} pid={pid} elapsed_ms={elapsed_ms}"
           );
+          return Err(format!("Browser process {pid} is still running").into());
         } else {
           log::info!(
             "Browser stopped profile={profile} pid={pid} how={outcome} elapsed_ms={elapsed_ms}"
           );
         }
       }
+      self.inner.lock().await.instances.remove(id);
     }
 
     Ok(())
@@ -4236,10 +4254,30 @@ impl WayfernManager {
   /// CDP so Chromium runs its own shutdown (that is what writes the session
   /// and commits the cookie jar), then terminate, then kill. Each step gets a
   /// bounded wait, so a wedged browser still ends within seconds.
+  #[allow(dead_code)]
   pub async fn stop_browser_process(&self, pid: u32, cdp_port: Option<u16>) -> StopOutcome {
     let identity = crate::proxy_storage::process_start_time(pid);
-    if identity.is_none() {
+    self
+      .stop_owned_browser_process(pid, identity, cdp_port)
+      .await
+  }
+
+  async fn stop_owned_browser_process(
+    &self,
+    pid: u32,
+    identity: Option<u64>,
+    cdp_port: Option<u16>,
+  ) -> StopOutcome {
+    if !crate::proxy_storage::process_identity_matches(pid, identity) {
       return StopOutcome::Closed;
+    }
+    // Only the isolated native harness may refuse all process-control channels.
+    #[cfg(feature = "e2e")]
+    if crate::app_dirs::cache_dir()
+      .join(format!("refuse-browser-stop-{pid}"))
+      .exists()
+    {
+      return StopOutcome::StillRunning;
     }
     if let Some(port) = cdp_port {
       match tokio::time::timeout(Duration::from_secs(3), self.browser_close(port)).await {
@@ -4247,22 +4285,29 @@ impl WayfernManager {
         Ok(Err(e)) => log::debug!("Browser.close refused pid={pid} cdp_port={port} err=\"{e}\""),
         Err(_) => log::debug!("Browser.close timed out pid={pid} cdp_port={port}"),
       }
-      if wait_for_exit(pid, Duration::from_secs(5)).await {
+      if wait_for_owned_exit(pid, identity, Duration::from_secs(5)).await {
         return StopOutcome::Closed;
       }
     }
     if !crate::proxy_storage::process_identity_matches(pid, identity) {
       return StopOutcome::Closed;
     }
+    #[cfg(test)]
+    if self
+      .refuse_termination
+      .load(std::sync::atomic::Ordering::SeqCst)
+    {
+      return StopOutcome::StillRunning;
+    }
     terminate_process(pid);
-    if wait_for_exit(pid, Duration::from_secs(5)).await {
+    if wait_for_owned_exit(pid, identity, Duration::from_secs(5)).await {
       return StopOutcome::Terminated;
     }
     if !crate::proxy_storage::process_identity_matches(pid, identity) {
       return StopOutcome::Terminated;
     }
     force_kill_process(pid);
-    if wait_for_exit(pid, Duration::from_secs(2)).await {
+    if wait_for_owned_exit(pid, identity, Duration::from_secs(2)).await {
       return StopOutcome::Killed;
     }
     StopOutcome::StillRunning
@@ -4730,19 +4775,12 @@ impl WayfernManager {
 
   #[allow(dead_code)]
   pub async fn cleanup_dead_instances(&self) {
-    use sysinfo::{ProcessRefreshKind, RefreshKind, System};
-
     let mut inner = self.inner.lock().await;
     let mut dead_ids = Vec::new();
 
-    let system = System::new_with_specifics(
-      RefreshKind::nothing().with_processes(ProcessRefreshKind::everything()),
-    );
-
     for (id, instance) in &inner.instances {
       if let Some(pid) = instance.process_id {
-        let pid = sysinfo::Pid::from_u32(pid);
-        if !system.processes().contains_key(&pid) {
+        if !crate::proxy_storage::process_identity_matches(pid, instance.process_start_time) {
           dead_ids.push(id.clone());
         }
       }
@@ -6133,6 +6171,87 @@ mod tests {
     terminate_process(pid);
     let _ = child.wait();
     assert!(wait_for_exit(pid, Duration::from_secs(5)).await);
+  }
+
+  #[tokio::test]
+  async fn refused_stop_retains_the_instance_for_concurrent_retry() {
+    let manager = WayfernManager::new();
+    let mut child = cdp_test_process();
+    let pid = child.id().unwrap();
+    let path = "/isolated-stop-regression";
+    manager.inner.lock().await.instances.insert(
+      "owned".into(),
+      WayfernInstance {
+        process_id: Some(pid),
+        process_start_time: crate::proxy_storage::resolve_process_start_time(pid),
+        profile_path: Some(path.into()),
+        url: None,
+        cdp_port: None,
+        log_tap: BrowserLogTap::default(),
+      },
+    );
+    manager
+      .refuse_termination
+      .store(true, std::sync::atomic::Ordering::SeqCst);
+    let (first, second) =
+      tokio::join!(manager.stop_wayfern("owned"), manager.stop_wayfern("owned"));
+    assert!(
+      first.is_err() && second.is_err(),
+      "both refused stops must fail"
+    );
+    assert_eq!(
+      manager
+        .find_wayfern_by_profile(path)
+        .await
+        .unwrap()
+        .processId,
+      Some(pid)
+    );
+    assert!(crate::proxy_storage::is_process_running(pid));
+    manager
+      .refuse_termination
+      .store(false, std::sync::atomic::Ordering::SeqCst);
+    let (first, second) =
+      tokio::join!(manager.stop_wayfern("owned"), manager.stop_wayfern("owned"));
+    first.unwrap();
+    second.unwrap();
+    child.wait().await.unwrap();
+    assert!(!crate::proxy_storage::is_process_running(pid));
+    assert!(!manager.inner.lock().await.instances.contains_key("owned"));
+    manager.stop_wayfern("owned").await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn stop_discards_crashed_and_recycled_instances_without_signalling_the_replacement() {
+    let manager = WayfernManager::new();
+    let mut child = cdp_test_process();
+    let pid = child.id().unwrap();
+    let start = crate::proxy_storage::resolve_process_start_time(pid).unwrap();
+    for (id, identity) in [("recycled", start + 1), ("crashed", start)] {
+      if id == "crashed" {
+        child.kill().await.unwrap();
+        child.wait().await.unwrap();
+      }
+      manager.inner.lock().await.instances.insert(
+        id.into(),
+        WayfernInstance {
+          process_id: Some(pid),
+          process_start_time: Some(identity),
+          profile_path: None,
+          url: None,
+          cdp_port: None,
+          log_tap: BrowserLogTap::default(),
+        },
+      );
+      manager.stop_wayfern(id).await.unwrap();
+      assert!(!manager.inner.lock().await.instances.contains_key(id));
+      if id == "recycled" {
+        assert!(crate::proxy_storage::process_identity_matches(
+          pid,
+          Some(start)
+        ));
+      }
+    }
   }
 
   fn cdp_test_process() -> tokio::process::Child {
