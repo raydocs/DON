@@ -2188,9 +2188,131 @@ fn claim_worker_for(proxy_id: &str, browser_pid: u32) -> bool {
   donutbrowser_lib::proxy_storage::update_proxy_config(&config)
 }
 
+/// A refused stop keeps the real worker's route and identity retryable.
+#[cfg(unix)]
+#[tokio::test]
+#[serial]
+async fn refused_worker_stop_retains_route_identity_until_retry(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  let root = tempfile::tempdir()?;
+  let _root = EnvironmentRestore::set_path("DONUTBROWSER_DATA_ROOT", root.path());
+  let binary = setup_test().await?;
+  let config = start_lifecycle_worker("stop-refusal").await?;
+  let mut tracker = ProxyTestTracker::new(binary);
+  tracker.track_proxy(config.id.clone());
+  let browser = StubBrowser::spawn();
+  assert!(claim_worker_for(&config.id, browser.pid()));
+  let config = donutbrowser_lib::proxy_storage::get_proxy_config(&config.id).unwrap();
+  let pid = config.pid.unwrap();
+  let port = config.local_port.unwrap();
+  let (origin_port, origin) = start_mock_http_server("ROUTE-RETAINED").await;
+  let client = reqwest::Client::builder()
+    .proxy(reqwest::Proxy::all(format!("http://127.0.0.1:{port}"))?)
+    .timeout(Duration::from_secs(5))
+    .build()?;
+  assert_eq!(
+    client
+      .get(format!("http://127.0.0.1:{origin_port}/"))
+      .send()
+      .await?
+      .text()
+      .await?,
+    "ROUTE-RETAINED"
+  );
+
+  // Refuse only the OS signal boundary. The real worker keeps serving, and
+  // stop_proxy_process still performs all its normal orchestration.
+  use std::os::unix::fs::PermissionsExt;
+  let commands = root.path().join("commands");
+  std::fs::create_dir(&commands)?;
+  let kill = commands.join("kill");
+  std::fs::write(&kill, "#!/bin/sh\nexit 1\n")?;
+  std::fs::set_permissions(&kill, std::fs::Permissions::from_mode(0o755))?;
+  let path = std::env::join_paths(std::iter::once(commands).chain(std::env::split_paths(
+    &std::env::var_os("PATH").unwrap_or_default(),
+  )))?;
+  let refusal = EnvironmentRestore::set_path("PATH", std::path::Path::new(&path));
+  let stopped = donutbrowser_lib::proxy_runner::stop_proxy_process(&config.id).await;
+  assert!(
+    stopped.is_err(),
+    "an unconfirmed stop must not report success"
+  );
+  assert!(donutbrowser_lib::proxy_storage::process_identity_matches(
+    pid,
+    config.pid_start_time
+  ));
+  assert_eq!(
+    serde_json::to_value(donutbrowser_lib::proxy_storage::get_proxy_config(&config.id).unwrap())?,
+    serde_json::to_value(&config)?
+  );
+  assert!(
+    TcpStream::connect(("127.0.0.1", port)).await.is_ok(),
+    "the retained route must still own its listening socket"
+  );
+  assert!(donutbrowser_lib::proxy_storage::is_process_running(
+    browser.pid()
+  ));
+
+  assert_eq!(
+    client
+      .get(format!("http://127.0.0.1:{origin_port}/after-refused-stop"))
+      .send()
+      .await?
+      .text()
+      .await?,
+    "ROUTE-RETAINED"
+  );
+  drop(refusal);
+  let (first, second) = tokio::join!(
+    donutbrowser_lib::proxy_runner::stop_proxy_process(&config.id),
+    donutbrowser_lib::proxy_runner::stop_proxy_process(&config.id)
+  );
+  first.map_err(|e| e.to_string())?;
+  second.map_err(|e| e.to_string())?;
+  assert!(donutbrowser_lib::proxy_storage::get_proxy_config(&config.id).is_none());
+  assert!(wait_for_port_closed(port, Duration::from_secs(5)).await);
+  assert!(donutbrowser_lib::proxy_storage::is_process_running(
+    browser.pid()
+  ));
+  origin.abort();
+  tracker.cleanup_all().await;
+  Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn stop_cleans_exited_and_recycled_worker_records_without_killing_unrelated_processes(
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+  use donutbrowser_lib::proxy_storage::{get_proxy_config, save_proxy_config, ProxyConfig};
+  let root = tempfile::tempdir()?;
+  let _root = EnvironmentRestore::set_path("DONUTBROWSER_DATA_ROOT", root.path());
+  let mut unrelated = StubBrowser::spawn();
+  let pid = unrelated.pid();
+  let start = donutbrowser_lib::proxy_storage::resolve_process_start_time(pid).unwrap();
+  for (id, identity) in [("recycled-worker", start + 1), ("exited-worker", start)] {
+    if id == "exited-worker" {
+      unrelated.terminate();
+    }
+    let mut config = ProxyConfig::new(id.into(), "DIRECT".into(), None);
+    config.pid = Some(pid);
+    config.pid_start_time = Some(identity);
+    save_proxy_config(&config).map_err(|error| error.to_string())?;
+    assert!(!donutbrowser_lib::proxy_runner::stop_proxy_process(id)
+      .await
+      .map_err(|error| error.to_string())?);
+    assert!(get_proxy_config(id).is_none());
+    if id == "recycled-worker" {
+      assert!(donutbrowser_lib::proxy_storage::process_identity_matches(
+        pid,
+        Some(start)
+      ));
+    }
+  }
+  Ok(())
+}
+
 /// A worker whose browser exits must terminate itself and delete its config,
-/// with no GUI involved. This is the whole contract behind "no orphaned
-/// donut-proxy after closing the browser".
+/// with no GUI involved.
 #[tokio::test]
 #[serial]
 async fn worker_reaps_itself_when_its_browser_exits(

@@ -80,6 +80,224 @@ async function waitFor(app, callback, description, timeoutMs = 45_000) {
   return app.waitFor(callback, { description, timeoutMs, intervalMs: 250 });
 }
 
+test("status and template delete journals survive app restart and partial acknowledgements", async () => {
+  assert.ok(syncUrl && syncToken, "Local sync infrastructure was not started");
+  assert.ok(
+    ["localhost", "127.0.0.1", "[::1]"].includes(new URL(syncUrl).hostname),
+    "This fault-injection test only uses an explicit local sync server",
+  );
+  const source = appFromEnvironment("sync-config-delete-source");
+  const receiver = appFromEnvironment("sync-config-delete-receiver");
+  let mode = "online";
+  let deleteAttempts = 0;
+  const proxy = createServer(async (request, response) => {
+    try {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const body = Buffer.concat(chunks).toString();
+      const input = body ? JSON.parse(body) : {};
+      if (request.url.endsWith("/subscribe")) {
+        response.writeHead(503).end();
+        return;
+      }
+      const configDelete =
+        request.url.endsWith("/delete") &&
+        /^(statuses|templates)\//.test(input.key ?? "");
+      if (configDelete) deleteAttempts += 1;
+      if (mode === "offline" || (mode === "failed" && configDelete)) {
+        response.writeHead(503, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "Injected outage" }));
+        return;
+      }
+      if (mode === "partial" && configDelete) {
+        response.writeHead(200, { "content-type": "application/json" });
+        response.end(
+          JSON.stringify({ deleted: true, tombstoneCreated: false }),
+        );
+        return;
+      }
+      const upstream = await fetch(`${syncUrl}${request.url}`, {
+        method: request.method,
+        headers: {
+          authorization: `Bearer ${syncToken}`,
+          "content-type": "application/json",
+        },
+        ...(body ? { body } : {}),
+        signal: AbortSignal.timeout(10_000),
+      });
+      response.writeHead(upstream.status, {
+        "content-type": "application/json",
+      });
+      response.end(await upstream.text());
+    } catch {
+      response.writeHead(502).end();
+    }
+  });
+  await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+  const proxyUrl = `http://127.0.0.1:${proxy.address().port}`;
+  const journal = async (file) =>
+    JSON.parse(
+      await readFile(path.join(source.dataRoot, "data", "data", file), "utf8"),
+    );
+  try {
+    await source.start();
+    await source.invoke("save_sync_settings", {
+      syncServerUrl: proxyUrl,
+      syncToken,
+    });
+    await source.invoke("restart_sync_service");
+    await receiver.start();
+    await configureSync(receiver);
+    const status = await source.invoke("create_profile_status", {
+      name: "Delete offline",
+      color: "#112233",
+    });
+    const template = await source.invoke("create_profile_template", {
+      name: "Delete offline",
+      settings: {},
+    });
+    const cases = [
+      {
+        id: status.id,
+        folder: "statuses",
+        file: "profile_statuses.json",
+        list: "list_profile_statuses",
+        remove: "delete_profile_status",
+        args: { statusId: status.id },
+      },
+      {
+        id: template.id,
+        folder: "templates",
+        file: "profile_templates.json",
+        list: "list_profile_templates",
+        remove: "delete_profile_template",
+        args: { templateId: template.id },
+      },
+    ];
+    for (const item of cases) {
+      await waitFor(
+        source,
+        async () =>
+          (await listRemote(`${item.folder}/${item.id}.json`)).length > 0,
+        `${item.folder} uploaded`,
+      );
+      await receiver.invoke("restart_sync_service");
+      await waitFor(
+        receiver,
+        async () =>
+          (await receiver.invoke(item.list)).some(
+            (entry) => entry.id === item.id,
+          ),
+        `${item.folder} received on second device`,
+      );
+    }
+    mode = "offline";
+    for (const item of cases) {
+      if (item.folder === "templates") {
+        // No configured engine/scheduler exists for this deletion. Persisting
+        // its intent must not depend on the asynchronous queue being present.
+        await source.invoke("save_sync_settings", {
+          syncServerUrl: null,
+          syncToken: null,
+        });
+      }
+      await source.invoke(item.remove, item.args);
+      const saved = await journal(item.file);
+      assert.ok(
+        saved.pending_deletes.some(
+          (intent) => intent.id === item.id && intent.generation,
+        ),
+      );
+      assert.ok(!saved.items.some((entry) => entry.id === item.id));
+    }
+    await source.invoke("save_sync_settings", {
+      syncServerUrl: proxyUrl,
+      syncToken,
+    });
+    // New application process, same isolated data, no in-memory scheduler queue.
+    await source.restart();
+    for (const item of cases) {
+      assert.ok(
+        (await journal(item.file)).pending_deletes.some(
+          (intent) => intent.id === item.id,
+        ),
+      );
+      assert.ok(
+        !(await source.invoke(item.list)).some((entry) => entry.id === item.id),
+      );
+    }
+    for (const failure of ["failed", "partial"]) {
+      mode = failure;
+      const before = deleteAttempts;
+      await source.invoke("restart_sync_service");
+      await waitFor(
+        source,
+        () => deleteAttempts >= before + 2,
+        `${failure} deletion attempts`,
+      );
+      for (const item of cases) {
+        assert.ok(
+          (await journal(item.file)).pending_deletes.some(
+            (intent) => intent.id === item.id,
+          ),
+        );
+        assert.ok(
+          !(await source.invoke(item.list)).some(
+            (entry) => entry.id === item.id,
+          ),
+          "failed delete must not resurrect locally",
+        );
+      }
+    }
+    mode = "online";
+    await source.invoke("restart_sync_service");
+    for (const item of cases) {
+      await waitFor(
+        source,
+        async () => (await journal(item.file)).pending_deletes.length === 0,
+        `${item.folder} positive acknowledgement clears intent`,
+      );
+      assert.equal(
+        (await listRemote(`${item.folder}/${item.id}.json`)).length,
+        0,
+      );
+      assert.equal(
+        (await listRemote(`tombstones/${item.folder}/${item.id}.json`)).length,
+        1,
+      );
+      await receiver.invoke("restart_sync_service");
+      await waitFor(
+        receiver,
+        async () =>
+          !(await receiver.invoke(item.list)).some(
+            (entry) => entry.id === item.id,
+          ),
+        `${item.folder} removed on second device`,
+      );
+    }
+    const acknowledgedAttempts = deleteAttempts;
+    await source.restart();
+    await source.invoke("restart_sync_service");
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+    assert.equal(
+      deleteAttempts,
+      acknowledgedAttempts,
+      "acknowledged intents do not replay again",
+    );
+    for (const item of cases)
+      assert.ok(
+        !(await source.invoke(item.list)).some((entry) => entry.id === item.id),
+      );
+  } catch (error) {
+    await source.capture("config-delete-failure");
+    throw error;
+  } finally {
+    await Promise.all([source.close(), receiver.close()]);
+    proxy.closeAllConnections();
+    await new Promise((resolve) => proxy.close(resolve));
+  }
+});
+
 test("remote profile changes return after a long outage without another app restart", async () => {
   assert.ok(syncUrl && syncToken, "Sync infrastructure was not started");
   const app = appFromEnvironment("sync-remote-return");

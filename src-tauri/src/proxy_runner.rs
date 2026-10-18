@@ -17,6 +17,7 @@ static PROXY_PROCESSES: std::sync::LazyLock<
 > = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
 
 static SIDECAR_VERSION_VERIFIED: AtomicBool = AtomicBool::new(false);
+static STOP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const RETAINED_PROXY_LOGS: usize = 20;
 
 fn prune_stale_proxy_logs(temp_dir: &Path, retain: usize) {
@@ -582,6 +583,7 @@ async fn stop_proxy_process_inner(
   reason: &str,
   remove_config: bool,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+  let _stop = STOP_LOCK.lock().await;
   let config = get_proxy_config(id);
   let process = PROXY_PROCESSES
     .lock()
@@ -629,6 +631,10 @@ async fn stop_proxy_process_inner(
     // Wait a bit for the process to exit
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
+    if crate::proxy_storage::process_identity_matches(pid, start_time) {
+      return Err(format!("Proxy worker {id} is still running").into());
+    }
+
     // Remove from tracking
     {
       let mut processes = PROXY_PROCESSES.lock().unwrap();
@@ -662,6 +668,9 @@ async fn stop_proxy_process_inner(
     return Ok(true);
   }
 
+  if remove_config {
+    delete_proxy_config(id);
+  }
   Ok(false)
 }
 

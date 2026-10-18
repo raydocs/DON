@@ -1,6 +1,4 @@
 use crate::proxy_runner::find_sidecar_executable;
-#[cfg(unix)]
-use crate::proxy_storage::is_process_running;
 use crate::proxy_storage::{process_identity_matches, resolve_process_start_time};
 use crate::xray::{build_client_config_json, parse_share_link, XrayClientRuntime};
 use crate::xray_worker_storage::{
@@ -423,12 +421,13 @@ impl Drop for PendingSupervisor {
 
 #[cfg(unix)]
 fn terminate_supervisor_unchecked(pid: u32) {
+  let identity = crate::proxy_storage::process_start_time(pid);
   let group = -(pid as i32);
   unsafe {
     libc::kill(group, libc::SIGTERM);
   }
   std::thread::sleep(Duration::from_millis(250));
-  if is_process_running(pid) {
+  if process_identity_matches(pid, identity) {
     unsafe {
       libc::kill(group, libc::SIGKILL);
     }
@@ -447,11 +446,12 @@ fn terminate_supervisor_unchecked(pid: u32) {
 
 #[cfg(unix)]
 fn terminate_process_unchecked(pid: u32) {
+  let identity = crate::proxy_storage::process_start_time(pid);
   unsafe {
     libc::kill(pid as i32, libc::SIGTERM);
   }
   std::thread::sleep(Duration::from_millis(250));
-  if is_process_running(pid) {
+  if process_identity_matches(pid, identity) {
     unsafe {
       libc::kill(pid as i32, libc::SIGKILL);
     }
@@ -469,11 +469,12 @@ fn terminate_process_unchecked(pid: u32) {
 }
 
 pub fn stop_xray_worker_now(id: &str) -> Result<bool, Box<dyn std::error::Error>> {
+  static STOP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  let _stop = STOP_LOCK.lock().unwrap();
   let Some(config) = get_xray_worker_config(id) else {
     return Ok(false);
   };
 
-  delete_xray_worker_config(id);
   let supervisor = config
     .pid
     .filter(|pid| process_identity_matches(*pid, config.pid_start_time));
@@ -485,6 +486,19 @@ pub fn stop_xray_worker_now(id: &str) -> Result<bool, Box<dyn std::error::Error>
     .filter(|pid| process_identity_matches(*pid, config.xray_pid_start_time));
   if let Some(pid) = xray {
     terminate_process_unchecked(pid);
+  }
+  let deadline = std::time::Instant::now() + Duration::from_secs(2);
+  while config
+    .pid
+    .is_some_and(|pid| process_identity_matches(pid, config.pid_start_time))
+    || config
+      .xray_pid
+      .is_some_and(|pid| process_identity_matches(pid, config.xray_pid_start_time))
+  {
+    if std::time::Instant::now() >= deadline {
+      return Err(format!("Xray worker {id} is still running").into());
+    }
+    std::thread::sleep(Duration::from_millis(25));
   }
   delete_xray_worker_config(id);
   let pid_text = |pid: Option<u32>| {

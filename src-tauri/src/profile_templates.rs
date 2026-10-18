@@ -80,6 +80,9 @@ impl ConfigEntity for ProfileTemplate {
   fn updated_at(&self) -> u64 {
     self.updated_at
   }
+  fn set_updated_at(&mut self, updated_at: u64) {
+    self.updated_at = updated_at;
+  }
   fn store() -> &'static ConfigStore<Self> {
     &STORE
   }
@@ -290,7 +293,8 @@ pub async fn update(
       .ok_or_else(|| code("TEMPLATE_NOT_FOUND"))?;
     template.name = name;
     template.settings = settings;
-    template.updated_at = crate::proxy_manager::now_secs();
+    template.updated_at =
+      crate::proxy_manager::now_secs().max(template.updated_at.saturating_add(1));
     Ok(template.clone())
   })?;
   config_entities::changed_locally::<ProfileTemplate>(&template.id);
@@ -299,11 +303,7 @@ pub async fn update(
 }
 
 pub fn delete(template_id: &str) -> Result<(), String> {
-  let removed = STORE.mutate(|templates| {
-    let before = templates.len();
-    templates.retain(|t| t.id != template_id);
-    Ok(templates.len() != before)
-  })?;
+  let removed = STORE.delete_local(template_id)?;
   if !removed {
     return Err(code("TEMPLATE_NOT_FOUND"));
   }
