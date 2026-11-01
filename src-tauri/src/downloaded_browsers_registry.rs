@@ -746,13 +746,12 @@ impl DownloadedBrowsersRegistry {
         continue;
       }
 
-      // Sort available versions to find the latest
-      available_versions.sort_by(|a, b| {
-        // Sort versions using semantic versioning logic
-        crate::api_client::compare_versions(b, a)
-      });
-
-      let latest_version = &available_versions[0];
+      let Some(latest_version) =
+        crate::api_client::preferred_installed_version(browser_name, &available_versions)
+      else {
+        continue;
+      };
+      let latest_version = &latest_version;
       log::info!("Latest available version for {browser_name}: {latest_version}");
 
       // Check which profiles need to be updated to the latest version
@@ -1414,9 +1413,11 @@ pub async fn ensure_active_browsers_downloaded(
   let mut downloaded = Vec::new();
 
   for browser in &["wayfern"] {
-    // Check if any version is already downloaded
+    // Check if any version is already downloaded; Wayfern needs the pinned one.
     let existing = registry.get_downloaded_versions(browser);
-    if !existing.is_empty() {
+    let has_pinned = *browser != "wayfern"
+      || registry.is_browser_downloaded(browser, crate::api_client::DON_PINNED_WAYFERN_VERSION);
+    if !existing.is_empty() && has_pinned {
       log::info!(
         "ensure_active: Skipping {browser}: already have {} version(s) downloaded",
         existing.len()

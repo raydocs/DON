@@ -78,6 +78,72 @@ pub fn compare_versions(version1: &str, version2: &str) -> std::cmp::Ordering {
   version_a.cmp(&version_b)
 }
 
+/// DON pins Wayfern: from 152 on the browser refuses `getFingerprint` and
+/// `setFingerprint` without a Donut plan that includes custom fingerprints.
+pub const DON_PINNED_WAYFERN_VERSION: &str = "151.0.7922.71";
+
+fn pinned_wayfern_version_info() -> WayfernVersionInfo {
+  let v = DON_PINNED_WAYFERN_VERSION;
+  let downloads = [
+    (
+      "macos-arm64",
+      Some(format!(
+        "https://download.wayfern.com/wayfern_{v}-1.1_macos.dmg"
+      )),
+    ),
+    ("macos-x64", None),
+    (
+      "windows-x64",
+      Some(format!(
+        "https://download.wayfern.com/wayfern-{v}_windows_x64.zip"
+      )),
+    ),
+    ("windows-arm64", None),
+    (
+      "linux-x64",
+      Some(format!(
+        "https://download.wayfern.com/wayfern-{v}-linux-x64-portable.tar.xz"
+      )),
+    ),
+    ("linux-arm64", None),
+  ]
+  .into_iter()
+  .map(|(platform, url)| (platform.to_string(), url))
+  .collect();
+  WayfernVersionInfo {
+    version: v.to_string(),
+    downloads,
+  }
+}
+
+/// Cached release lists are merged, never pruned, so a Wayfern release past
+/// the pin stays listed unless it is dropped on read.
+fn releases_within_pin(browser: &str, releases: Vec<BrowserRelease>) -> Vec<BrowserRelease> {
+  releases
+    .into_iter()
+    .filter(|r| {
+      browser != "wayfern"
+        || compare_versions(&r.version, DON_PINNED_WAYFERN_VERSION) != std::cmp::Ordering::Greater
+    })
+    .collect()
+}
+
+/// The version profiles of `browser` should run, chosen from installed
+/// `versions`: the newest one, except that Wayfern never goes past the pin.
+pub fn preferred_installed_version<'a>(
+  browser: &str,
+  versions: impl IntoIterator<Item = &'a String>,
+) -> Option<String> {
+  versions
+    .into_iter()
+    .filter(|v| {
+      browser != "wayfern"
+        || compare_versions(v, DON_PINNED_WAYFERN_VERSION) != std::cmp::Ordering::Greater
+    })
+    .max_by(|a, b| compare_versions(a, b))
+    .cloned()
+}
+
 pub fn is_version_newer(version1: &str, version2: &str) -> bool {
   let version_a = VersionComponent::parse(version1);
   let version_b = VersionComponent::parse(version2);
@@ -100,12 +166,6 @@ pub struct WayfernVersionInfo {
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedVersionData {
   releases: Vec<BrowserRelease>,
-  timestamp: u64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedWayfernData {
-  version_info: WayfernVersionInfo,
   timestamp: u64,
 }
 
@@ -173,7 +233,7 @@ impl ApiClient {
     let content = fs::read_to_string(&cache_file).ok()?;
     if let Ok(cached) = serde_json::from_str::<CachedVersionData>(&content) {
       log::info!("Using cached versions for {browser}");
-      return Some(cached.releases);
+      return Some(releases_within_pin(browser, cached.releases));
     }
 
     if let Ok(legacy_versions) = serde_json::from_str::<Vec<String>>(&content) {
@@ -185,7 +245,7 @@ impl ApiClient {
           date: "".to_string(),
         })
         .collect();
-      return Some(releases);
+      return Some(releases_within_pin(browser, releases));
     }
 
     None
@@ -231,38 +291,6 @@ impl ApiClient {
     let content = serde_json::to_string_pretty(&cached_data)?;
     fs::write(&cache_file, content)?;
     log::info!("Cached {} versions for {}", releases.len(), browser);
-    Ok(())
-  }
-
-  fn load_cached_wayfern_version(&self) -> Option<WayfernVersionInfo> {
-    let cache_dir = Self::get_cache_dir().ok()?;
-    let cache_file = cache_dir.join("wayfern_version.json");
-
-    if !cache_file.exists() {
-      return None;
-    }
-
-    let content = fs::read_to_string(&cache_file).ok()?;
-    let cached_data: CachedWayfernData = serde_json::from_str(&content).ok()?;
-
-    Some(cached_data.version_info)
-  }
-
-  fn save_cached_wayfern_version(
-    &self,
-    version_info: &WayfernVersionInfo,
-  ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let cache_dir = Self::get_cache_dir()?;
-    let cache_file = cache_dir.join("wayfern_version.json");
-
-    let cached_data = CachedWayfernData {
-      version_info: version_info.clone(),
-      timestamp: Self::get_current_timestamp(),
-    };
-
-    let content = serde_json::to_string_pretty(&cached_data)?;
-    fs::write(&cache_file, content)?;
-    log::info!("Cached Wayfern version: {}", version_info.version);
     Ok(())
   }
 
@@ -345,71 +373,13 @@ impl ApiClient {
     Some(version)
   }
 
-  /// Fetch Wayfern version info from https://donutbrowser.com/wayfern.json
+  /// The pinned Wayfern build; https://donutbrowser.com/wayfern.json only
+  /// lists the newest one.
   pub async fn fetch_wayfern_version_with_caching(
     &self,
-    no_caching: bool,
+    _no_caching: bool,
   ) -> Result<WayfernVersionInfo, Box<dyn std::error::Error + Send + Sync>> {
-    if !no_caching {
-      if let Some(cached_version) = self.load_cached_wayfern_version() {
-        log::info!("Using cached Wayfern version: {}", cached_version.version);
-        return Ok(cached_version);
-      }
-    }
-
-    log::info!("Fetching Wayfern version from https://donutbrowser.com/wayfern.json");
-    let url = "https://donutbrowser.com/wayfern.json";
-
-    let mut last_err = None;
-    let mut version_info: Option<WayfernVersionInfo> = None;
-
-    for attempt in 1..=3 {
-      match self
-        .client
-        .get(url)
-        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-        .send()
-        .await
-      {
-        Ok(response) => {
-          if !response.status().is_success() {
-            last_err = Some(format!("HTTP {}", response.status().as_u16()));
-          } else {
-            match response.json::<WayfernVersionInfo>().await {
-              Ok(info) => {
-                version_info = Some(info);
-                break;
-              }
-              Err(e) => last_err = Some(format!("Failed to parse response: {e}")),
-            }
-          }
-        }
-        Err(e) => {
-          log::warn!("Wayfern fetch attempt {attempt}/3 failed: {e}");
-          last_err = Some(e.to_string());
-        }
-      }
-
-      if attempt < 3 {
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
-      }
-    }
-
-    let version_info = version_info.ok_or_else(|| {
-      format!(
-        "Failed to fetch Wayfern version after 3 attempts: {}",
-        last_err.unwrap_or_default()
-      )
-    })?;
-    log::info!("Fetched Wayfern version: {}", version_info.version);
-
-    if !no_caching {
-      if let Err(e) = self.save_cached_wayfern_version(&version_info) {
-        log::error!("Failed to cache Wayfern version: {e}");
-      }
-    }
-
-    Ok(version_info)
+    Ok(pinned_wayfern_version_info())
   }
 
   /// Get the download URL for Wayfern based on current platform
@@ -476,6 +446,54 @@ lazy_static::lazy_static! {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn wayfern_never_prefers_a_version_past_the_pin() {
+    let installed = vec![
+      "150.0.7871.100".to_string(),
+      DON_PINNED_WAYFERN_VERSION.to_string(),
+      "152.0.7977.64".to_string(),
+      "155.0.8059.79".to_string(),
+    ];
+    assert_eq!(
+      preferred_installed_version("wayfern", &installed).as_deref(),
+      Some(DON_PINNED_WAYFERN_VERSION)
+    );
+    let only_newer = vec!["155.0.8059.79".to_string()];
+    assert_eq!(preferred_installed_version("wayfern", &only_newer), None);
+    assert_eq!(
+      preferred_installed_version("chromium", &installed).as_deref(),
+      Some("155.0.8059.79")
+    );
+  }
+
+  #[test]
+  fn cached_wayfern_releases_past_the_pin_are_dropped() {
+    let release = |version: &str| BrowserRelease {
+      version: version.to_string(),
+      date: String::new(),
+    };
+    let kept = releases_within_pin(
+      "wayfern",
+      vec![
+        release("155.0.8059.79"),
+        release(DON_PINNED_WAYFERN_VERSION),
+      ],
+    );
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].version, DON_PINNED_WAYFERN_VERSION);
+  }
+
+  #[tokio::test]
+  async fn wayfern_version_info_is_the_pin() {
+    let info = ApiClient::instance()
+      .fetch_wayfern_version_with_caching(false)
+      .await
+      .unwrap();
+    assert_eq!(info.version, DON_PINNED_WAYFERN_VERSION);
+    let url = info.downloads["macos-arm64"].as_deref().unwrap();
+    assert!(url.contains(DON_PINNED_WAYFERN_VERSION));
+  }
 
   #[test]
   fn test_version_parsing() {

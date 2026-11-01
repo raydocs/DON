@@ -94,6 +94,21 @@ pub struct WayfernConfig {
 
 /// Max full-fingerprint regenerations when a candidate violates host constraints.
 const FINGERPRINT_GENERATION_ATTEMPTS: usize = 30;
+
+/// A headless Wayfern started for fingerprint generation.
+struct GenerationBrowser {
+  ws_url: String,
+  child_id: Option<u32>,
+  temp_profile_dir: std::path::PathBuf,
+}
+
+impl GenerationBrowser {
+  fn stop(&self) {
+    WayfernManager::terminate_process(self.child_id);
+    let _ = std::fs::remove_dir_all(&self.temp_profile_dir);
+  }
+}
+
 const WEBRTC_PROXY_POLICY_FLAG: &str = "--force-webrtc-ip-handling-policy=disable_non_proxied_udp";
 const DEVICE_PRESETS_JSON: &str = include_str!("../../src/lib/device-presets.json");
 
@@ -1183,19 +1198,14 @@ impl WayfernManager {
         .unwrap_or(false)
   }
 
-  /// Generate a fingerprint for `config`, returning the fingerprint JSON and
-  /// whether fresh geolocation was applied to it. Callers must only stamp
-  /// `geo_proxy_signature` when geolocation succeeded: the base fingerprint
-  /// comes from a headless Wayfern launched without a proxy, so on failure it
-  /// silently carries the HOST timezone/locale — stamping the signature then
-  /// would tell the launch-time refresh the location is already correct for
-  /// this proxy and permanently disable the one path that can repair it.
-  pub async fn generate_fingerprint_config(
+  /// Start a headless Wayfern for fingerprint generation. Every start
+  /// generates a fresh device, which is the only way Wayfern 151 makes a new
+  /// one now that its `refreshFingerprint` answers "generation state is
+  /// unavailable".
+  async fn start_generation_browser(
     &self,
-    app_handle: &AppHandle,
     profile: &BrowserProfile,
-    config: &WayfernConfig,
-  ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
+  ) -> Result<GenerationBrowser, Box<dyn std::error::Error + Send + Sync>> {
     let executable_path = BrowserRunner::instance()
       .get_browser_executable_path(profile)
       .map_err(|e| format!("Failed to get Wayfern executable path: {e}"))?;
@@ -1293,6 +1303,28 @@ impl WayfernManager {
       }
     };
 
+    Ok(GenerationBrowser {
+      ws_url,
+      child_id,
+      temp_profile_dir,
+    })
+  }
+
+  /// Generate a fingerprint for `config`, returning the fingerprint JSON and
+  /// whether fresh geolocation was applied to it. Callers must only stamp
+  /// `geo_proxy_signature` when geolocation succeeded: the base fingerprint
+  /// comes from a headless Wayfern launched without a proxy, so on failure it
+  /// silently carries the HOST timezone/locale — stamping the signature then
+  /// would tell the launch-time refresh the location is already correct for
+  /// this proxy and permanently disable the one path that can repair it.
+  pub async fn generate_fingerprint_config(
+    &self,
+    app_handle: &AppHandle,
+    profile: &BrowserProfile,
+    config: &WayfernConfig,
+  ) -> Result<(String, bool), Box<dyn std::error::Error + Send + Sync>> {
+    let mut browser = self.start_generation_browser(profile).await?;
+
     let os = config
       .os
       .as_deref()
@@ -1319,26 +1351,43 @@ impl WayfernManager {
     let host_constraints = Self::fingerprint_host_constraints(app_handle);
     let mut last_reject = String::from("no fingerprint candidate");
     let mut normalized = None;
+    let mut restart_per_attempt = false;
     for attempt in 1..=FINGERPRINT_GENERATION_ATTEMPTS {
-      let refresh_result = self
-        .send_cdp_command(
-          &ws_url,
-          "Wayfern.refreshFingerprint",
-          refresh_params.clone(),
-        )
-        .await;
-      if let Err(e) = refresh_result {
-        cleanup().await;
-        return Err(format!("Failed to refresh fingerprint: {e}").into());
+      if restart_per_attempt {
+        browser.stop();
+        browser = self.start_generation_browser(profile).await?;
+      } else {
+        let refresh_result = self
+          .send_cdp_command(
+            &browser.ws_url,
+            "Wayfern.refreshFingerprint",
+            refresh_params.clone(),
+          )
+          .await;
+        match refresh_result {
+          Ok(_) => {}
+          // The browser still holds the device it generated at startup, so
+          // this attempt reads that one and later attempts restart it.
+          Err(e) if e.to_string().contains("generation state is unavailable") => {
+            log::info!(
+              "DON: refreshFingerprint unavailable, generating one device per browser start"
+            );
+            restart_per_attempt = true;
+          }
+          Err(e) => {
+            browser.stop();
+            return Err(format!("Failed to refresh fingerprint: {e}").into());
+          }
+        }
       }
 
       let get_result = self
-        .send_cdp_command(&ws_url, "Wayfern.getFingerprint", json!({}))
+        .send_cdp_command(&browser.ws_url, "Wayfern.getFingerprint", json!({}))
         .await;
       let result = match get_result {
         Ok(r) => r,
         Err(e) => {
-          cleanup().await;
+          browser.stop();
           return Err(format!("Failed to get fingerprint: {e}").into());
         }
       };
@@ -1370,7 +1419,7 @@ impl WayfernManager {
     let mut normalized = match normalized {
       Some(fp) => fp,
       None => {
-        cleanup().await;
+        browser.stop();
         return Err(
           format!(
             "Failed to generate a host-compatible fingerprint after {FINGERPRINT_GENERATION_ATTEMPTS} attempts (last: {last_reject}). \
@@ -1432,7 +1481,7 @@ impl WayfernManager {
 
     let fingerprint = normalized;
 
-    cleanup().await;
+    browser.stop();
 
     let fingerprint_json = serde_json::to_string(&fingerprint)
       .map_err(|e| format!("Failed to serialize fingerprint: {e}"))?;
