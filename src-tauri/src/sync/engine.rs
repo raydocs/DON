@@ -1593,6 +1593,13 @@ impl SyncEngine {
     proxy_id: &str,
     app_handle: Option<&tauri::AppHandle>,
   ) -> SyncResult<()> {
+    // A late object notification must not recreate a proxy already deleted
+    // by a tombstone, even if an older upload left its remote JSON behind.
+    let tombstone_key = format!("tombstones/proxies/{proxy_id}.json");
+    if self.client.stat(&tombstone_key).await?.exists {
+      return Ok(());
+    }
+
     let proxy_manager = &crate::proxy_manager::PROXY_MANAGER;
     let proxies = proxy_manager.get_stored_proxies();
     let local_proxy = proxies.iter().find(|p| p.id == proxy_id).cloned();
@@ -1646,15 +1653,9 @@ impl SyncEngine {
       .upload_config_json(&remote_key, &json, updated_proxy.updated_at.unwrap_or(0))
       .await?;
 
-    // Update local proxy with new last_sync (always write plaintext locally)
-    let proxy_manager = &crate::proxy_manager::PROXY_MANAGER;
-    let proxy_file = proxy_manager.get_proxy_file_path(&proxy.id);
-    fs::write(&proxy_file, &json).map_err(|e| {
-      SyncError::IoError(format!(
-        "Failed to update proxy file {}: {e}",
-        proxy_file.display()
-      ))
-    })?;
+    crate::proxy_manager::PROXY_MANAGER
+      .mark_stored_proxy_synced(&proxy.id, updated_proxy.last_sync)
+      .map_err(SyncError::IoError)?;
 
     log::info!("Proxy {} uploaded", proxy.id);
     Ok(())
@@ -1730,6 +1731,13 @@ impl SyncEngine {
     group_id: &str,
     app_handle: Option<&tauri::AppHandle>,
   ) -> SyncResult<()> {
+    // A late upload notification can follow tombstone processing. The stale
+    // remote object must not recreate the group that was just deleted locally.
+    let tombstone_key = format!("tombstones/groups/{group_id}.json");
+    if self.client.stat(&tombstone_key).await?.exists {
+      return Ok(());
+    }
+
     let local_group = {
       let group_manager = crate::group_manager::GROUP_MANAGER.lock().unwrap();
       let groups = group_manager.get_all_groups().unwrap_or_default();
@@ -4281,6 +4289,257 @@ pub async fn rollover_encryption_for_all_entities(
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[tokio::test]
+  async fn queued_proxy_sync_does_not_download_a_tombstoned_remote_copy() {
+    use crate::proxy_manager::{StoredProxy, PROXY_MANAGER};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let server = MockServer::start().await;
+    let engine = SyncEngine::new(server.uri(), "isolated-test-token".into());
+
+    for tombstoned in [true, false] {
+      server.reset().await;
+      let mut proxy = StoredProxy::new(
+        "Remote proxy".into(),
+        crate::browser::ProxySettings {
+          proxy_type: "http".into(),
+          host: "proxy.invalid".into(),
+          port: 8080,
+          username: None,
+          password: None,
+          vless_uri: None,
+        },
+      );
+      proxy.sync_enabled = true;
+      proxy.updated_at = Some(1);
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(serde_json::json!({
+          "key": format!("tombstones/proxies/{}.json", proxy.id)
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": tombstoned
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(
+          serde_json::json!({"key": format!("proxies/{}.json", proxy.id)}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"exists": true})))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/presign-download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "url": format!("{}/download", server.uri()), "expiresAt": "unused"
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("GET"))
+        .and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&proxy))
+        .mount(&server)
+        .await;
+
+      // Tombstone processing already removed the local record. A delayed
+      // notification still points at a remote copy left by an earlier upload.
+      engine.sync_proxy(&proxy.id, None).await.unwrap();
+      let saved = PROXY_MANAGER
+        .get_stored_proxies()
+        .into_iter()
+        .find(|p| p.id == proxy.id);
+      PROXY_MANAGER.remove_from_memory(&proxy.id);
+      let file = PROXY_MANAGER.get_proxy_file_path(&proxy.id);
+      if tombstoned {
+        assert!(
+          saved.is_none(),
+          "late sync resurrected tombstoned proxy in memory"
+        );
+        assert!(
+          !file.exists(),
+          "late sync resurrected tombstoned proxy on disk"
+        );
+      } else {
+        let saved = saved.unwrap();
+        assert_eq!(saved.name, proxy.name);
+        assert_eq!(saved.updated_at, Some(1));
+        assert!(
+          file.exists(),
+          "non-tombstoned remote proxy must still download"
+        );
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn queued_group_sync_does_not_download_a_tombstoned_remote_copy() {
+    use crate::group_manager::{ProfileGroup, GROUP_MANAGER};
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let server = MockServer::start().await;
+    let engine = SyncEngine::new(server.uri(), "isolated-test-token".to_string());
+    let group = ProfileGroup {
+      id: uuid::Uuid::new_v4().to_string(),
+      name: "Remote group".to_string(),
+      sync_enabled: true,
+      last_sync: None,
+      updated_at: Some(1),
+    };
+
+    for tombstoned in [true, false] {
+      server.reset().await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(serde_json::json!({
+          "key": format!("tombstones/groups/{}.json", group.id)
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": tombstoned
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/stat"))
+        .and(body_json(
+          serde_json::json!({"key": format!("groups/{}.json", group.id)}),
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "exists": true
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("POST"))
+        .and(path("/v1/objects/presign-download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+          "url": format!("{}/download", server.uri()), "expiresAt": "unused"
+        })))
+        .mount(&server)
+        .await;
+      Mock::given(method("GET"))
+        .and(path("/download"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&group))
+        .mount(&server)
+        .await;
+
+      // A late object notification arrives after local tombstone deletion,
+      // while the remote object was recreated by an earlier peer upload.
+      engine.sync_group(&group.id, None).await.unwrap();
+      let groups = GROUP_MANAGER.lock().unwrap().get_all_groups().unwrap();
+      if tombstoned {
+        assert!(
+          groups.is_empty(),
+          "late sync resurrected a tombstoned group"
+        );
+      } else {
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, group.id);
+        assert_eq!(groups[0].name, group.name);
+        assert_eq!(groups[0].updated_at, Some(1));
+      }
+    }
+  }
+
+  #[tokio::test]
+  async fn proxy_upload_writeback_preserves_deletion_and_newer_edits() {
+    use crate::proxy_manager::{StoredProxy, PROXY_MANAGER};
+    use axum::{routing::post, routing::put, Json, Router};
+    let temp = tempfile::tempdir().unwrap();
+    let _guard = crate::app_dirs::set_test_data_dir(temp.path().to_path_buf());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let upload_url = format!("{url}/upload");
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let app =
+      Router::new()
+        .route(
+          "/v1/objects/presign-upload",
+          post(move || async move {
+            Json(serde_json::json!({"url": upload_url, "expiresAt": "unused"}))
+          }),
+        )
+        .route(
+          "/upload",
+          put({
+            let started = started.clone();
+            let release = release.clone();
+            move || {
+              let started = started.clone();
+              let release = release.clone();
+              async move {
+                started.notify_one();
+                release.notified().await;
+                axum::http::StatusCode::OK
+              }
+            }
+          }),
+        );
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let engine = SyncEngine::new(url, "isolated-test-token".to_string());
+    for delete in [true, false] {
+      let mut proxy = StoredProxy::new(
+        "Before upload".to_string(),
+        crate::browser::ProxySettings {
+          proxy_type: "http".to_string(),
+          host: "proxy.invalid".to_string(),
+          port: 8080,
+          username: None,
+          password: None,
+          vless_uri: None,
+        },
+      );
+      proxy.sync_enabled = true;
+      proxy.updated_at = Some(1);
+      let file = PROXY_MANAGER.get_proxy_file_path(&proxy.id);
+      fs::create_dir_all(file.parent().unwrap()).unwrap();
+      fs::write(&file, serde_json::to_vec(&proxy).unwrap()).unwrap();
+      PROXY_MANAGER.upsert_stored_proxy(proxy.clone());
+      let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(engine.upload_proxy(&proxy), async {
+          started.notified().await;
+          if delete {
+            // The scheduler processes a tombstone while the upload awaits HTTP.
+            PROXY_MANAGER.remove_from_memory(&proxy.id);
+            fs::remove_file(&file).unwrap();
+          } else {
+            let mut edited = proxy.clone();
+            edited.name = "Newer local edit".to_string();
+            edited.updated_at = Some(2);
+            edited.sync_enabled = false;
+            fs::write(&file, serde_json::to_vec(&edited).unwrap()).unwrap();
+            PROXY_MANAGER.upsert_stored_proxy(edited);
+          }
+          release.notify_one();
+        })
+      })
+      .await
+      .expect("upload and concurrent local mutation should complete");
+      result.unwrap();
+      PROXY_MANAGER.remove_from_memory(&proxy.id);
+      if delete {
+        assert!(
+          !file.exists(),
+          "completed upload resurrected a tombstoned proxy JSON"
+        );
+      } else {
+        let saved: StoredProxy = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(saved.name, "Newer local edit");
+        assert_eq!(saved.updated_at, Some(2));
+        assert!(!saved.sync_enabled);
+        assert!(saved.last_sync.is_some());
+      }
+    }
+    server.abort();
+  }
 
   #[test]
   fn test_critical_failure_message_carries_the_cause() {

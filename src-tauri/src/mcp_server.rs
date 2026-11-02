@@ -2422,7 +2422,7 @@ impl McpServer {
       }
       // No capability gate on the stop. A lapsed plan must never be the reason
       // an agent cannot end something that is spending hours.
-      "stop_remote_session" => Self::handle_stop_remote_session(arguments).await,
+      "stop_remote_session" => self.handle_stop_remote_session(arguments).await,
       // Remote fleet observability. Reads only, and free: being unable to see
       // that a session you are already paying for has become usable is not a
       // feature worth withholding.
@@ -4437,7 +4437,7 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to list extensions: {e}"),
     })?;
-    Ok(serde_json::to_value(extensions).unwrap())
+    Self::json_content(&extensions)
   }
 
   async fn handle_list_extension_groups(&self) -> Result<serde_json::Value, McpError> {
@@ -4452,7 +4452,7 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to list extension groups: {e}"),
     })?;
-    Ok(serde_json::to_value(groups).unwrap())
+    Self::json_content(&groups)
   }
 
   async fn handle_add_extension(
@@ -4488,7 +4488,7 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to add extension: {e}"),
       })?;
-    Ok(serde_json::to_value(extension).unwrap())
+    Self::json_content(&extension)
   }
 
   async fn handle_update_extension(
@@ -4534,7 +4534,7 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to update extension: {e}"),
     })?;
-    Ok(serde_json::to_value(extension).unwrap())
+    Self::json_content(&extension)
   }
 
   async fn handle_create_extension_group(
@@ -4559,7 +4559,7 @@ impl McpServer {
       code: -32000,
       message: format!("Failed to create extension group: {e}"),
     })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Self::json_content(&group)
   }
 
   async fn handle_update_extension_group(
@@ -4599,7 +4599,7 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to update extension group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Self::json_content(&group)
   }
 
   async fn handle_add_extension_to_group(
@@ -4620,7 +4620,7 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to add extension to group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Self::json_content(&group)
   }
 
   async fn handle_remove_extension_from_group(
@@ -4641,7 +4641,7 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to remove extension from group: {e}"),
       })?;
-    Ok(serde_json::to_value(group).unwrap())
+    Self::json_content(&group)
   }
 
   fn group_and_extension_ids(arguments: &serde_json::Value) -> Result<(&str, &str), McpError> {
@@ -4686,7 +4686,12 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to delete extension: {e}"),
       })?;
-    Ok(serde_json::json!({"success": true}))
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": "Extension deleted"
+      }]
+    }))
   }
 
   async fn handle_delete_extension_group_mcp(
@@ -4716,7 +4721,12 @@ impl McpServer {
     if let Err(e) = crate::events::emit_empty("extensions-changed") {
       log::error!("Failed to emit extensions-changed event: {e}");
     }
-    Ok(serde_json::json!({"success": true}))
+    Ok(serde_json::json!({
+      "content": [{
+        "type": "text",
+        "text": "Extension group deleted"
+      }]
+    }))
   }
 
   async fn handle_assign_extension_group_to_profile(
@@ -4778,7 +4788,7 @@ impl McpServer {
         code: -32000,
         message: format!("Failed to assign extension group: {e}"),
       })?;
-    Ok(serde_json::to_value(profile).unwrap())
+    Self::json_content(&profile)
   }
 
   async fn handle_get_team_locks(&self) -> Result<serde_json::Value, McpError> {
@@ -6023,15 +6033,24 @@ impl McpServer {
 
   /// Stop a remote session and settle what it cost.
   async fn handle_stop_remote_session(
+    &self,
     arguments: &serde_json::Value,
   ) -> Result<serde_json::Value, McpError> {
     let session_id = Self::require_str(arguments, "session_id")?;
+    let app = {
+      let inner = self.inner.lock().await;
+      inner.app_handle.clone().ok_or_else(|| McpError {
+        code: -32000,
+        message: "MCP server not properly initialized".to_string(),
+      })?
+    };
     let outcome = crate::remote_session::end_remote_session(session_id)
       .await
       .map_err(|e| McpError {
         code: -32000,
         message: e.to_error_json(),
       })?;
+    crate::remote_session::note_session_stopped(&app, session_id);
     Self::json_content(&outcome)
   }
 
@@ -6611,5 +6630,21 @@ mod tests {
       "tools/list",
       None
     )));
+  }
+
+  #[tokio::test]
+  async fn test_extension_tool_results_have_content_envelope() {
+    let server = McpServer::new();
+    for name in ["list_extensions", "list_extension_groups"] {
+      let result = server
+        .dispatch_tool_call(name, &serde_json::json!({}))
+        .await
+        .unwrap();
+      assert!(
+        result.get("content").is_some(),
+        "tool {name} must return content envelope"
+      );
+      assert!(result["content"].is_array());
+    }
   }
 }

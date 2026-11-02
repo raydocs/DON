@@ -149,9 +149,11 @@ impl SyncScheduler {
   }
 
   pub async fn mark_profile_stopped(&self, profile_id: &str) {
-    let mut running = self.running_profiles.lock().await;
-    running.remove(profile_id);
-    log::debug!("Marked profile {} as stopped", profile_id);
+    {
+      let mut running = self.running_profiles.lock().await;
+      running.remove(profile_id);
+      log::debug!("Marked profile {} as stopped", profile_id);
+    }
 
     let mut pending = self.pending_profiles.lock().await;
     if pending.contains_key(profile_id) {
@@ -802,11 +804,13 @@ impl SyncScheduler {
           if let Some(proxy) = proxies.iter().find(|p| p.id == entity_id) {
             if proxy.sync_enabled {
               log::info!("Proxy {} was deleted remotely, deleting locally", entity_id);
+              // Remove under the cache lock before unlinking, so upload bookkeeping
+              // either finishes before the unlink or sees the proxy is gone.
+              proxy_manager.remove_from_memory(&entity_id);
               let proxy_file = proxy_manager.get_proxy_file_path(&entity_id);
               if proxy_file.exists() {
                 let _ = std::fs::remove_file(&proxy_file);
               }
-              proxy_manager.remove_from_memory(&entity_id);
               let _ = events::emit("stored-proxies-changed", ());
             }
           }

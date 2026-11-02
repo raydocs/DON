@@ -330,6 +330,15 @@ test("two real app devices reconcile profile files and every config entity with 
       },
       "remote tombstones delete every entity from device A",
     );
+    for (const device of [deviceA, deviceB]) {
+      await assert.rejects(
+        readFile(
+          path.join(device.dataRoot, "data", "proxies", `${proxy.id}.json`),
+        ),
+        { code: "ENOENT" },
+        "deleted proxy must not survive on disk and return after restart",
+      );
+    }
   } catch (error) {
     await Promise.all([deviceA.capture("failure"), deviceB.capture("failure")]);
     throw error;

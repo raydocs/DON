@@ -3062,6 +3062,7 @@ pub fn remote_launch_profile_rules(
   tag = "profiles"
 )]
 async fn stop_remote_session(
+  State(state): State<ApiServerState>,
   Path(id): Path<String>,
 ) -> Result<Json<StopRemoteResponse>, (StatusCode, String)> {
   // Without this route, `run-remote` hands back a session id nothing can act
@@ -3070,6 +3071,8 @@ async fn stop_remote_session(
   let outcome = crate::remote_session::end_remote_session(&id)
     .await
     .map_err(remote_session_error_response)?;
+
+  crate::remote_session::note_session_stopped(&state.app_handle, &id);
 
   Ok(Json(StopRemoteResponse {
     session_id: outcome.session_id,

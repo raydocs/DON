@@ -660,7 +660,7 @@ export class SyncService implements OnModuleInit {
     // verbatim) could wipe an entire shared namespace. Enforce scope, and
     // refuse an empty scoped prefix (which would match the whole scope).
     this.validateKeyAccess(ctx, prefix);
-    if (ctx.mode === "cloud" && prefix.length === 0) {
+    if (ctx.mode === "cloud" && dto.prefix.replace(/\/+$/, "").length === 0) {
       throw new ForbiddenException("Refusing to delete an empty prefix");
     }
     let deletedCount = 0;

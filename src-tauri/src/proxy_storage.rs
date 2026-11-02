@@ -11,6 +11,8 @@ pub struct ProxyConfig {
   pub local_url: Option<String>,
   pub pid: Option<u32>,
   #[serde(default)]
+  pub pid_start_time: Option<u64>,
+  #[serde(default)]
   pub profile_id: Option<String>,
   #[serde(default)]
   pub bypass_rules: Vec<String>,
@@ -50,6 +52,7 @@ impl ProxyConfig {
       ignore_proxy_certificate: None,
       local_url: None,
       pid: None,
+      pid_start_time: None,
       profile_id: None,
       bypass_rules: Vec::new(),
       blocklist_file: None,

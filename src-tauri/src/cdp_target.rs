@@ -708,6 +708,7 @@ impl CdpTarget {
         let mut connection = dial_relay(ws_url, bearer).await?;
         if let Err(e) = connection.attach_to_page().await {
           log::warn!("Could not attach to a page in remote session {session_id}: {e}");
+          connection.close().await;
           return Err(e);
         }
         Ok(connection)

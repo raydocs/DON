@@ -376,6 +376,75 @@ mod tests {
   }
 
   #[test]
+  fn scan_reports_optional_host_advisory_without_proxy_control() {
+    for (layout, unpacked) in [("", false), ("Default", false), ("Default", true)] {
+      for (manifest_version, permissions) in [
+        (2, serde_json::json!(["webRequest", "webRequestBlocking"])),
+        (3, serde_json::json!(["declarativeNetRequest"])),
+      ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("user-data");
+        let profile = root.join(layout);
+        let extension = if unpacked {
+          tmp.path().join("unpacked")
+        } else {
+          profile.join("Extensions").join(CRX_ID).join("1.0.0_0")
+        };
+        let manifest_path = extension.join("manifest.json");
+        let mut manifest = serde_json::json!({
+          "name": "Example VPN",
+          "version": "1.0.0",
+          "manifest_version": manifest_version,
+          "permissions": permissions,
+          "optional_permissions": ["*://*/*"]
+        });
+        write(&manifest_path, &manifest.to_string());
+        let preferences_path = profile.join("Preferences");
+        let preference_extension_path = if unpacked {
+          extension.clone()
+        } else {
+          PathBuf::from(CRX_ID).join("1.0.0_0")
+        };
+        let preferences = preferences_json(CRX_ID, 1, &preference_extension_path);
+        write(&preferences_path, &preferences);
+
+        let mut out = Vec::new();
+        assert!(scan_browser_extensions(&root, &mut out, Instant::now()));
+        assert_eq!(
+          out.len(),
+          1,
+          "MV{manifest_version}, {layout:?}, unpacked={unpacked}"
+        );
+        assert_eq!(out[0].key, format!("crx:{CRX_ID}"));
+        assert_eq!(out[0].source, "browser");
+        assert_eq!(out[0].confidence, "likely");
+        assert!(
+          !out[0].proxy_control,
+          "optional hosts do not grant proxy control"
+        );
+        assert!(out[0].signals.contains(&"broadHostPermissions".to_string()));
+        assert_eq!(fs::read_to_string(&preferences_path).unwrap(), preferences);
+
+        // Request filtering plus broad hosts is not enough without a VPN identity.
+        manifest["name"] = serde_json::json!("Content Blocker");
+        write(&manifest_path, &manifest.to_string());
+        out.clear();
+        assert!(scan_browser_extensions(&root, &mut out, Instant::now()));
+        assert!(out.is_empty());
+
+        manifest["name"] = serde_json::json!("Example VPN");
+        write(&manifest_path, &manifest.to_string());
+        write(
+          &preferences_path,
+          &preferences_json(CRX_ID, 0, &preference_extension_path),
+        );
+        assert!(scan_browser_extensions(&root, &mut out, Instant::now()));
+        assert!(out.is_empty(), "disabled extensions must not be reported");
+      }
+    }
+  }
+
+  #[test]
   fn scan_reads_the_highest_version_directory() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path();

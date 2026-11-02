@@ -65,8 +65,16 @@ export function DeleteGroupDialog({
     }
   }, [group, t]);
 
+  const handleClose = useCallback(() => {
+    setError(null);
+    setDeleteAction("move");
+    setAssociatedProfiles([]);
+    onClose();
+  }, [onClose]);
+
   useEffect(() => {
     if (isOpen && group) {
+      setDeleteAction("move");
       void loadAssociatedProfiles();
     }
   }, [isOpen, group, loadAssociatedProfiles]);
@@ -95,7 +103,7 @@ export function DeleteGroupDialog({
 
       toast.success(t("groups.deleteSuccess"));
       onGroupDeleted();
-      onClose();
+      handleClose();
     } catch (err) {
       console.error("Failed to delete group:", err);
       const errorMessage = translateBackendError(t, err);
@@ -104,14 +112,7 @@ export function DeleteGroupDialog({
     } finally {
       setIsDeleting(false);
     }
-  }, [group, deleteAction, associatedProfiles, onGroupDeleted, onClose, t]);
-
-  const handleClose = useCallback(() => {
-    setError(null);
-    setDeleteAction("move");
-    setAssociatedProfiles([]);
-    onClose();
-  }, [onClose]);
+  }, [group, deleteAction, associatedProfiles, onGroupDeleted, handleClose, t]);
 
   return (
     <Dialog open={isOpen} onOpenChange={handleClose}>

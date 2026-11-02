@@ -850,6 +850,24 @@ impl ProxyManager {
     stored_proxies.remove(proxy_id);
   }
 
+  /// Apply upload bookkeeping to the current record, never the pre-upload snapshot.
+  pub fn mark_stored_proxy_synced(
+    &self,
+    proxy_id: &str,
+    last_sync: Option<u64>,
+  ) -> Result<(), String> {
+    let mut stored_proxies = self.stored_proxies.lock().unwrap();
+    let Some(proxy) = stored_proxies.get_mut(proxy_id) else {
+      return Ok(());
+    };
+    let mut updated = proxy.clone();
+    updated.last_sync = last_sync;
+    // Keep the lock through persistence so deletion cannot race this write.
+    self.save_proxy(&updated).map_err(|e| e.to_string())?;
+    *proxy = updated;
+    Ok(())
+  }
+
   // Get all stored proxies
   pub fn get_stored_proxies(&self) -> Vec<StoredProxy> {
     let stored_proxies = self.stored_proxies.lock().unwrap();
@@ -3261,6 +3279,7 @@ mod tests {
       ignore_proxy_certificate: None,
       local_url: Some("http://127.0.0.1:19001".to_string()),
       pid: Some(live_pid),
+      pid_start_time: None,
       profile_id: None,
       bypass_rules: Vec::new(),
       blocklist_file: None,
@@ -3276,6 +3295,7 @@ mod tests {
       ignore_proxy_certificate: None,
       local_url: Some("http://127.0.0.1:19002".to_string()),
       pid: Some(dead_pid),
+      pid_start_time: None,
       profile_id: None,
       bypass_rules: Vec::new(),
       blocklist_file: None,
@@ -3319,6 +3339,7 @@ mod tests {
       ignore_proxy_certificate: Some(true),
       local_url: Some("http://127.0.0.1:18080".to_string()),
       pid: Some(12345),
+      pid_start_time: None,
       profile_id: Some("prof_abc".to_string()),
       bypass_rules: vec!["*.local".to_string(), "192.168.*".to_string()],
       blocklist_file: None,
@@ -3756,6 +3777,7 @@ mod tests {
       ignore_proxy_certificate: None,
       local_url: None,
       pid: Some(dead_pid),
+      pid_start_time: None,
       profile_id: None,
       bypass_rules: Vec::new(),
       blocklist_file: None,

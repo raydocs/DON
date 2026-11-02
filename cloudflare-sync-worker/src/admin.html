@@ -319,6 +319,16 @@
       }, 3000);
     }
 
+    function esc(s) {
+      return String(s ?? '').replace(/[&<>"']/g, c => ({
+        '&': '&amp;',
+        '<': '&lt;',
+        '>': '&gt;',
+        '"': '&quot;',
+        "'": '&#39;'
+      }[c]));
+    }
+
     async function apiRequest(path, options = {}) {
       const headers = {
         'Content-Type': 'application/json',
@@ -427,12 +437,12 @@
       tbody.innerHTML = usersList.map(u => `
         <tr class="hover:bg-zinc-900/40 transition">
           <td class="py-3 px-4">
-            <div class="font-medium text-white">${u.username}</div>
-            <div class="text-[11px] text-zinc-500">${u.note || '—'}</div>
+            <div class="font-medium text-white">${esc(u.username)}</div>
+            <div class="text-[11px] text-zinc-500">${esc(u.note || '—')}</div>
           </td>
           <td class="py-3 px-4">
             <span class="px-2 py-0.5 rounded text-[10px] uppercase font-mono ${u.role === 'admin' ? 'bg-purple-500/10 text-purple-400 border border-purple-500/20' : 'bg-zinc-800 text-zinc-300'}">
-              ${u.role}
+              ${esc(u.role)}
             </span>
           </td>
           <td class="py-3 px-4">
@@ -443,23 +453,23 @@
           </td>
           <td class="py-3 px-4 font-mono text-[11px]">
             <div class="flex items-center gap-2">
-              <span class="bg-zinc-900 px-2 py-1 rounded border border-border text-zinc-300 max-w-[160px] truncate">${u.token_hash}</span>
-              <button onclick="copyClientConfig('${u.token_hash}')" class="text-zinc-400 hover:text-emerald-400 text-xs px-2 py-1 rounded hover:bg-zinc-800" title="复制客户端配置">
+              <span class="bg-zinc-900 px-2 py-1 rounded border border-border text-zinc-300 max-w-[160px] truncate">${esc(u.token_hash)}</span>
+              <button onclick="copyClientConfig(this.dataset.token)" data-token="${esc(u.token_hash)}" class="text-zinc-400 hover:text-emerald-400 text-xs px-2 py-1 rounded hover:bg-zinc-800" title="复制客户端配置">
                 <i class="fa-regular fa-copy"></i>
               </button>
             </div>
           </td>
           <td class="py-3 px-4">
-            <span class="text-zinc-300 font-medium">${u.assigned_profiles_count || 0} 个环境</span>
+            <span class="text-zinc-300 font-medium">${Number(u.assigned_profiles_count) || 0} 个环境</span>
           </td>
           <td class="py-3 px-4 text-right space-x-1">
-            <button onclick="toggleUserActive('${u.id}', ${u.is_active ? 0 : 1})" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300">
+            <button onclick="toggleUserActive(this.dataset.id, ${u.is_active ? 0 : 1})" data-id="${esc(u.id)}" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300">
               ${u.is_active ? '禁用' : '启用'}
             </button>
-            <button onclick="resetUserToken('${u.id}')" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300" title="重新生成 Token">
+            <button onclick="resetUserToken(this.dataset.id)" data-id="${esc(u.id)}" class="px-2 py-1 rounded text-xs border border-border hover:bg-zinc-800 text-zinc-300" title="重新生成 Token">
               重置 Token
             </button>
-            <button onclick="deleteUser('${u.id}', '${u.username}')" class="px-2 py-1 rounded text-xs border border-rose-900/40 text-rose-400 hover:bg-rose-950/40">
+            <button onclick="deleteUser(this.dataset.id, this.dataset.username)" data-id="${esc(u.id)}" data-username="${esc(u.username)}" class="px-2 py-1 rounded text-xs border border-rose-900/40 text-rose-400 hover:bg-rose-950/40">
               删除
             </button>
           </td>
@@ -477,21 +487,21 @@
       }
 
       tbody.innerHTML = profilesList.map(p => {
-        const assignedNames = (p.assignments || []).map(a => a.username || 'User').join(', ');
+        const assignedNames = (p.assignments || []).map(a => esc(a.username || 'User')).join(', ');
         return `
           <tr class="hover:bg-zinc-900/40 transition">
             <td class="py-3 px-4">
               <div class="font-medium text-white flex items-center gap-1.5">
                 <i class="fa-solid fa-cube text-emerald-400 text-xs"></i>
-                ${p.name}
+                ${esc(p.name)}
               </div>
-              <div class="text-[10px] text-zinc-500 font-mono">${p.id}</div>
+              <div class="text-[10px] text-zinc-500 font-mono">${esc(p.id)}</div>
             </td>
             <td class="py-3 px-4">
-              <span class="text-zinc-300">${p.browser} ${p.version}</span>
+              <span class="text-zinc-300">${esc(p.browser)} ${esc(p.version)}</span>
             </td>
             <td class="py-3 px-4 font-mono text-[11px] text-zinc-400">
-              ${p.proxy_summary || '直连 (Direct)'}
+              ${esc(p.proxy_summary || '直连 (Direct)')}
             </td>
             <td class="py-3 px-4 font-mono text-zinc-300">
               ${(p.size_bytes / 1024).toFixed(1)} KB
@@ -500,7 +510,7 @@
               ${assignedNames ? `<span class="text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded text-[11px]">${assignedNames}</span>` : '<span class="text-zinc-500">仅 Admin 可见</span>'}
             </td>
             <td class="py-3 px-4 text-right">
-              <button onclick="openAssignModal('${p.id}')" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs transition">
+              <button onclick="openAssignModal(this.dataset.profileId)" data-profile-id="${esc(p.id)}" class="px-2.5 py-1 bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-400 border border-emerald-500/30 rounded text-xs transition">
                 <i class="fa-solid fa-user-gear mr-1"></i> 分配授权
               </button>
             </td>
@@ -520,13 +530,13 @@
 
       tbody.innerHTML = events.map(e => `
         <tr class="hover:bg-zinc-900/40 transition">
-          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px]">${new Date(e.created_at).toLocaleString()}</td>
-          <td class="py-3 px-4 font-medium text-white">${e.username || e.user_id}</td>
+          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px]">${esc(new Date(e.created_at).toLocaleString())}</td>
+          <td class="py-3 px-4 font-medium text-white">${esc(e.username || e.user_id)}</td>
           <td class="py-3 px-4">
-            <span class="px-2 py-0.5 rounded text-[10px] uppercase font-mono bg-zinc-800 text-zinc-300">${e.event_type}</span>
+            <span class="px-2 py-0.5 rounded text-[10px] uppercase font-mono bg-zinc-800 text-zinc-300">${esc(e.event_type)}</span>
           </td>
-          <td class="py-3 px-4 text-emerald-400">${e.profile_name || e.profile_id}</td>
-          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px] max-w-xs truncate">${e.details || '—'}</td>
+          <td class="py-3 px-4 text-emerald-400">${esc(e.profile_name || e.profile_id)}</td>
+          <td class="py-3 px-4 text-zinc-400 font-mono text-[11px] max-w-xs truncate">${esc(e.details || '—')}</td>
         </tr>
       `).join('');
     }
@@ -608,10 +618,10 @@
         container.innerHTML = usersList.map(u => `
           <label class="flex items-center justify-between p-3 rounded-lg border border-border hover:bg-zinc-900/60 cursor-pointer transition">
             <div class="flex items-center gap-2.5">
-              <input type="checkbox" value="${u.id}" ${assignedUserIds.has(u.id) ? 'checked' : ''} class="assign-user-checkbox size-4 accent-emerald-500 rounded" />
+              <input type="checkbox" value="${esc(u.id)}" ${assignedUserIds.has(u.id) ? 'checked' : ''} class="assign-user-checkbox size-4 accent-emerald-500 rounded" />
               <div>
-                <div class="text-xs font-medium text-white">${u.username}</div>
-                <div class="text-[10px] text-zinc-500">${u.note || u.role}</div>
+                <div class="text-xs font-medium text-white">${esc(u.username)}</div>
+                <div class="text-[10px] text-zinc-500">${esc(u.note || u.role)}</div>
               </div>
             </div>
             <span class="text-[10px] px-2 py-0.5 rounded ${u.is_active ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}">

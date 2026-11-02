@@ -178,6 +178,26 @@ fn normalize_domain(raw: &str) -> Option<String> {
   if d.contains(char::is_whitespace) || d.contains("://") {
     return None;
   }
+  // Reject IP literals and standard hosts-file loopback/metadata names that must
+  // not be turned into blocking rules.
+  if d.parse::<std::net::IpAddr>().is_ok()
+    || matches!(
+      d.as_str(),
+      "localhost"
+        | "localhost.localdomain"
+        | "local"
+        | "broadcasthost"
+        | "ip6-localhost"
+        | "ip6-loopback"
+        | "ip6-localnet"
+        | "ip6-mcastprefix"
+        | "ip6-allnodes"
+        | "ip6-allrouters"
+        | "ip6-allhosts"
+    )
+  {
+    return None;
+  }
   Some(d)
 }
 

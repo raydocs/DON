@@ -99,9 +99,13 @@ export function usePermissions(active = true): UsePermissionsReturn {
           await permissions.requestCameraPermission();
         }
 
-        // Read once immediately. The hook's macOS poll keeps watching for
-        // delayed TCC propagation without holding this request (and any next
-        // system prompt) open for several extra seconds.
+        // Poll for user response to the system prompt
+        for (let attempt = 0; attempt < 8; attempt += 1) {
+          const granted = await readPermission();
+          if (granted) return true;
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+
         return readPermission();
       } catch (error) {
         console.error(`Failed to request ${type} permission on macOS:`, error);
