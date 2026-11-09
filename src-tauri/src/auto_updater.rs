@@ -474,11 +474,22 @@ impl AutoUpdater {
   /// Get the latest installed version for a browser from the downloaded browsers registry
   pub fn get_latest_installed_version(&self, browser: &str) -> Option<String> {
     let registry = crate::downloaded_browsers_registry::DownloadedBrowsersRegistry::instance();
-    let versions = registry.get_downloaded_versions(browser);
-    versions
+    let versions: Vec<String> = registry
+      .get_downloaded_versions(browser)
       .into_iter()
       .filter(|v| registry.is_browser_downloaded(browser, v))
-      .max_by(|a, b| self.compare_versions(a, b))
+      .collect();
+    crate::api_client::preferred_installed_version(browser, &versions)
+  }
+
+  /// Whether a profile on `current` should move to `target`. Wayfern also
+  /// moves down, back to the pinned build.
+  fn should_move_profile(&self, browser: &str, target: &str, current: &str) -> bool {
+    if browser == "wayfern" {
+      target != current
+    } else {
+      self.is_version_newer(target, current)
+    }
   }
 
   /// Update a single profile to the latest installed version for its browser.
@@ -490,7 +501,7 @@ impl AutoUpdater {
   ) -> Option<crate::profile::BrowserProfile> {
     let latest = self.get_latest_installed_version(&profile.browser)?;
 
-    if !self.is_version_newer(&latest, &profile.version) {
+    if !self.should_move_profile(&profile.browser, &latest, &profile.version) {
       return None;
     }
 
@@ -551,13 +562,15 @@ impl AutoUpdater {
       }
 
       // Find the latest installed version that actually exists on disk
-      let latest_installed = installed_versions
-        .iter()
-        .filter(|v| registry.is_browser_downloaded(&browser, v))
-        .max_by(|a, b| self.compare_versions(a, b));
+      let latest_installed = crate::api_client::preferred_installed_version(
+        &browser,
+        installed_versions
+          .iter()
+          .filter(|v| registry.is_browser_downloaded(&browser, v)),
+      );
 
       let latest_version = match latest_installed {
-        Some(v) => v.clone(),
+        Some(v) => v,
         None => continue,
       };
 
@@ -566,7 +579,7 @@ impl AutoUpdater {
           continue;
         }
 
-        if !self.is_version_newer(&latest_version, &profile.version) {
+        if !self.should_move_profile(&browser, &latest_version, &profile.version) {
           continue;
         }
 
@@ -715,6 +728,16 @@ mod tests {
     assert!(updater.is_version_newer("2.0.0", "1.9.9"));
     assert!(!updater.is_version_newer("1.0.0", "1.0.1"));
     assert!(!updater.is_version_newer("1.0.0", "1.0.0"));
+  }
+
+  #[test]
+  fn wayfern_profiles_move_back_down_to_the_pin() {
+    let updater = AutoUpdater::instance();
+    let pin = crate::api_client::DON_PINNED_WAYFERN_VERSION;
+    assert!(updater.should_move_profile("wayfern", pin, "155.0.8059.79"));
+    assert!(updater.should_move_profile("wayfern", pin, "150.0.7871.100"));
+    assert!(!updater.should_move_profile("wayfern", pin, pin));
+    assert!(!updater.should_move_profile("chromium", "1.0.0", "2.0.0"));
   }
 
   #[test]
