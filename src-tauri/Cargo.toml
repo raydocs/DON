@@ -26,12 +26,12 @@ path = "src/bin/proxy_server.rs"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
-resvg = "0.48"
+resvg = "0.49"
 
 [dependencies]
 serde_json = "1"
 # Runtime as well as build time: the per-profile window badge is rendered at launch.
-resvg = "0.48"
+resvg = "0.49"
 serde = { version = "1", features = ["derive"] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
@@ -61,7 +61,7 @@ native-tls = "0.2"
 tokio-native-tls = "0.3"
 tokio = { version = "1", features = ["full", "sync"] }
 tokio-util = "0.7"
-sysinfo = "0.39"
+sysinfo = "0.40"
 lazy_static = "1.5"
 # 0.23 turns on `simd-unsafe` by default, decoding via hand-written unsafe
 # AVX2/NEON. This crate decodes attacker-influenced input (proxy CONNECT auth,
@@ -71,11 +71,11 @@ base64 = { version = "0.23", default-features = false, features = ["std"] }
 libc = "0.2"
 async-trait = "0.1"
 futures-util = "0.3"
-zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 tar = "0"
 bzip2 = "0"
 flate2 = "1"
-lzma-rust2 = { version = "0.22", default-features = false, features = ["std", "optimization", "xz"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "optimization", "xz"] }
 msi-extract = "0"
 
 uuid = { version = "1.27", features = ["v4", "serde"] }
@@ -113,7 +113,7 @@ async-socks5 = "0.6"
 
 # Wayfern CDP integration
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.42", features = ["bundled"] }
 yaml-rust2 = { version = "0.13", default-features = false }
 thiserror = "2.0"
 regex-lite = "0.1"
@@ -193,7 +193,7 @@ tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "trace"] }
 futures-util = "0.3"
 serial_test = "4"
-lzma-rust2 = { version = "0.22", features = ["encoder"] }
+lzma-rust2 = { version = "0.25", features = ["encoder"] }
 
 # Integration test configuration
 [[test]]
